@@ -239,6 +239,21 @@ function iiiBinVersion(binPath: string): string | null {
   }
 }
 
+let warnedVersionMismatch = false;
+function warnIfEngineVersionMismatch(iiiBinPath: string | null | undefined): void {
+  if (!iiiBinPath || warnedVersionMismatch) return;
+  const detected = iiiBinVersion(iiiBinPath);
+  if (!detected || detected === IIPINNED_VERSION) return;
+  warnedVersionMismatch = true;
+  const asset = iiiReleaseAsset();
+  const downloadHint = asset
+    ? `curl -fsSL https://github.com/iii-hq/iii/releases/download/iii/v${IIPINNED_VERSION}/${asset} | tar -xz -C ~/.local/bin`
+    : `download v${IIPINNED_VERSION} from https://github.com/iii-hq/iii/releases/tag/iii%2Fv${IIPINNED_VERSION}`;
+  p.log.warn(
+    `iii-engine on PATH is v${detected} but agentmemory v0.9.14+ pins v${IIPINNED_VERSION}. Set AGENTMEMORY_III_VERSION=${detected} to silence, or downgrade with: \`${downloadHint}\``,
+  );
+}
+
 function enginePidfilePath(): string {
   return join(homedir(), ".agentmemory", "iii.pid");
 }
@@ -427,6 +442,7 @@ function spawnEngineBackground(
 }
 
 function startIiiBin(iiiBin: string, configPath: string): boolean {
+  warnIfEngineVersionMismatch(iiiBin);
   const s = p.spinner();
   s.start(`Starting iii-engine: ${iiiBin}`);
   writeEngineState({ kind: "native", configPath });
@@ -622,6 +638,9 @@ async function main() {
 
   if (await isEngineRunning()) {
     p.log.success("iii-engine is running");
+    const attachedBin =
+      whichBinary("iii") ?? fallbackIiiPaths().find((p) => existsSync(p)) ?? null;
+    warnIfEngineVersionMismatch(attachedBin);
     await import("./index.js");
     return;
   }
