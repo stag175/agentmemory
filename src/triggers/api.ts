@@ -760,15 +760,13 @@ export function registerApiTriggers(
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const sessions = await kv.list<Session>(KV.sessions);
-      // #554: agent-scope filter — isolated mode hides sessions
-      // belonging to other roles. ?agentId=* opts out.
-      const queryAgentId = req.query_params?.["agentId"];
-      const wildcardAgent =
-        typeof queryAgentId === "string" && queryAgentId === "*";
-      const explicitAgentId =
-        typeof queryAgentId === "string" && queryAgentId.trim().length > 0
-          ? queryAgentId.trim()
+      const normalizedAgentId =
+        typeof req.query_params?.["agentId"] === "string"
+          ? req.query_params["agentId"].trim()
           : undefined;
+      const wildcardAgent = normalizedAgentId === "*";
+      const explicitAgentId =
+        normalizedAgentId && !wildcardAgent ? normalizedAgentId : undefined;
       const filterAgentId = wildcardAgent
         ? undefined
         : explicitAgentId ??
@@ -795,15 +793,13 @@ export function registerApiTriggers(
       const observations = await kv.list<CompressedObservation>(
         KV.observations(sessionId),
       );
-      // #554: same agent-scope filter as /memories. Caller can override
-      // with ?agentId=<role> or ?agentId=*.
-      const queryAgentId = req.query_params?.["agentId"];
-      const wildcardAgent =
-        typeof queryAgentId === "string" && queryAgentId === "*";
-      const explicitAgentId =
-        typeof queryAgentId === "string" && queryAgentId.trim().length > 0
-          ? queryAgentId.trim()
+      const normalizedAgentId =
+        typeof req.query_params?.["agentId"] === "string"
+          ? req.query_params["agentId"].trim()
           : undefined;
+      const wildcardAgent = normalizedAgentId === "*";
+      const explicitAgentId =
+        normalizedAgentId && !wildcardAgent ? normalizedAgentId : undefined;
       const filterAgentId = wildcardAgent
         ? undefined
         : explicitAgentId ??
@@ -1539,13 +1535,13 @@ export function registerApiTriggers(
       // does not restrict the list endpoint. Pass agentId=* to opt out
       // of the env scope entirely. includeOrphans=true surfaces
       // pre-AGENT_ID memories whose agentId is undefined.
-      const queryAgentId = req.query_params?.["agentId"];
-      const wildcardAgent =
-        typeof queryAgentId === "string" && queryAgentId === "*";
-      const explicitAgentId =
-        typeof queryAgentId === "string" && queryAgentId.trim().length > 0
-          ? queryAgentId.trim()
+      const normalizedAgentId =
+        typeof req.query_params?.["agentId"] === "string"
+          ? req.query_params["agentId"].trim()
           : undefined;
+      const wildcardAgent = normalizedAgentId === "*";
+      const explicitAgentId =
+        normalizedAgentId && !wildcardAgent ? normalizedAgentId : undefined;
       const includeOrphans =
         req.query_params?.["includeOrphans"] === "true";
       const filterAgentId = wildcardAgent
@@ -1568,11 +1564,14 @@ export function registerApiTriggers(
       //   ?count=true       — totals only, no payload
       //   ?limit=N&offset=M — page slice (default unlimited for back-compat)
       if (req.query_params?.["count"] === "true") {
+        // Match the SAME scope that the list path applies — returning
+        // unfiltered totals here would leak cross-agent counts to a
+        // caller that's blocked from the underlying rows.
         return {
           status_code: 200,
           body: {
-            total: memories.length,
-            latestCount: memories.filter((m) => m.isLatest).length,
+            total: filtered.length,
+            latestCount: filtered.filter((m) => m.isLatest).length,
           },
         };
       }

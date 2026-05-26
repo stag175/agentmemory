@@ -145,7 +145,14 @@ export function registerObserveFunction(
           observationCount?: number;
           firstPrompt?: string;
         }>(KV.sessions, payload.sessionId);
-        const inheritedAgentId = existingSession?.agentId ?? getAgentId();
+        // Existing session wins absolutely — even if its agentId is
+        // undefined. env AGENT_ID only fires on the implicit-create
+        // path where no session row exists yet (#638). Otherwise an
+        // unscoped session would get retroactively scoped by whatever
+        // AGENT_ID was set on the server later.
+        const inheritedAgentId = existingSession
+          ? existingSession.agentId
+          : getAgentId();
         if (inheritedAgentId) {
           raw.agentId = inheritedAgentId;
         }

@@ -19,6 +19,8 @@ function safeParseInt(value: string | undefined, fallback: number): number {
 const DATA_DIR = join(homedir(), ".agentmemory");
 const ENV_FILE = join(DATA_DIR, ".env");
 
+let warnPremiumModelShown = false;
+
 function loadEnvFile(): Record<string, string> {
   if (!existsSync(ENV_FILE)) return {};
   const content = readFileSync(ENV_FILE, "utf-8");
@@ -99,10 +101,12 @@ function detectProvider(env: Record<string, string>): ProviderConfig {
     // ~$0.46/35h on deepseek-v4-pro for the same compression mix.
     // Heuristic match avoids hard-coding a pricing table.
     if (
+      !warnPremiumModelShown &&
       /sonnet|opus|gpt-4o(?!.*mini)|gpt-4-turbo/i.test(model) &&
       env["AGENTMEMORY_SUPPRESS_COST_WARNING"] !== "1" &&
       env["AGENTMEMORY_SUPPRESS_COST_WARNING"] !== "true"
     ) {
+      warnPremiumModelShown = true;
       process.stderr.write(
         `[agentmemory] OPENROUTER_MODEL=${model} is in the premium tier. ` +
           `Background compression on this model can cost $5+/day under active use. ` +

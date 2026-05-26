@@ -11,10 +11,6 @@ export interface Session {
   firstPrompt?: string;
   summary?: string;
   commitShas?: string[];
-  // #554: optional agent role for multi-agent setups (architect /
-  // developer / reviewer / researcher / support-agent). Populated from
-  // AGENT_ID env at session-start time; queries filter on it so an
-  // agent only sees its own role's memory by default.
   agentId?: string;
 }
 
@@ -44,10 +40,6 @@ export interface RawObservation {
   raw: unknown;
   modality?: "text" | "image" | "mixed";
   imageData?: string;
-  // #554: agent role inherited from the parent session at observe time.
-  // Carries through to CompressedObservation + Memory so every recall
-  // path (smart-search, /observations, /memories, /context) can filter
-  // by agent without crossing the session lookup.
   agentId?: string;
 }
 
@@ -68,8 +60,6 @@ export interface CompressedObservation {
   imageData?: string;
   imageDescription?: string;
   modality?: "text" | "image" | "mixed";
-  // #554: inherited from RawObservation. Same agent stamping flows
-  // through every compression mode (synthetic, LLM, image).
   agentId?: string;
 }
 
@@ -110,9 +100,6 @@ export interface Memory {
   forgetAfter?: string;
   imageRef?: string;
   imageData?: string;
-  // #554: optional agent role this memory belongs to. When AGENT_ID is
-  // set on the writing session, that value is stamped here so future
-  // recall can filter by agent without leaking patterns across roles.
   agentId?: string;
 }
 
@@ -493,15 +480,6 @@ export interface TeamConfig {
   mode: "shared" | "private";
 }
 
-// #554: agent-role scope, orthogonal to team/user. Populated from
-// AGENT_ID env. Optional — when unset, memory is unscoped (legacy
-// behavior). When set, sessions / observations / memories stamp the
-// agentId. Filtering is a separate mode (AGENTMEMORY_AGENT_SCOPE):
-//   "shared"   (default) — tag everything, do not filter recall paths
-//   "isolated"           — tag everything AND filter every recall path
-// Shared mode keeps the audit trail (who-said-what) without breaking
-// cross-role recall; isolated mode is for runtimes that must not let
-// one agent see another's work.
 export type AgentScopeMode = "shared" | "isolated";
 export interface AgentScope {
   agentId: string;
