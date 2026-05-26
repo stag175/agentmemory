@@ -71,10 +71,8 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           }
         }
 
-        // #554: stamp the agent role on the memory so future recall can
-        // filter by agent. Request body wins (multi-agent runtimes
-        // explicitly tagging at write time), env AGENT_ID fallback,
-        // none → memory is unscoped (legacy behavior).
+        // Body agentId wins over env so multi-agent runtimes routing
+        // many roles through one server can tag per call.
         const callAgentId =
           typeof data.agentId === "string" && data.agentId.trim().length > 0
             ? data.agentId.trim().slice(0, 128)

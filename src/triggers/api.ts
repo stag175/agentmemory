@@ -538,9 +538,8 @@ export function registerApiTriggers(
         };
       }
       const title = typeof body.title === "string" ? body.title.trim() : undefined;
-      // #554: allow session/start to override AGENT_ID from request body
-      // (multi-agent runtimes that route many roles through one server
-      // process). Falls back to the AGENT_ID env on the server.
+      // Body agentId wins over server env so multi-agent runtimes
+      // routing many roles through one process can tag per call.
       const requestAgentId =
         typeof body.agentId === "string" && body.agentId.trim().length > 0
           ? body.agentId.trim().slice(0, 128)
@@ -1082,11 +1081,9 @@ export function registerApiTriggers(
     async (req: ApiRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      // #544: mem::export already supports maxSessions/offset internally,
-      // but the HTTP endpoint hardcoded an empty payload — so /export on a
-      // real corpus (40 sessions × 34K observations × 8K memories) hit the
-      // iii engine invocation timeout and `agentmemory status` reported 0.
-      // Pass through the query-string pagination so callers can chunk.
+      // mem::export already paginates internally — pass query-string
+      // overrides through so large corpora don't hit the iii engine
+      // invocation timeout.
       const rawMax = req.query_params?.["maxSessions"];
       const rawOffset = req.query_params?.["offset"];
       const payload: { maxSessions?: number; offset?: number } = {};
@@ -1530,11 +1527,9 @@ export function registerApiTriggers(
       if (authErr) return authErr;
       const memories = await kv.list<import("../types.js").Memory>(KV.memories);
       const latest = req.query_params?.["latest"] === "true";
-      // #554: agentId filter. Request param wins, env AGENT_ID (when
-      // scope=isolated) is the fallback. Shared mode keeps the tag but
-      // does not restrict the list endpoint. Pass agentId=* to opt out
-      // of the env scope entirely. includeOrphans=true surfaces
-      // pre-AGENT_ID memories whose agentId is undefined.
+      // agentId=<role> overrides the env-scope filter; agentId=*
+      // bypasses scope entirely; includeOrphans=true surfaces
+      // memories with no agentId stamp.
       const normalizedAgentId =
         typeof req.query_params?.["agentId"] === "string"
           ? req.query_params["agentId"].trim()
@@ -1556,13 +1551,10 @@ export function registerApiTriggers(
         );
       }
 
-      // #544: viewer + `agentmemory status` were hitting this endpoint to
-      // count memories. On a real corpus (8K+ memories) the unbounded
-      // response either timed out at the iii engine boundary ("Invocation
-      // stopped") or arrived too large for the viewer to render — so the
-      // UI showed 0 memories despite a healthy store. Two opt-in modes:
+      // Two opt-in modes for callers that can't materialize the full
+      // unbounded payload on a large corpus:
       //   ?count=true       — totals only, no payload
-      //   ?limit=N&offset=M — page slice (default unlimited for back-compat)
+      //   ?limit=N&offset=M — page slice (default unlimited)
       if (req.query_params?.["count"] === "true") {
         // Match the SAME scope that the list path applies — returning
         // unfiltered totals here would leak cross-agent counts to a

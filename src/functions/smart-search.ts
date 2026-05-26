@@ -28,15 +28,13 @@ export function registerSmartSearchFunction(
       limit?: number;
       project?: string;
       includeLessons?: boolean;
-      // #554: optional per-call agent filter for runtimes routing many
-      // roles through one server. "*" opts out of the env-default
-      // scope and returns hits from every agent.
+      // "*" opts out of the env-scope filter and returns hits from
+      // every agent.
       agentId?: string;
     }) => {
 
-      // Compute the agent filter once, up front. Both the expandIds
-      // branch and the hybrid-search branch consult it — otherwise
-      // expandIds becomes a cross-agent leak (#554 follow-up).
+      // Compute the agent filter up front so both expandIds and
+      // hybrid-search branches share the same scope decision.
       const isolated = isAgentScopeIsolated();
       const explicitAgentId =
         typeof data.agentId === "string" && data.agentId.trim().length > 0

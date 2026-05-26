@@ -95,11 +95,9 @@ function detectProvider(env: Record<string, string>): ProviderConfig {
   if (hasRealValue(env["OPENROUTER_API_KEY"])) {
     const model =
       env["OPENROUTER_MODEL"] || "anthropic/claude-sonnet-4-20250514";
-    // #613: warn when the configured OpenRouter model is in the
-    // premium tier and likely to burn money on background compression.
-    // Captured workload data shows ~$5/35h on claude-sonnet-4 vs
-    // ~$0.46/35h on deepseek-v4-pro for the same compression mix.
-    // Heuristic match avoids hard-coding a pricing table.
+    // Heuristic match (no hard-coded pricing table) to warn when the
+    // configured model is in the premium tier and likely to burn
+    // money on background compression.
     if (
       !warnPremiumModelShown &&
       /sonnet|opus|gpt-4o(?!.*mini)|gpt-4-turbo/i.test(model) &&
@@ -241,13 +239,9 @@ export function loadClaudeBridgeConfig(): ClaudeBridgeConfig {
   const lineBudget = safeParseInt(env["CLAUDE_MEMORY_LINE_BUDGET"], 200);
   let memoryFilePath = "";
   if (enabled && projectPath) {
-    // #625: Claude Code stores MEMORY.md at
-    //   ~/.claude/projects/<slug>/MEMORY.md
-    // where <slug> is the project path with `/` and `\` swapped for `-`.
-    // The leading `-` from an absolute POSIX path is preserved (Claude
-    // Code keeps it; stripping it produced a slug Claude never reads).
-    // There's also no `memory/` subdirectory — the file sits directly
-    // under the slug dir.
+    // Claude Code reads ~/.claude/projects/<slug>/MEMORY.md where
+    // <slug> swaps `/` and `\` for `-` and preserves a leading `-`
+    // on absolute POSIX paths.
     const safePath = projectPath.replace(/[/\\]/g, "-");
     memoryFilePath = join(
       homedir(),
@@ -269,13 +263,11 @@ export function loadTeamConfig(): TeamConfig | null {
   return { teamId, userId, mode };
 }
 
-// #554: optional AGENT_ID env for multi-agent memory isolation.
-// Returns null when unset so memory stays unscoped (legacy behavior).
-// Trimmed + length-capped to keep KV writes well-formed.
-//
-// Filtering is gated by AGENTMEMORY_AGENT_SCOPE:
-//   "shared"   (default) — tag everything, do not filter recall paths
-//   "isolated"           — tag everything AND filter recall paths
+// AGENT_ID is trimmed + length-capped before any KV write. Returns
+// null when unset → unscoped (legacy behavior).
+// AGENTMEMORY_AGENT_SCOPE:
+//   "shared"   (default) — tag writes, do not filter recall
+//   "isolated"           — tag writes AND filter recall
 export function loadAgentScope(): {
   agentId: string;
   mode: "shared" | "isolated";

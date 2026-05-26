@@ -134,22 +134,15 @@ export function registerObserveFunction(
           }
         }
 
-        // #554: inherit agentId from the parent session so every
-        // observation carries the role that wrote it. Pre-existing
-        // session takes precedence (multi-agent runtime stamped at
-        // session/start), env AGENT_ID is the fallback for the
-        // implicit-create path (#638) where session doesn't exist yet.
-        // We reuse this lookup later for observationCount/firstPrompt.
+        // Existing session is the source of truth for agentId (even
+        // undefined). Env AGENT_ID only fires when no session row
+        // exists yet — otherwise an unscoped session would get
+        // retroactively scoped by a later AGENT_ID export.
         const existingSession = await kv.get<{
           agentId?: string;
           observationCount?: number;
           firstPrompt?: string;
         }>(KV.sessions, payload.sessionId);
-        // Existing session wins absolutely — even if its agentId is
-        // undefined. env AGENT_ID only fires on the implicit-create
-        // path where no session row exists yet (#638). Otherwise an
-        // unscoped session would get retroactively scoped by whatever
-        // AGENT_ID was set on the server later.
         const inheritedAgentId = existingSession
           ? existingSession.agentId
           : getAgentId();
@@ -241,14 +234,10 @@ export function registerObserveFunction(
           typeof payload.cwd === "string" &&
           payload.cwd.trim().length > 0
         ) {
-          // #638: OpenCode (and any plugin that skips POST /session/start)
-          // can fire observations before the session record exists. Without
-          // an implicit create, those observations stack up but
-          // `memory_sessions` never lists them, and summarize bails with
-          // "Session not found for summarize". Create the session now from
-          // the observation payload — but only when project + cwd are
-          // present (HookPayload contract). Older test payloads without
-          // those fields keep their original no-op behaviour.
+          // Implicit-create when no session row exists yet but the
+          // hook payload carries project + cwd — keeps observations
+          // discoverable via memory_sessions for plugins that skip
+          // an explicit POST /session/start.
           const trimmedPrompt =
             typeof raw.userPrompt === "string"
               ? raw.userPrompt.replace(/\s+/g, " ").trim().slice(0, 200)
@@ -262,8 +251,6 @@ export function registerObserveFunction(
             updatedAt: ts,
             status: "active",
             observationCount: 1,
-            // #554: implicit-create path also stamps agentId so the
-            // session row matches its child observations.
             ...(inheritedAgentId ? { agentId: inheritedAgentId } : {}),
             ...(trimmedPrompt && trimmedPrompt.length > 0
               ? { firstPrompt: trimmedPrompt }

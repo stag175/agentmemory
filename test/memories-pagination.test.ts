@@ -1,15 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 
-// #544: /memories and /export must support count + pagination so the
-// viewer and `agentmemory status` work on large corpora (8K+ memories)
-// without timing out at the iii engine boundary.
-describe("memories + export pagination (#544)", () => {
+// /memories + /export need count + pagination so the viewer and
+// `agentmemory status` work on large corpora without timing out at
+// the iii engine boundary.
+describe("memories + export pagination", () => {
   const api = readFileSync("src/triggers/api.ts", "utf-8");
 
   it("api::memories accepts count=true and returns total + latestCount", () => {
     expect(api).toMatch(/req\.query_params\?\.\["count"\]\s*===\s*"true"/);
-    // count must report the SAME scope as the list path (#554 follow-up).
+    // count must report the SAME scope as the list path.
     expect(api).toMatch(/total:\s*filtered\.length/);
     expect(api).toMatch(/latestCount:\s*filtered\.filter/);
   });
