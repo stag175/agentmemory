@@ -7,6 +7,7 @@ import {
   type ChildProcess,
 } from "node:child_process";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -38,6 +39,13 @@ import {
   type ConnectManifest,
   type RemoveOptions,
 } from "./cli/remove-plan.js";
+import {
+  isBundledConfig,
+  legacyDataMigrations,
+  resolveEngineCwd,
+  rewriteBundledConfig,
+  runtimeConfigPath,
+} from "./cli/engine-launch.js";
 import { renderSplash } from "./cli/splash.js";
 import { isFirstRun, readPrefs, resetPrefs, writePrefs } from "./cli/preferences.js";
 import { runOnboarding } from "./cli/onboarding.js";
@@ -816,12 +824,14 @@ function spawnEngineBackground(
   bin: string,
   spawnArgs: string[],
   label: string,
+  cwd?: string,
 ): ChildProcess {
-  vlog(`spawn: ${bin} ${spawnArgs.join(" ")}`);
+  vlog(`spawn: ${bin} ${spawnArgs.join(" ")}${cwd ? ` (cwd: ${cwd})` : ""}`);
   const child = spawn(bin, spawnArgs, {
     detached: true,
     stdio: ["ignore", "ignore", "pipe"],
     windowsHide: true,
+    ...(cwd ? { cwd } : {}),
   });
   const isDocker = label.includes("Docker");
   if (!isDocker && typeof child.pid === "number") {
@@ -862,11 +872,60 @@ function spawnEngineBackground(
   return child;
 }
 
+// The bundled config uses cwd-relative paths (./data stores, src watch,
+// node dist/index.mjs exec) that only resolve from a repo checkout. When
+// the engine starts from a global or npx install those paths land in
+// whatever directory the user happened to be in, and the iii-exec worker
+// supervision never resolves at all, so nothing respawns a dead worker.
+// Rewriting the bundled config with absolute paths and anchoring the
+// engine cwd at ~/.agentmemory fixes both; user-supplied configs (env,
+// cwd, ~/.agentmemory) are passed through untouched.
+function prepareEngineLaunch(configPath: string): { configPath: string; cwd: string } {
+  const home = homedir();
+  const cwd = resolveEngineCwd(configPath, process.cwd(), home);
+  try {
+    mkdirSync(cwd, { recursive: true });
+  } catch {
+    return { configPath, cwd: process.cwd() };
+  }
+  if (!isBundledConfig(configPath, __dirname)) {
+    return { configPath, cwd };
+  }
+  try {
+    const workerEntry = join(__dirname, "index.mjs");
+    const rewritten = rewriteBundledConfig(
+      readFileSync(configPath, "utf-8"),
+      home,
+      process.execPath,
+      workerEntry,
+    );
+    const runtimePath = runtimeConfigPath(home);
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, rewritten, "utf-8");
+    for (const m of legacyDataMigrations(process.cwd(), home)) {
+      if (existsSync(m.from) && !existsSync(m.to)) {
+        try {
+          mkdirSync(dirname(m.to), { recursive: true });
+          cpSync(m.from, m.to, { recursive: true });
+          p.log.info(`Copied existing data: ${m.from} -> ${m.to}`);
+        } catch (err) {
+          vlog(`data copy failed for ${m.from}: ${String(err)}`);
+        }
+      }
+    }
+    return { configPath: runtimePath, cwd };
+  } catch (err) {
+    vlog(`runtime config generation failed, using bundled config verbatim: ${String(err)}`);
+    return { configPath, cwd };
+  }
+}
+
 function startIiiBin(iiiBin: string, configPath: string): boolean {
   const s = p.spinner();
   s.start(`Starting iii-engine: ${iiiBin}`);
-  writeEngineState({ kind: "native", configPath, binPath: iiiBin });
-  spawnEngineBackground(iiiBin, ["--config", configPath], "iii-engine");
+  const launch = prepareEngineLaunch(configPath);
+  writeEngineState({ kind: "native", configPath: launch.configPath, binPath: iiiBin });
+  spawnEngineBackground(iiiBin, ["--config", launch.configPath], "iii-engine", launch.cwd);
   s.stop("iii-engine process started");
   return true;
 }
