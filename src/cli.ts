@@ -41,6 +41,11 @@ import {
 import { renderSplash } from "./cli/splash.js";
 import { isFirstRun, readPrefs, resetPrefs, writePrefs } from "./cli/preferences.js";
 import { runOnboarding } from "./cli/onboarding.js";
+import {
+  detectInstallMode,
+  isNpxInvocation,
+  readCwdPackageName,
+} from "./cli/install-mode.js";
 import { setBootVerbose } from "./logger.js";
 import { VERSION } from "./version.js";
 import { getAllTools, ESSENTIAL_TOOLS } from "./mcp/tools-registry.js";
@@ -574,12 +579,11 @@ function discoverComposeFile(): string | null {
 }
 
 function isInvokedViaNpx(): boolean {
-  if (process.env["npm_lifecycle_event"] === "npx") return true;
-  const argv1 = process.argv[1] ?? "";
-  if (argv1.includes("_npx")) return true;
-  const ua = process.env["npm_config_user_agent"] ?? "";
-  if (ua.startsWith("npm/") || ua.includes(" npm/")) return true;
-  return false;
+  return isNpxInvocation({
+    argv1: process.argv[1] ?? "",
+    npmLifecycleEvent: process.env["npm_lifecycle_event"],
+    npmUserAgent: process.env["npm_config_user_agent"],
+  });
 }
 
 // First-run global-install prompt. Replaces the previous passive
@@ -2265,14 +2269,19 @@ async function runUpgrade() {
   p.intro("agentmemory upgrade");
 
   const cwd = process.cwd();
-  const hasPackageJson = existsSync(join(cwd, "package.json"));
-  const hasPnpmLock = existsSync(join(cwd, "pnpm-lock.yaml"));
+  const mode = detectInstallMode({
+    cwdPackageName: readCwdPackageName(cwd),
+    argv1: process.argv[1] ?? "",
+    npmLifecycleEvent: process.env["npm_lifecycle_event"],
+    npmUserAgent: process.env["npm_config_user_agent"],
+  });
 
   const pnpmBin = whichBinary("pnpm");
   const npmBin = whichBinary("npm");
   const dockerBin = whichBinary("docker");
 
   p.log.info(`Working directory: ${cwd}`);
+  p.log.info(`Install mode: ${mode}`);
   const requireSuccess = (ok: boolean, label: string): void => {
     if (!ok) {
       p.log.error(`Upgrade aborted: ${label} failed.`);
@@ -2280,9 +2289,9 @@ async function runUpgrade() {
     }
   };
 
-  if (hasPackageJson) {
-    const usePnpm = !!pnpmBin && hasPnpmLock;
-    if (usePnpm && pnpmBin) {
+  if (mode === "local-dev") {
+    const hasPnpmLock = existsSync(join(cwd, "pnpm-lock.yaml"));
+    if (pnpmBin && hasPnpmLock) {
       const installOk = runCommand(pnpmBin, ["install"], {
         label: "Refreshing dependencies (pnpm install)",
       });
@@ -2303,8 +2312,28 @@ async function runUpgrade() {
     } else {
       p.log.warn("No package manager found (pnpm/npm). Skipping JS dependency upgrade.");
     }
+  } else if (mode === "npx") {
+    p.note(
+      [
+        "Running via npx, so there is no installed CLI to upgrade in place.",
+        "",
+        "Get the latest release with either:",
+        "  npx @agentmemory/agentmemory@latest",
+        "  npm install -g @agentmemory/agentmemory@latest",
+      ].join("\n"),
+      "CLI upgrade",
+    );
+  } else if (npmBin) {
+    const upgradeOk = runCommand(
+      npmBin,
+      ["install", "-g", "@agentmemory/agentmemory@latest"],
+      { label: "Upgrading @agentmemory/agentmemory globally" },
+    );
+    requireSuccess(upgradeOk, "npm install -g @agentmemory/agentmemory@latest");
   } else {
-    p.log.warn("No package.json in current directory. Skipping JS dependency upgrade.");
+    p.log.warn(
+      "npm not found on PATH. Upgrade manually: npm install -g @agentmemory/agentmemory@latest",
+    );
   }
 
   const upgradeEngine = await p.confirm({
@@ -2336,7 +2365,8 @@ async function runUpgrade() {
       "",
       "Recommended next steps:",
       "  1) agentmemory status",
-      "  2) npm/pnpm test",
+      "  2) agentmemory connect claude-code --with-hooks",
+      "     (refreshes hook entries that reference absolute paths under the bundled plugin/ dir)",
       "  3) restart agentmemory process",
     ].join("\n"),
     "agentmemory upgrade",
