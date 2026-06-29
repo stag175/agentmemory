@@ -15,6 +15,7 @@ describe("viewer Trust surface", () => {
     expect(viewer).toContain("apiGet('memory-review-queue?' + trustQueryString(20))");
     expect(viewer).toContain("apiGet('agent-events?' + trustQueryString(50))");
     expect(viewer).toContain("apiGet('memory/today?' + trustQueryString(20))");
+    expect(viewer).toContain("apiPost('memory-proposals/list', trustProposalPayload(20))");
     expect(viewer).toContain("apiPost('search/explain', body)");
     expect(viewer).toContain("explain: true");
     expect(viewer).toContain("includeReport: true");
@@ -67,5 +68,19 @@ describe("viewer Trust surface", () => {
     expect(viewer).toContain("renderTrustTodaySection('Unresolved Claims'");
     expect(viewer).toContain("renderTrustTodaySection('Proposed Consolidations'");
     expect(viewer).toContain("todayRowMemoryId");
+  });
+
+  it("surfaces memory proposals with explicit review authority controls", () => {
+    expect(viewer).toContain("Memory PRs");
+    expect(viewer).toContain("renderTrustProposals(proposals)");
+    expect(viewer).toContain("trustProposalPayload");
+    expect(viewer).toContain("id=\"trust-proposal-permissions\"");
+    expect(viewer).toContain("data-action=\"trust-proposal-approve\"");
+    expect(viewer).toContain("data-action=\"trust-proposal-reject\"");
+    expect(viewer).toContain("data-action=\"trust-proposal-apply\"");
+    expect(viewer).toContain("runTrustProposalAction('approve'");
+    expect(viewer).toContain("runTrustProposalAction('reject'");
+    expect(viewer).toContain("runTrustProposalAction('apply'");
+    expect(viewer).toContain("Apply this approved memory proposal?");
   });
 });

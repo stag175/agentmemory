@@ -1174,7 +1174,7 @@
       timeline: { loaded: false, observations: [], sessionId: '', minImportance: 0, page: 0, pageSize: 50 },
       sessions: { loaded: false, items: [], selectedId: null },
       audit: { loaded: false, entries: [], opFilter: '' },
-      trust: { loaded: false, ledgerRows: [], ledgerTotal: 0, reviewQueue: [], reviewTotal: 0, events: [], eventTotal: 0, today: null, stateFilter: 'all', projectFilter: '', explainQuery: '', explainResult: null, explainLoading: false, workbench: { memoryId: '', memory: null, history: [], sourceCard: null, searchable: null, review: null, result: null, loading: false } },
+      trust: { loaded: false, ledgerRows: [], ledgerTotal: 0, reviewQueue: [], reviewTotal: 0, events: [], eventTotal: 0, today: null, proposals: [], proposalsTotal: 0, proposalStatus: 'pending', proposalTeamId: 'local', proposalActorId: 'viewer-workbench', proposalPermissions: 'project:read', proposalReason: '', proposalResult: null, proposalLoading: false, stateFilter: 'all', projectFilter: '', explainQuery: '', explainResult: null, explainLoading: false, workbench: { memoryId: '', memory: null, history: [], sourceCard: null, searchable: null, review: null, result: null, loading: false } },
       activity: { loaded: false, observations: [], sessions: [], typeFilter: '' },
       lessons: { loaded: false, items: [], search: '' },
       actions: { loaded: false, items: [], frontier: [], statusFilter: '', search: '' },
@@ -3467,9 +3467,19 @@
       var stateSelect = document.getElementById('trust-state-filter');
       var projectInput = document.getElementById('trust-project-filter');
       var queryInput = document.getElementById('trust-explain-query');
+      var proposalStatus = document.getElementById('trust-proposal-status');
+      var proposalTeamId = document.getElementById('trust-proposal-team-id');
+      var proposalActorId = document.getElementById('trust-proposal-actor-id');
+      var proposalPermissions = document.getElementById('trust-proposal-permissions');
+      var proposalReason = document.getElementById('trust-proposal-reason');
       if (stateSelect) state.trust.stateFilter = stateSelect.value || 'all';
       if (projectInput) state.trust.projectFilter = projectInput.value.trim();
       if (queryInput) state.trust.explainQuery = queryInput.value.trim();
+      if (proposalStatus) state.trust.proposalStatus = proposalStatus.value || 'pending';
+      if (proposalTeamId) state.trust.proposalTeamId = proposalTeamId.value.trim() || 'local';
+      if (proposalActorId) state.trust.proposalActorId = proposalActorId.value.trim() || 'viewer-workbench';
+      if (proposalPermissions) state.trust.proposalPermissions = proposalPermissions.value.trim();
+      if (proposalReason) state.trust.proposalReason = proposalReason.value.trim();
     }
 
     function trustQueryString(limit) {
@@ -3477,6 +3487,22 @@
       params.set('limit', String(limit));
       if (state.trust.projectFilter) params.set('project', state.trust.projectFilter);
       return params.toString();
+    }
+
+    function csvList(value) {
+      return String(value || '').split(',').map(function(item) { return item.trim(); }).filter(Boolean);
+    }
+
+    function trustProposalPayload(limit) {
+      var payload = {
+        teamId: state.trust.proposalTeamId || 'local',
+        actorId: state.trust.proposalActorId || 'viewer-workbench',
+        permissions: csvList(state.trust.proposalPermissions || 'project:read'),
+        limit: limit || 20
+      };
+      if (state.trust.projectFilter) payload.project = state.trust.projectFilter;
+      if (state.trust.proposalStatus && state.trust.proposalStatus !== 'all') payload.status = state.trust.proposalStatus;
+      return payload;
     }
 
     async function loadTrust() {
@@ -3489,12 +3515,14 @@
         apiGet('memory-ledger?' + ledgerParams.toString()),
         apiGet('memory-review-queue?' + trustQueryString(20)),
         apiGet('agent-events?' + trustQueryString(50)),
-        apiGet('memory/today?' + trustQueryString(20))
+        apiGet('memory/today?' + trustQueryString(20)),
+        apiPost('memory-proposals/list', trustProposalPayload(20))
       ]);
       var ledger = results[0] || {};
       var review = results[1] || {};
       var events = results[2] || {};
       var today = results[3] || {};
+      var proposals = results[4] || {};
       state.trust.ledgerRows = ledger.rows || [];
       state.trust.ledgerTotal = ledger.total || 0;
       state.trust.reviewQueue = review.queue || [];
@@ -3502,6 +3530,9 @@
       state.trust.events = events.events || [];
       state.trust.eventTotal = events.total || 0;
       state.trust.today = today;
+      state.trust.proposals = proposals.proposals || [];
+      state.trust.proposalsTotal = proposals.total || 0;
+      if (proposals && proposals.success === false) state.trust.proposalResult = proposals;
       state.trust.loaded = true;
       renderTrust();
     }
@@ -3670,12 +3701,35 @@
       renderTrust();
     }
 
+    async function runTrustProposalAction(action, proposalId) {
+      readTrustControls();
+      if (!proposalId) {
+        state.trust.proposalResult = { success: false, error: 'proposalId is required' };
+        renderTrust();
+        return;
+      }
+      if (action === 'apply' && !window.confirm('Apply this approved memory proposal?')) return;
+      var body = trustProposalPayload(20);
+      body.proposalId = proposalId;
+      body.reason = state.trust.proposalReason || 'viewer memory proposal review';
+      var path = 'memory-proposals/' + action;
+      state.trust.proposalLoading = true;
+      state.trust.proposalResult = { action: action, proposalId: proposalId, pending: true };
+      renderTrust();
+      var result = await apiPost(path, body);
+      state.trust.proposalLoading = false;
+      state.trust.proposalResult = result || { success: false, action: action, proposalId: proposalId, error: 'request failed' };
+      state.trust.loaded = false;
+      await loadTrust();
+    }
+
     function renderTrust() {
       var el = document.getElementById('view-trust');
       var rows = state.trust.ledgerRows || [];
       var queue = state.trust.reviewQueue || [];
       var events = state.trust.events || [];
       var today = state.trust.today || {};
+      var proposals = state.trust.proposals || [];
       var todayCounts = today.counts || {};
       var needsReview = rows.filter(function(row) { return row.reviewState === 'needs_review' || row.reviewState === 'unreviewed'; }).length;
       var redactedEvents = events.filter(function(event) { return event.redactionApplied; }).length;
@@ -3698,9 +3752,11 @@
       html += '<div class="stat-card"><div class="label">Needs Review</div><div class="value">' + needsReview + '</div><div class="sub">visible ledger rows</div></div>';
       html += '<div class="stat-card"><div class="label">Agent Events</div><div class="value">' + events.length + '</div><div class="sub">' + state.trust.eventTotal + ' total · ' + redactedEvents + ' redacted</div></div>';
       html += '<div class="stat-card"><div class="label">Today</div><div class="value">' + (todayCounts.observations || 0) + '</div><div class="sub">' + (todayCounts.failedCommands || 0) + ' failed · ' + (todayCounts.unresolvedClaims || 0) + ' unresolved</div></div>';
+      html += '<div class="stat-card"><div class="label">Memory PRs</div><div class="value">' + proposals.length + '</div><div class="sub">' + state.trust.proposalsTotal + ' total</div></div>';
       html += '</div>';
 
       html += renderTrustToday(today);
+      html += renderTrustProposals(proposals);
       html += renderTrustUsed();
       html += renderTrustWorkbench(rows, queue);
       html += '<div class="trust-grid">';
@@ -3708,7 +3764,7 @@
       html += renderTrustEvents(events);
       html += '</div>';
 
-      var __focus = captureSearchFocus(['trust-project-filter', 'trust-explain-query', 'trust-workbench-memory-id', 'trust-workbench-title', 'trust-workbench-content', 'trust-workbench-reason']);
+      var __focus = captureSearchFocus(['trust-project-filter', 'trust-explain-query', 'trust-workbench-memory-id', 'trust-workbench-title', 'trust-workbench-content', 'trust-workbench-reason', 'trust-proposal-team-id', 'trust-proposal-actor-id', 'trust-proposal-permissions', 'trust-proposal-reason']);
       el.innerHTML = html;
       var stateSelect = document.getElementById('trust-state-filter');
       if (stateSelect) {
@@ -3729,6 +3785,17 @@
           if (e.key === 'Enter') runTrustExplain();
         });
       }
+      var proposalStatus = document.getElementById('trust-proposal-status');
+      if (proposalStatus) {
+        proposalStatus.addEventListener('change', function() {
+          state.trust.proposalStatus = this.value || 'pending';
+          refreshTrust();
+        });
+      }
+      ['trust-proposal-team-id', 'trust-proposal-actor-id', 'trust-proposal-permissions', 'trust-proposal-reason'].forEach(function(id) {
+        var input = document.getElementById(id);
+        if (input) input.addEventListener('keydown', function(e) { if (e.key === 'Enter') refreshTrust(); });
+      });
       restoreSearchFocus(__focus);
     }
 
@@ -3949,6 +4016,68 @@
       html += renderTrustTodaySection('Unresolved Claims', todayRows(today && today.unresolvedClaims), 'No unresolved claims detected today.');
       html += renderTrustTodaySection('Proposed Consolidations', todayRows(today && today.proposedConsolidations), 'No pending proposals today.');
       html += '</div></div></div></div>';
+      return html;
+    }
+
+    function proposalMeta(proposal) {
+      return [
+        proposal.id,
+        proposal.teamId,
+        proposal.project,
+        proposal.action,
+        proposal.targetMemoryId,
+        proposal.proposedBy,
+        proposal.updatedAt ? formatTime(proposal.updatedAt) : ''
+      ].filter(Boolean).join(' · ');
+    }
+
+    function proposalPermissionLabel(proposal) {
+      var required = Array.isArray(proposal.requiredPermissions) ? proposal.requiredPermissions : [];
+      return required.length ? required.join(', ') : 'project:read';
+    }
+
+    function renderTrustProposals(proposals) {
+      var statusOptions = ['pending', 'approved', 'rejected', 'applied', 'all'];
+      var html = '<div class="trust-used">';
+      html += '<div class="trust-panel-head"><div><div class="trust-panel-title">Memory PRs</div><div class="trust-panel-sub">/memory-proposals</div></div><div class="trust-panel-sub">' + state.trust.proposalsTotal + ' total</div></div>';
+      html += '<div class="trust-used-body">';
+      html += '<div class="trust-workbench-form" style="margin-bottom:12px;">';
+      html += '<label>Status<select id="trust-proposal-status">' + optionList(statusOptions, state.trust.proposalStatus || 'pending') + '</select></label>';
+      html += '<label>Team ID<input type="text" id="trust-proposal-team-id" value="' + attr(state.trust.proposalTeamId || 'local') + '" spellcheck="false"></label>';
+      html += '<label>Actor<input type="text" id="trust-proposal-actor-id" value="' + attr(state.trust.proposalActorId || 'viewer-workbench') + '" spellcheck="false"></label>';
+      html += '<label>Permissions<input type="text" id="trust-proposal-permissions" value="' + attr(state.trust.proposalPermissions || 'project:read') + '" placeholder="project:read, project:write"></label>';
+      html += '<label>Review Reason<input type="text" id="trust-proposal-reason" value="' + attr(state.trust.proposalReason || '') + '" placeholder="proposal review reason"></label>';
+      html += '<div class="trust-workbench-actions"><button class="btn" data-action="trust-proposals-refresh">Refresh PRs</button></div>';
+      html += '</div>';
+      if (state.trust.proposalLoading) html += '<div class="loading">Running proposal operation...</div>';
+      if (state.trust.proposalResult) {
+        html += '<pre class="trust-plan">' + esc(JSON.stringify(state.trust.proposalResult, null, 2)) + '</pre>';
+      }
+      if (!proposals.length) {
+        html += '<div class="empty-state"><p>No memory proposals match the current filters.</p></div></div></div>';
+        return html;
+      }
+      proposals.slice(0, 20).forEach(function(proposal) {
+        html += '<div class="trust-evidence">';
+        html += '<div class="trust-evidence-head"><div><div class="trust-title">' + esc(truncate(proposal.title || proposal.id || 'Memory proposal', 96)) + '</div>';
+        html += '<div class="trust-meta">' + esc(proposalMeta(proposal)) + '</div></div>';
+        html += '<span class="badge ' + trustBadgeClass(proposal.status) + '">' + esc(proposal.status || 'unknown') + '</span></div>';
+        if (proposal.reason) html += '<div class="trust-meta">' + esc(proposal.reason) + '</div>';
+        html += '<div class="trust-reasons"><span class="trust-reason">requires ' + esc(proposalPermissionLabel(proposal)) + '</span></div>';
+        html += '<div class="trust-workbench-actions" style="margin-top:8px;">';
+        if (proposal.targetMemoryId) {
+          html += '<button class="btn" data-action="trust-workbench-select" data-memory-id="' + attr(proposal.targetMemoryId) + '">Open Target</button>';
+        }
+        if (proposal.status === 'pending') {
+          html += '<button class="btn" data-action="trust-proposal-approve" data-proposal-id="' + attr(proposal.id || '') + '">Approve</button>';
+          html += '<button class="btn btn-danger" data-action="trust-proposal-reject" data-proposal-id="' + attr(proposal.id || '') + '">Reject</button>';
+        }
+        if (proposal.status === 'approved') {
+          html += '<button class="btn btn-primary" data-action="trust-proposal-apply" data-proposal-id="' + attr(proposal.id || '') + '">Apply</button>';
+        }
+        html += '</div></div>';
+      });
+      html += '</div></div>';
       return html;
     }
 
@@ -4692,6 +4821,22 @@
       }
       if (action === 'trust-workbench-tombstone') {
         runTrustWorkbenchMutation('tombstone', false);
+        return;
+      }
+      if (action === 'trust-proposals-refresh') {
+        refreshTrust();
+        return;
+      }
+      if (action === 'trust-proposal-approve') {
+        runTrustProposalAction('approve', target.getAttribute('data-proposal-id') || '');
+        return;
+      }
+      if (action === 'trust-proposal-reject') {
+        runTrustProposalAction('reject', target.getAttribute('data-proposal-id') || '');
+        return;
+      }
+      if (action === 'trust-proposal-apply') {
+        runTrustProposalAction('apply', target.getAttribute('data-proposal-id') || '');
         return;
       }
       if (action === 'replay-select') {
