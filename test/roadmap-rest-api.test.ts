@@ -20,6 +20,7 @@ describe("roadmap REST endpoint whitelists", () => {
     expect(paths).toContain("/agentmemory/governance/deletion-propagation");
     expect(paths).toContain("/agentmemory/memory/today");
     expect(paths).toContain("/agentmemory/memory/unlinked-mentions");
+    expect(paths).toContain("/agentmemory/handoffs/status");
   });
 
   it("registers memory inspect POST and GET REST parity routes", () => {
@@ -98,6 +99,43 @@ describe("roadmap REST endpoint whitelists", () => {
       change: { content: "approved" },
       permissions: ["project:write"],
     });
+  });
+
+  it("whitelists handoff status update payload fields", async () => {
+    const sdk = mockSdk();
+    let payload: Record<string, unknown> | undefined;
+    sdk.registerFunction("mem::handoff-update", async (input) => {
+      payload = input as Record<string, unknown>;
+      return { success: true };
+    });
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+
+    const response = (await sdk.trigger("api::handoff-update", {
+      headers: {},
+      body: {
+        signalId: "sig_1",
+        agentId: "codex",
+        status: "accepted",
+        reason: "taking over",
+        metadata: { lane: "lineage" },
+        rawPayload: "drop",
+      },
+    })) as { status_code: number };
+    const invalid = (await sdk.trigger("api::handoff-update", {
+      headers: {},
+      body: { signalId: ["sig_1"], agentId: "codex", status: "accepted" },
+    })) as { status_code: number; body: { error: string } };
+
+    expect(response.status_code).toBe(200);
+    expect(payload).toEqual({
+      signalId: "sig_1",
+      agentId: "codex",
+      status: "accepted",
+      reason: "taking over",
+      metadata: { lane: "lineage" },
+    });
+    expect(invalid.status_code).toBe(400);
+    expect(invalid.body.error).toBe("signalId must be a string");
   });
 
   it("whitelists sync and OTEL payload fields", async () => {

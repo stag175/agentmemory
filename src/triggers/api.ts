@@ -448,6 +448,13 @@ const DELETION_PROPAGATION_FIELDS = [
   "actor",
   "reason",
 ] as const;
+const HANDOFF_UPDATE_FIELDS = [
+  "signalId",
+  "agentId",
+  "status",
+  "reason",
+  "metadata",
+] as const;
 const IMPORT_STRATEGIES = new Set(["merge", "replace", "skip"]);
 
 function pickRulesResolvePayload(
@@ -485,16 +492,18 @@ function validateWhitelistedField(field: string, value: unknown): string | undef
     "proposalId",
     "reason",
     "reviewer",
+    "signalId",
     "source",
     "sourceHash",
     "sourceObservationId",
     "sourceUri",
+    "status",
     "targetId",
     "workspaceId",
   ]);
   const stringArrayFields = new Set(["eventIds", "permissions", "scopes"]);
   const booleanFields = new Set(["apply", "approved", "dryRun"]);
-  const objectFields = new Set(["change", "exportData", "snapshot"]);
+  const objectFields = new Set(["change", "exportData", "metadata", "snapshot"]);
   if (stringFields.has(field) && typeof value !== "string") {
     return `${field} must be a string`;
   }
@@ -3962,6 +3971,28 @@ export function registerApiTriggers(
     type: "http",
     function_id: "api::signal-read",
     config: { api_path: "/agentmemory/signals", http_method: "GET" },
+  });
+
+  sdk.registerFunction(
+    "api::handoff-update",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const response = await callWhitelistedFunction(
+        sdk,
+        req,
+        "mem::handoff-update",
+        HANDOFF_UPDATE_FIELDS,
+      );
+      if (response.status_code !== 200) return response;
+      const success = isRecord(response.body) && response.body.success === true;
+      return { status_code: success ? 200 : 400, body: response.body };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::handoff-update",
+    config: { api_path: "/agentmemory/handoffs/status", http_method: "POST" },
   });
 
   sdk.registerFunction("api::checkpoint-create", 

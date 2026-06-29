@@ -5,6 +5,33 @@ import type { Signal } from "../types.js";
 import { recordAudit } from "./audit.js";
 import { safeRecordAgentEvent } from "./agent-events.js";
 
+type HandoffStatus = "accepted" | "rejected" | "completed";
+
+const HANDOFF_STATUSES = new Set<HandoffStatus>([
+  "accepted",
+  "rejected",
+  "completed",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function handoffEventType(
+  status: HandoffStatus,
+): "handoff_accepted" | "handoff_rejected" | "handoff_completed" {
+  if (status === "accepted") return "handoff_accepted";
+  if (status === "rejected") return "handoff_rejected";
+  return "handoff_completed";
+}
+
+function canUpdateHandoff(signal: Signal, agentId: string, status: HandoffStatus): boolean {
+  if (status === "completed") {
+    return signal.from === agentId || signal.to === agentId;
+  }
+  return signal.to ? signal.to === agentId : signal.from === agentId;
+}
+
 export function registerSignalsFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::signal-send", 
     async (data: {
@@ -149,6 +176,97 @@ export function registerSignalsFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       return { success: true, signals: results };
+    },
+  );
+
+  sdk.registerFunction(
+    "mem::handoff-update",
+    async (data: {
+      signalId: string;
+      agentId: string;
+      status: HandoffStatus;
+      reason?: string;
+      metadata?: Record<string, unknown>;
+    }) => {
+      if (!data.signalId?.trim() || !data.agentId?.trim()) {
+        return { success: false, error: "signalId and agentId are required" };
+      }
+      if (!HANDOFF_STATUSES.has(data.status)) {
+        return {
+          success: false,
+          error: "status must be one of: accepted, rejected, completed",
+        };
+      }
+      if (data.reason !== undefined && typeof data.reason !== "string") {
+        return { success: false, error: "reason must be a string" };
+      }
+      if (data.metadata !== undefined && !isRecord(data.metadata)) {
+        return { success: false, error: "metadata must be an object" };
+      }
+
+      const signal = await kv.get<Signal>(KV.signals, data.signalId);
+      if (!signal) return { success: false, error: "handoff signal not found" };
+      if (signal.type !== "handoff") {
+        return { success: false, error: "signal is not a handoff" };
+      }
+      if (!canUpdateHandoff(signal, data.agentId, data.status)) {
+        return { success: false, error: "agent is not allowed to update this handoff" };
+      }
+
+      const now = new Date().toISOString();
+      const existingMetadata = isRecord(signal.metadata) ? signal.metadata : {};
+      const existingHandoff = isRecord(existingMetadata["handoff"])
+        ? existingMetadata["handoff"]
+        : {};
+      const statusField = `${data.status}At`;
+      const nextSignal: Signal = {
+        ...signal,
+        readAt: signal.readAt ?? now,
+        metadata: {
+          ...existingMetadata,
+          ...(data.metadata ? { ...data.metadata } : {}),
+          handoff: {
+            ...existingHandoff,
+            status: data.status,
+            updatedAt: now,
+            updatedBy: data.agentId,
+            ...(data.reason?.trim() ? { reason: data.reason.trim() } : {}),
+            [statusField]: now,
+          },
+        },
+      };
+
+      await kv.set(KV.signals, signal.id, nextSignal);
+      await recordAudit(kv, "signal_send", "mem::handoff-update", [signal.id], {
+        action: "handoff.status_update",
+        status: data.status,
+        actor: data.agentId,
+        from: signal.from,
+        to: signal.to,
+        threadId: signal.threadId,
+      });
+      await safeRecordAgentEvent(kv, {
+        type: handoffEventType(data.status),
+        timestamp: now,
+        agentId: data.agentId,
+        fromAgentId: signal.from,
+        toAgentId: signal.to,
+        handoffFrom: signal.from,
+        handoffTo: signal.to,
+        functionId: "mem::handoff-update",
+        targetIds: [signal.id],
+        signalIds: [signal.id],
+        correlationId: signal.threadId,
+        status: "ok",
+        metadata: {
+          type: signal.type,
+          threadId: signal.threadId,
+          handoffStatus: data.status,
+          ...(data.reason?.trim() ? { reason: data.reason.trim() } : {}),
+        },
+      });
+
+      return { success: true, signal: nextSignal, status: data.status };
     },
   );
 

@@ -5,7 +5,7 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { registerSignalsFunction } from "../src/functions/signals.js";
-import type { Signal } from "../src/types.js";
+import type { AgentEvent, Signal } from "../src/types.js";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -249,6 +249,84 @@ describe("Signals Functions", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe("agentId is required");
+    });
+  });
+
+  describe("mem::handoff-update", () => {
+    it("accepts handoffs and records explicit lineage events", async () => {
+      const sent = (await sdk.trigger("mem::signal-send", {
+        from: "planner",
+        to: "implementer",
+        content: "Please take the next lane",
+        type: "handoff",
+        threadId: "thr_handoff",
+      })) as { success: boolean; signal: Signal };
+
+      const accepted = (await sdk.trigger("mem::handoff-update", {
+        signalId: sent.signal.id,
+        agentId: "implementer",
+        status: "accepted",
+        reason: "I have context",
+        metadata: { lane: "lineage" },
+      })) as { success: boolean; signal: Signal; status: string };
+
+      expect(accepted.success).toBe(true);
+      expect(accepted.status).toBe("accepted");
+      expect(accepted.signal.readAt).toBeDefined();
+      expect(accepted.signal.metadata).toMatchObject({
+        lane: "lineage",
+        handoff: {
+          status: "accepted",
+          updatedBy: "implementer",
+          reason: "I have context",
+        },
+      });
+
+      const events = await kv.list<AgentEvent>("mem:agent-events");
+      expect(events.map((event) => event.type)).toContain("handoff_accepted");
+      const event = events.find((item) => item.type === "handoff_accepted");
+      expect(event).toMatchObject({
+        functionId: "mem::handoff-update",
+        agentId: "implementer",
+        correlationId: "thr_handoff",
+        signalIds: [sent.signal.id],
+        handoffFrom: "planner",
+        handoffTo: "implementer",
+      });
+    });
+
+    it("rejects invalid or unauthorized handoff updates", async () => {
+      const info = (await sdk.trigger("mem::signal-send", {
+        from: "planner",
+        to: "implementer",
+        content: "FYI",
+        type: "info",
+      })) as { success: boolean; signal: Signal };
+      const handoff = (await sdk.trigger("mem::signal-send", {
+        from: "planner",
+        to: "implementer",
+        content: "Please take this",
+        type: "handoff",
+      })) as { success: boolean; signal: Signal };
+
+      await expect(
+        sdk.trigger("mem::handoff-update", {
+          signalId: info.signal.id,
+          agentId: "implementer",
+          status: "accepted",
+        }),
+      ).resolves.toMatchObject({ success: false, error: "signal is not a handoff" });
+
+      await expect(
+        sdk.trigger("mem::handoff-update", {
+          signalId: handoff.signal.id,
+          agentId: "observer",
+          status: "accepted",
+        }),
+      ).resolves.toMatchObject({
+        success: false,
+        error: "agent is not allowed to update this handoff",
+      });
     });
   });
 
