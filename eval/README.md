@@ -5,15 +5,19 @@ Public benchmarks for agentmemory's hybrid memory stack (BM25 + embeddings + con
 Two families, both reproducible:
 
 - **LongMemEval** — public 500-question retrieval benchmark over multi-session chat
-- **coding-agent-life-v1** — in-house corpus of 15 fictional Claude Code sessions for a Rust CLI project (`shipctl`), with 15 hand-graded queries covering bug fixes, refactors, preferences, and multi-session causal reasoning
+- **coding-agent-life-v1** — in-house corpus of 20 fictional coding-agent sessions for a Rust CLI project (`shipctl`), with 20 hand-graded queries covering bug replay, stale branch traps, PR review recall, repo onboarding, failed-fix avoidance, deletion correctness, cross-agent handoff, preferences, and multi-session causal reasoning
 
 ## Adapters
 
-| Adapter | Backend | API key needed |
-|---|---|---|
-| `grep` | Tokenized substring match | none |
-| `vector` | OpenAI `text-embedding-3-small` + cosine | `OPENAI_API_KEY` |
-| `agentmemory` | Running agentmemory server, smart-search endpoint | none (auth optional via `AGENTMEMORY_SECRET`) |
+| Adapter | Status | Backend | API key needed |
+|---|---|---|---|
+| `grep` | implemented | Tokenized substring match | none |
+| `vector` | implemented | OpenAI `text-embedding-3-small` + cosine | `OPENAI_API_KEY` |
+| `agentmemory` | implemented | Running agentmemory server, smart-search endpoint | none (auth optional via `AGENTMEMORY_SECRET`) |
+
+The default runner set is only `grep,vector,agentmemory`.
+
+Stubbed competitor names are registered for scorecard accounting but are deliberately unavailable until an external runner is configured: `mem0`, `letta`, `zep-graphiti`, `langmem`, `basic-memory`, `openmemory`, and `supermemory`. Resolving one of these names succeeds; running it fails fast with a `BENCHMARK_ADAPTER_UNAVAILABLE` skip payload that includes the missing optional executable/config env vars and an install hint, so public comparisons do not imply numbers were measured.
 
 ## Sandbox first
 
@@ -75,6 +79,7 @@ eval/
 │   ├── score.ts                   P@K, R@K, aggregation
 │   ├── load.ts                    LongMemEval JSON → Question[]
 │   ├── adapters/
+│   │   ├── index.ts               shared benchmark adapter registry
 │   │   ├── grep.ts                tokenized substring baseline
 │   │   ├── vector.ts              OpenAI embeddings + cosine
 │   │   └── agentmemory.ts         POST /agentmemory/{remember,smart-search}
@@ -82,8 +87,8 @@ eval/
 │   └── coding-life.ts             in-house benchmark runner
 └── data/
     └── coding-agent-life-v1/
-        ├── sessions.json          15 fictional sessions (~6KB)
-        └── queries.json           15 queries with gold session IDs
+        ├── sessions.json          20 fictional sessions
+        └── queries.json           20 queries with gold session IDs and taskCategory metadata
 ```
 
 Reports land in `eval/reports/<bench>/` (gitignored): `scores.ndjson` + `summary.json`.
@@ -101,8 +106,10 @@ Published scorecards land in `docs/benchmarks/YYYY-MM-DD-<bench>.md`.
      async query(q, state, k) { /* search */ return ranked; },
    };
    ```
-2. Register in `eval/runner/{longmemeval,coding-life}.ts` `ADAPTERS` map.
+2. Register once in `eval/runner/adapters/index.ts` so both benchmark runners share the same adapter name, descriptor, and default option validation.
 3. Run against `coding-agent-life-v1` to sanity-check before committing OpenAI spend on LongMemEval.
+
+For competitor scorecards, keep unmeasured adapters stubbed until the runner is present and reproducible. The descriptor must explain the missing optional executable/config and the unavailable adapter must expose machine-readable skip metadata instead of silently skipping or fabricating results.
 
 ## Why a benchmark for agentmemory
 

@@ -32,6 +32,31 @@ Beats grep baseline by +X.Xpt R@5, vector by +X.Xpt R@5.
 | multi-session-causal | | | |
 | temporal | | | |
 
+## Task Categories
+
+| taskCategory | Query count | Notes |
+|---|---:|---|
+| bug-replay | | |
+| stale-branch-trap | | |
+| pr-review-recall | | |
+| repo-onboarding | | |
+| failed-fix-avoidance | | |
+| deletion-correctness | | |
+| cross-agent-handoff | | |
+
+## Adapter Availability
+
+List every requested adapter, including descriptor-only competitors. Mark
+unavailable adapters as `not_run` and include the missing optional executable
+or config field.
+
+| Adapter | Status | Missing optional executable/config | Notes |
+|---|---|---|---|
+| grep | measured | none | |
+| vector | measured / not_run | `OPENAI_API_KEY` if not_run | |
+| agentmemory | measured | none | |
+| mem0 | not_run | `MEM0_ADAPTER_COMMAND`, `MEM0_API_KEY` | descriptor-only until configured |
+
 ## Methodology
 
 - Sessions ingested via `POST /agentmemory/remember` with `type=eval-session`

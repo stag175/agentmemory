@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createEmbeddingProvider,
   withDimensionGuard,
@@ -7,11 +10,18 @@ import { GeminiEmbeddingProvider } from "../src/providers/embedding/gemini.js";
 import { OpenAIEmbeddingProvider } from "../src/providers/embedding/openai.js";
 import type { EmbeddingProvider } from "../src/types.js";
 
+function sandboxEnv(originalEnv: NodeJS.ProcessEnv): string {
+  const home = mkdtempSync(join(tmpdir(), "am-embedding-env-"));
+  process.env = { ...originalEnv, HOME: home, USERPROFILE: home };
+  return home;
+}
+
 describe("createEmbeddingProvider", () => {
   const originalEnv = { ...process.env };
+  let home: string;
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
+    home = sandboxEnv(originalEnv);
     delete process.env["GEMINI_API_KEY"];
     delete process.env["OPENAI_API_KEY"];
     delete process.env["VOYAGE_API_KEY"];
@@ -22,6 +32,7 @@ describe("createEmbeddingProvider", () => {
 
   afterEach(() => {
     process.env = originalEnv;
+    rmSync(home, { recursive: true, force: true });
   });
 
   it("returns null when no API keys are set", () => {
@@ -54,9 +65,10 @@ describe("createEmbeddingProvider", () => {
 
 describe("OpenAIEmbeddingProvider", () => {
   const originalEnv = { ...process.env };
+  let home: string;
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
+    home = sandboxEnv(originalEnv);
     delete process.env["OPENAI_BASE_URL"];
     delete process.env["OPENAI_EMBEDDING_BASE_URL"];
     delete process.env["OPENAI_EMBEDDING_API_KEY"];
@@ -66,6 +78,7 @@ describe("OpenAIEmbeddingProvider", () => {
 
   afterEach(() => {
     process.env = originalEnv;
+    rmSync(home, { recursive: true, force: true });
   });
 
   it("uses default base URL and model when env vars are not set", () => {

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { buildLineage, eventFields, sendAgentEvent } from "./_lineage.js";
+
 // Inlined — see src/hooks/sdk-guard.ts for canonical version. Kept local
 // per-hook so tsdown does not emit a shared hashed chunk that would churn
 // the diff on every rebuild.
@@ -38,20 +40,34 @@ async function main() {
   }
 
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
+  const lineage = buildLineage(data, "stop", { sessionId });
+  const fields = eventFields(lineage);
+  const headers = authHeaders();
 
   fetch(`${REST_URL}/agentmemory/summarize`, {
     method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({ sessionId }),
+    headers,
+    body: JSON.stringify({ ...fields, sessionId }),
     signal: AbortSignal.timeout(120000),
   }).catch(() => {});
 
   fetch(`${REST_URL}/agentmemory/session/end`, {
     method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({ sessionId }),
+    headers,
+    body: JSON.stringify({ ...fields, sessionId }),
     signal: AbortSignal.timeout(5000),
   }).catch(() => {});
+
+  sendAgentEvent(REST_URL, headers, {
+    type: "custom",
+    status: "ok",
+    ...fields,
+    functionId: "plugin::stop",
+    metadata: {
+      hookType: "stop",
+      summarizeRequested: true,
+    },
+  });
 
   setTimeout(() => process.exit(0), 1500).unref();
 }

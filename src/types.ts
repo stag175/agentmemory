@@ -12,6 +12,7 @@ export interface Session {
   summary?: string;
   commitShas?: string[];
   agentId?: string;
+  updatedAt?: string;
 }
 
 export interface CommitLink {
@@ -85,12 +86,16 @@ export interface Memory {
   createdAt: string;
   updatedAt: string;
   type: "pattern" | "preference" | "architecture" | "bug" | "workflow" | "fact";
+  lane?: MemoryLane;
+  lifecycleState?: MemoryLifecycleState;
+  reviewState?: MemoryReviewState;
   title: string;
   content: string;
   concepts: string[];
   files: string[];
   sessionIds: string[];
   strength: number;
+  confidence?: number;
   version: number;
   parentId?: string;
   supersedes?: string[];
@@ -98,10 +103,106 @@ export interface Memory {
   sourceObservationIds?: string[];
   isLatest: boolean;
   forgetAfter?: string;
+  archivedAt?: string;
+  deletedAt?: string;
+  restoredAt?: string;
+  validFrom?: string;
+  validUntil?: string;
+  privacyScope?: MemoryPrivacyScope;
+  redactionApplied?: boolean;
+  sensitivityLabels?: string[];
+  ownerId?: string;
+  branch?: string;
+  commit?: string;
+  sourceHash?: string;
+  sourceType?: string;
+  sourceUri?: string;
+  sourceLineRange?: { start?: number; end?: number };
   imageRef?: string;
   imageData?: string;
   agentId?: string;
   project?: string;
+}
+
+export type MemoryLane =
+  | "episode"
+  | "semantic_fact"
+  | "procedure"
+  | "reflection"
+  | "artifact_index";
+
+export type MemoryLifecycleState =
+  | "active"
+  | "quarantined"
+  | "archived"
+  | "expired"
+  | "tombstoned"
+  | "deleted"
+  | "superseded";
+
+export type MemoryReviewState =
+  | "unreviewed"
+  | "reviewed"
+  | "needs_review"
+  | "trusted"
+  | "rejected";
+
+export type MemoryPrivacyScope =
+  | "user"
+  | "project"
+  | "team"
+  | "agent"
+  | "temporary";
+
+export interface MemoryRevision {
+  id: string;
+  memoryId: string;
+  action:
+    | "create"
+    | "update"
+    | "supersede"
+    | "expire"
+    | "archive"
+    | "restore"
+    | "tombstone"
+    | "delete";
+  createdAt: string;
+  actor?: string;
+  reason?: string;
+  prior?: Partial<Memory>;
+  next?: Partial<Memory>;
+}
+
+export interface MemorySourceCard {
+  memoryId: string;
+  sourceType: string;
+  sourceUri?: string;
+  sourceHash?: string;
+  project?: string;
+  branch?: string;
+  commit?: string;
+  createdAt: string;
+  updatedAt: string;
+  sourceObservationIds: string[];
+  sessions: Array<{
+    id: string;
+    project: string;
+    cwd: string;
+    status: Session["status"];
+    startedAt: string;
+    endedAt?: string;
+    commitShas?: string[];
+  }>;
+  observations: Array<{
+    id: string;
+    sessionId: string;
+    title: string;
+    type: ObservationType;
+    timestamp: string;
+    files: string[];
+    confidence?: number;
+  }>;
+  access?: AccessLogExport;
 }
 
 export interface SessionSummary {
@@ -261,6 +362,25 @@ export interface HybridSearchResult {
   graphContext?: string;
 }
 
+export type SearchCandidateFilter = (
+  obsId: string,
+  sessionId: string,
+) => boolean;
+
+export type SearchMode = "fast" | "balanced" | "deep";
+
+export type RetrievalMode =
+  | "basic"
+  | "local_graph"
+  | "global_community"
+  | "drift"
+  | "as_of";
+
+export interface SearchBackendOptions {
+  candidateFilter?: SearchCandidateFilter;
+  searchMode?: SearchMode;
+}
+
 export interface CompactSearchResult {
   obsId: string;
   sessionId: string;
@@ -278,6 +398,95 @@ export interface CompactLessonResult {
   createdAt: string;
   project?: string;
   tags: string[];
+}
+
+export interface RetrievalQuery {
+  query?: string;
+  searchMode: SearchMode;
+  retrievalMode?: RetrievalMode;
+  limit?: number;
+  tokenBudget?: number;
+  filters?: {
+    agentId?: string;
+    project?: string;
+    branch?: string;
+    commit?: string;
+    files?: string[];
+    memoryTier?: MemoryLane;
+    privacyScope?: MemoryPrivacyScope;
+  };
+}
+
+export interface QueryPlan {
+  mode?: "search" | "expandIds" | "context" | "enrich";
+  retrievalMode?: RetrievalMode;
+  searchMode: SearchMode;
+  streams: string[];
+  filterStage: string;
+  hardFilters?: Record<string, unknown>;
+  limits: {
+    requested?: number;
+    overFetch?: number;
+    tokenBudget?: number;
+  };
+  prefilter?: {
+    candidateCount: number;
+    scannedMemories?: number;
+    scannedSessions?: number;
+    scannedObservations?: number;
+  };
+  warnings?: string[];
+}
+
+export interface RankedEvidence {
+  id: string;
+  sourceType:
+    | "observation"
+    | "memory"
+    | "lesson"
+    | "summary"
+    | "context"
+    | "community_summary";
+  rank: number;
+  title?: string;
+  content: string;
+  sessionId?: string;
+  timestamp?: string;
+  score?: number;
+  tokens?: number;
+  sourceIds?: string[];
+  reasons: string[];
+  components?: {
+    bm25?: number;
+    vector?: number;
+    graph?: number;
+  };
+  graphContext?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ContextBudgetReport {
+  budgetTokens: number;
+  usedTokens: number;
+  headerTokens: number;
+  selectedCount: number;
+  ignoredCount: number;
+  selectedIds: string[];
+  ignored: Array<{
+    id: string;
+    rank: number;
+    tokens: number;
+    reason: "token_budget_exceeded" | "empty_content";
+  }>;
+}
+
+export interface PackedContext {
+  context: string;
+  selected: RankedEvidence[];
+  ignored: RankedEvidence[];
+  budgetReport: ContextBudgetReport;
+  tokens: number;
+  blocks: number;
 }
 
 export interface TimelineEntry {
@@ -306,9 +515,78 @@ export interface ExportPagination {
   hasMore: boolean;
 }
 
-export interface ExportData {
-  version: "0.3.0" | "0.4.0" | "0.5.0" | "0.6.0" | "0.6.1" | "0.7.0" | "0.7.2" | "0.7.3" | "0.7.4" | "0.7.5" | "0.7.6" | "0.7.7" | "0.7.9" | "0.8.0" | "0.8.1" | "0.8.2" | "0.8.3" | "0.8.4" | "0.8.5" | "0.8.6" | "0.8.7" | "0.8.8" | "0.8.9" | "0.8.10" | "0.8.11" | "0.8.12" | "0.8.13" | "0.9.0" | "0.9.1" | "0.9.2" | "0.9.3" | "0.9.4" | "0.9.5" | "0.9.6" | "0.9.7" | "0.9.8" | "0.9.9" | "0.9.10" | "0.9.11" | "0.9.12" | "0.9.13" | "0.9.14" | "0.9.15" | "0.9.16" | "0.9.17" | "0.9.18" | "0.9.19" | "0.9.20" | "0.9.21" | "0.9.22" | "0.9.23" | "0.9.24" | "0.9.25" | "0.9.26" | "0.9.27";
+export type ExportVersion =
+  | "0.3.0"
+  | "0.4.0"
+  | "0.5.0"
+  | "0.6.0"
+  | "0.6.1"
+  | "0.7.0"
+  | "0.7.2"
+  | "0.7.3"
+  | "0.7.4"
+  | "0.7.5"
+  | "0.7.6"
+  | "0.7.7"
+  | "0.7.9"
+  | "0.8.0"
+  | "0.8.1"
+  | "0.8.2"
+  | "0.8.3"
+  | "0.8.4"
+  | "0.8.5"
+  | "0.8.6"
+  | "0.8.7"
+  | "0.8.8"
+  | "0.8.9"
+  | "0.8.10"
+  | "0.8.11"
+  | "0.8.12"
+  | "0.8.13"
+  | "0.9.0"
+  | "0.9.1"
+  | "0.9.2"
+  | "0.9.3"
+  | "0.9.4"
+  | "0.9.5"
+  | "0.9.6"
+  | "0.9.7"
+  | "0.9.8"
+  | "0.9.9"
+  | "0.9.10"
+  | "0.9.11"
+  | "0.9.12"
+  | "0.9.13"
+  | "0.9.14"
+  | "0.9.15"
+  | "0.9.16"
+  | "0.9.17"
+  | "0.9.18"
+  | "0.9.19"
+  | "0.9.20"
+  | "0.9.21"
+  | "0.9.22"
+  | "0.9.23"
+  | "0.9.24"
+  | "0.9.25"
+  | "0.9.26"
+  | "0.9.27";
+
+export interface ExportManifest {
+  schema: "agentmemory.export";
+  schemaVersion: 1;
+  version: ExportVersion;
+  createdAt: string;
   exportedAt: string;
+  counts: Record<string, number>;
+  hashAlgorithm: "sha256";
+  hashes: Record<string, string>;
+}
+
+export interface ExportData {
+  version: ExportVersion;
+  exportedAt: string;
+  manifest?: ExportManifest;
   sessions: Session[];
   observations: Record<string, CompressedObservation[]>;
   memories: Memory[];
@@ -330,6 +608,8 @@ export interface ExportData {
   lessons?: Lesson[];
   insights?: Insight[];
   accessLogs?: AccessLogExport[];
+  memoryHistory?: MemoryRevision[];
+  agentEvents?: AgentEvent[];
   pagination?: ExportPagination;
 }
 
@@ -575,6 +855,7 @@ export interface AuditEntry {
     | "action_create"
     | "action_update"
     | "lease_acquire"
+    | "lease_renew"
     | "lease_release"
     | "routine_run"
     | "signal_send"
@@ -608,12 +889,86 @@ export interface AuditEntry {
     | "slot_replace"
     | "slot_create"
     | "slot_delete"
-    | "slot_reflect";
+    | "slot_reflect"
+    | "memory_lifecycle";
   userId?: string;
   functionId: string;
   targetIds: string[];
   details: Record<string, unknown>;
   qualityScore?: number;
+}
+
+export type AgentEventType =
+  | "session_started"
+  | "session_ended"
+  | "observation_recorded"
+  | "memory_written"
+  | "memory_superseded"
+  | "memory_updated"
+  | "memory_expired"
+  | "memory_archived"
+  | "memory_restored"
+  | "memory_tombstoned"
+  | "memory_deleted"
+  | "memory_forgotten"
+  | "signal_sent"
+  | "signal_read"
+  | "handoff_sent"
+  | "tool_requested"
+  | "tool_completed"
+  | "tool_failed"
+  | "handoff_accepted"
+  | "handoff_rejected"
+  | "handoff_completed"
+  | "checkpoint_created"
+  | "checkpoint_resolved"
+  | "eval_recorded"
+  | "custom";
+
+export interface AgentEvent {
+  id: string;
+  timestamp: string;
+  type: AgentEventType;
+  sessionId?: string;
+  project?: string;
+  cwd?: string;
+  agentId?: string;
+  framework?: string;
+  nativeId?: string;
+  traceId?: string;
+  runId?: string;
+  teamId?: string;
+  taskId?: string;
+  toolCallId?: string;
+  functionId?: string;
+  fromAgentId?: string;
+  toAgentId?: string;
+  handoffFrom?: string;
+  handoffTo?: string;
+  parentEventId?: string;
+  correlationId?: string;
+  status?: "ok" | "error" | "pending";
+  targetIds: string[];
+  observationIds?: string[];
+  memoryIds?: string[];
+  signalIds?: string[];
+  actionIds?: string[];
+  artifactIds?: string[];
+  commitShas?: string[];
+  evalId?: string;
+  checkpointId?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
+  cost?: {
+    amount?: number;
+    currency?: string;
+  };
+  metadata?: Record<string, unknown>;
+  redactionApplied?: boolean;
+  sensitivityLabels?: string[];
 }
 
 export interface GovernanceFilter {
@@ -622,6 +977,64 @@ export interface GovernanceFilter {
   dateTo?: string;
   project?: string;
   qualityBelow?: number;
+}
+
+export type ComplianceControlStatus = "pass" | "warn" | "fail" | "not_applicable";
+
+export interface ComplianceEvidenceInput {
+  project?: string;
+  workspaceRoot?: string;
+  teamPolicy?: unknown;
+  releaseGateEvidence?: unknown;
+  includeRuleContent?: boolean;
+}
+
+export interface ComplianceEvidenceControl {
+  id: string;
+  title: string;
+  status: ComplianceControlStatus;
+  summary: string;
+  metrics: Record<string, unknown>;
+  evidenceRefIds: string[];
+}
+
+export interface ComplianceEvidenceFinding {
+  id: string;
+  controlId: string;
+  severity: "low" | "medium" | "high";
+  message: string;
+  evidenceRefIds: string[];
+  recommendation: string;
+}
+
+export interface ComplianceEvidenceNextAction {
+  id: string;
+  priority: "low" | "medium" | "high";
+  controlId: string;
+  action: string;
+}
+
+export interface ComplianceEvidenceRef {
+  id: string;
+  type: "audit" | "memory" | "rules" | "team-policy" | "team-shared" | "release-gate";
+  label: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface ComplianceEvidenceReport {
+  success: true;
+  generatedAt: string;
+  scope: {
+    project?: string;
+    workspaceRoot?: string;
+    includeRuleContent: boolean;
+    teamPolicyProvided: boolean;
+    releaseGateEvidenceProvided: boolean;
+  };
+  controls: ComplianceEvidenceControl[];
+  findings: ComplianceEvidenceFinding[];
+  nextActions: ComplianceEvidenceNextAction[];
+  evidenceRefs: ComplianceEvidenceRef[];
 }
 
 export interface SnapshotMeta {

@@ -58,10 +58,10 @@
 <p align="center">
   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-recall.svg"><img src="assets/tags/stat-recall.svg" alt="95.2% retrieval R@5" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-tokens.svg"><img src="assets/tags/stat-tokens.svg" alt="92% fewer tokens" height="38" /></picture>
-  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-tools.svg"><img src="assets/tags/stat-tools.svg" alt="53 MCP tools" height="38" /></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-tools.svg"><img src="assets/tags/stat-tools.svg" alt="65 MCP tools" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-hooks.svg"><img src="assets/tags/stat-hooks.svg" alt="12 auto hooks" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-deps.svg"><img src="assets/tags/stat-deps.svg" alt="0 external DBs" height="38" /></picture>
-  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-tests.svg"><img src="assets/tags/stat-tests.svg" alt="1,423+ tests passing" height="38" /></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-tests.svg"><img src="assets/tags/stat-tests.svg" alt="1,669 tests passing" height="38" /></picture>
 </p>
 
 <p align="center">
@@ -471,6 +471,21 @@ agentmemory connect claude-code   # wire one agent
 agentmemory doctor             # interactive diagnostics + fix prompts
 ```
 
+### Diagnostics and release gates
+
+Use `diagnose` for daemon-side consistency checks and release readiness snapshots:
+
+```bash
+agentmemory diagnose --categories security
+agentmemory diagnose --categories security --json
+agentmemory diagnose --release-gate --json
+```
+
+The `security` category surfaces encryption readiness as the
+`encryption-readiness` diagnostic in text output and as `security.encryption` in
+JSON. Release-gate output also keeps non-passing diagnostic findings visible, so
+a diagnostic security failure is not hidden behind an otherwise passing gate.
+
 From v0.9.16 onward, the first npx run prompts you to install globally inline — answer `Y` once and you're set. If you skip, fall back to either of these for a fresh fetch:
 
 ```bash
@@ -506,14 +521,29 @@ Use the maintenance command when you intentionally want to update your local run
 npx @agentmemory/agentmemory upgrade
 ```
 
-Warning: this command mutates the current workspace/runtime. It can update JavaScript dependencies, may run `cargo install iii-engine --force`, and may pull Docker images.
+`upgrade` first classifies how the CLI is running. Source checkouts refresh dependencies and rebuild in the package root; global npm installs run `npm install -g @agentmemory/agentmemory@latest`; npx caches, plugin caches, MCPB, Homebrew, uv, pipx, Docker, and unknown installs print manager-specific guidance instead of mutating cache directories or arbitrary workspaces.
 
-Implementation details live in `src/cli.ts` (see `runUpgrade` around the `src/cli.ts:544-595` region).
+### Distribution packaging preflight
+
+Release candidates should pass the local packaging gate before any registry
+publish job runs:
+
+```bash
+npm run release:preflight
+```
+
+The preflight validates `server.json`, `smithery.yaml`,
+`packaging/mcpb/manifest.json`, `packaging/homebrew/agentmemory.rb.template`,
+and `packaging/vscode-extension/package.json` against the package version,
+runtime entrypoints, placeholder checksums, and local daemon configuration. This
+does not require npm, Smithery, Homebrew, or VS Code Marketplace publish
+credentials; it proves that the metadata is internally consistent before a
+credentialed release job replaces template placeholders or uploads artifacts.
 
 ### Claude Code (one block, paste it)
 
 ```text
-Install agentmemory: run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server. Then run `/plugin marketplace add rohitg00/agentmemory` and `/plugin install agentmemory` — the plugin registers all 12 hooks, 15 skills, AND auto-wires the `@agentmemory/mcp` stdio server via its `.mcp.json`, so you get 53 MCP tools (memory_smart_search, memory_save, memory_sessions, memory_governance_delete, etc.) without any extra config step. Verify with `curl http://localhost:3111/agentmemory/health`. The real-time viewer is at http://localhost:3113.
+Install agentmemory: run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server. Then run `/plugin marketplace add rohitg00/agentmemory` and `/plugin install agentmemory` — the plugin registers all 12 hooks, 15 skills, AND auto-wires the `@agentmemory/mcp` stdio server via its `.mcp.json`, so you get 65 MCP tools (memory_smart_search, memory_save, memory_create, memory_sessions, memory_governance_delete, etc.) without any extra config step. Verify with `curl http://localhost:3111/agentmemory/health`. The real-time viewer is at http://localhost:3113.
 ```
 
 #### Claude Code without the plugin install (MCP-standalone path)
@@ -542,7 +572,7 @@ codex plugin add agentmemory@agentmemory
 
 The Codex plugin ships from the same `plugin/` directory as the Claude Code plugin. It registers:
 
-- `@agentmemory/mcp` as an MCP server (proxies all 53 tools when `AGENTMEMORY_URL` points at a running agentmemory server; falls back to 7 tools locally when no server is reachable)
+- `@agentmemory/mcp` as an MCP server (proxies all 65 tools when `AGENTMEMORY_URL` points at a running agentmemory server; falls back to 19 local tools when no server is reachable)
 - 6 lifecycle hooks: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`
 - 8 invocable skills: `/recall`, `/remember`, `/session-history`, `/forget`, `/recap`, `/handoff`, `/commit-context`, `/commit-history`, plus 7 reference skills the agent loads on demand (MCP tools, REST API, config, agents, hooks, architecture, and the skill-authoring guide)
 
@@ -576,7 +606,7 @@ copilot plugin install rohitg00/agentmemory:plugin
 <summary><b>OpenClaw (paste this prompt)</b></summary>
 
 ```text
-Install agentmemory for OpenClaw. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to my OpenClaw MCP config so agentmemory is available with all 53 memory tools:
+Install agentmemory for OpenClaw. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to my OpenClaw MCP config so agentmemory is available with all 65 memory tools:
 
 {
   "mcpServers": {
@@ -601,7 +631,7 @@ Full guide: [`integrations/openclaw/`](integrations/openclaw/)
 <summary><b>Hermes Agent (paste this prompt)</b></summary>
 
 ```text
-Install agentmemory for Hermes. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to ~/.hermes/config.yaml so Hermes can use agentmemory as an MCP server with all 53 memory tools:
+Install agentmemory for Hermes. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to ~/.hermes/config.yaml so Hermes can use agentmemory as an MCP server with all 65 memory tools:
 
 mcp_servers:
   agentmemory:
@@ -619,6 +649,11 @@ Full guide: [`integrations/hermes/`](integrations/hermes/)
 </details>
 
 ### Other agents
+
+Framework runtimes such as OpenAI Agents, AutoGen, CrewAI, and LangGraph are
+application libraries rather than host-agent config directories. Use
+`agentmemory connect frameworks` for read-only setup helpers, or see
+[`docs/framework-adapters.md`](docs/framework-adapters.md).
 
 Start the memory server: `npx @agentmemory/agentmemory`
 
@@ -958,11 +993,11 @@ npm install @xenova/transformers
 
 <h2 id="mcp-server"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-mcp.svg"><img src="assets/tags/section-mcp.svg" alt="MCP Server" height="32" /></picture></h2>
 
-53 tools, 6 resources, 3 prompts, and 15 skills, the most comprehensive MCP memory toolkit for any agent.
+65 tools, 6 resources, 3 prompts, and 15 skills, the most comprehensive MCP memory toolkit for any agent.
 
-> **MCP shim vs full server:** the published `@agentmemory/mcp` package is a thin shim. It exposes the full 53-tool surface **only when it can reach a running agentmemory server** via `AGENTMEMORY_URL` (proxy mode). With no server reachable, the shim falls back to a 7-tool local set (`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`). The `AGENTMEMORY_TOOLS=core|all` env var is a *server-side* flag — setting it in the shim's `env` block has no effect. If you see only 7 tools in Cursor / OpenCode / Gemini CLI, start `npx @agentmemory/agentmemory` (or the Docker stack) and set `AGENTMEMORY_URL=http://localhost:3111`.
+> **MCP shim vs full server:** the published `@agentmemory/mcp` package is a thin shim. It exposes the full 65-tool surface **only when it can reach a running agentmemory server** via `AGENTMEMORY_URL` (proxy mode). With no server reachable, the shim falls back to a 19-tool local set: the original save/recall/search/session/export/audit/governance tools plus memory create/inspect/history/update/expire/archive/restore/delete/search-explain/ledger/review-queue/rules-resolve. The `AGENTMEMORY_TOOLS=core|all` env var is a *server-side* flag — setting it in the shim's `env` block has no effect. If you see only 19 tools in Cursor / OpenCode / Gemini CLI, start `npx @agentmemory/agentmemory` (or the Docker stack) and set `AGENTMEMORY_URL=http://localhost:3111`.
 
-### 53 Tools
+### 65 Tools
 
 <details>
 <summary>Core tools (always available)</summary>
@@ -984,7 +1019,7 @@ npm install @xenova/transformers
 </details>
 
 <details>
-<summary>Extended tools (53 total — set AGENTMEMORY_TOOLS=all)</summary>
+<summary>Extended tools (65 total — set AGENTMEMORY_TOOLS=all)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -998,6 +1033,7 @@ npm install @xenova/transformers
 | `memory_team_feed` | Recent shared items |
 | `memory_audit` | Audit trail of operations |
 | `memory_governance_delete` | Delete with audit trail |
+| `memory_create` | Explicit lifecycle memory creation |
 | `memory_snapshot_create` | Git-versioned snapshot |
 | `memory_action_create` | Create work items with dependencies |
 | `memory_action_update` | Update action status |
@@ -1210,7 +1246,7 @@ Full registry: [workers.iii.dev](https://workers.iii.dev). Every worker there co
 | Prometheus / Grafana | iii OTEL + health monitor |
 | Custom plugin systems | `iii worker add <name>` |
 
-**174 source files · ~37,800 LOC · 1,423+ tests · 258 functions · 44 KV scopes** — all on three primitives. No `agentmemory plugin install`. The plugin system is iii itself.
+**174 source files · ~37,800 LOC · 1,669 tests · 258 functions · 44 KV scopes** — all on three primitives. No `agentmemory plugin install`. The plugin system is iii itself.
 
 ---
 
@@ -1492,7 +1528,7 @@ Create `~/.agentmemory/.env`:
 # USER_ID=
 # TEAM_MODE=private
 
-# Tool visibility: "core" (8 tools, lean fallback) or "all" (53 tools)
+# Tool visibility: "core" (8 tools, lean fallback) or "all" (65 tools)
 # AGENTMEMORY_TOOLS=core
 ```
 
@@ -1500,7 +1536,7 @@ Create `~/.agentmemory/.env`:
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"><img src="assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-128 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
+162 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
 
 <details>
 <summary>Key endpoints</summary>
@@ -1515,6 +1551,8 @@ Create `~/.agentmemory/.env`:
 | `POST` | `/agentmemory/context` | Generate context |
 | `POST` | `/agentmemory/remember` | Save to long-term memory |
 | `POST` | `/agentmemory/forget` | Delete observations |
+| `GET` | `/agentmemory/memory/today` | Daily memory inbox |
+| `GET` | `/agentmemory/memory/unlinked-mentions` | Unlinked concept suggestions |
 | `POST` | `/agentmemory/enrich` | File context + memories + bugs |
 | `GET` | `/agentmemory/profile` | Project profile |
 | `GET` | `/agentmemory/export` | Export all data |
@@ -1534,7 +1572,7 @@ Full endpoint list: [`src/triggers/api.ts`](src/triggers/api.ts)
 ```bash
 npm run dev               # Hot reload
 npm run build             # Production build
-npm test                  # 1,423+ tests
+npm test                  # 1,669 tests
 npm run test:integration  # API tests (requires running services)
 ```
 

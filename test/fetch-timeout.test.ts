@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fetchWithTimeout } from "../src/providers/_fetch.js";
 import { MinimaxProvider } from "../src/providers/minimax.js";
 import { OpenRouterProvider } from "../src/providers/openrouter.js";
@@ -8,6 +11,21 @@ import { OpenAIEmbeddingProvider } from "../src/providers/embedding/openai.js";
 import { CohereEmbeddingProvider } from "../src/providers/embedding/cohere.js";
 import { VoyageEmbeddingProvider } from "../src/providers/embedding/voyage.js";
 import { OpenRouterEmbeddingProvider } from "../src/providers/embedding/openrouter.js";
+
+const ORIGINAL_ENV = { ...process.env };
+let sandboxHome: string;
+
+beforeEach(() => {
+  sandboxHome = mkdtempSync(join(tmpdir(), "am-fetch-timeout-"));
+  process.env = { ...ORIGINAL_ENV, HOME: sandboxHome, USERPROFILE: sandboxHome };
+  delete process.env["OPENAI_TIMEOUT_MS"];
+  delete process.env["AGENTMEMORY_LLM_TIMEOUT_MS"];
+});
+
+afterEach(() => {
+  process.env = ORIGINAL_ENV;
+  rmSync(sandboxHome, { recursive: true, force: true });
+});
 
 // A fetch mock that never resolves — simulates a hung upstream.
 function hangingFetch(_url: string, _init?: RequestInit): Promise<Response> {

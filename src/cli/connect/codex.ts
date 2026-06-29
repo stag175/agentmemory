@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import * as p from "@clack/prompts";
-import type { ConnectAdapter, ConnectOptions, ConnectResult } from "./types.js";
+import type {
+  ConnectAdapter,
+  ConnectOptions,
+  ConnectResult,
+  ConnectTargetMutation,
+} from "./types.js";
 import {
   backupFile,
   logAlreadyWired,
@@ -11,6 +16,7 @@ import {
   readJsonSafe,
   writeJsonAtomic,
 } from "./util.js";
+import { inspectTextBlock } from "./inspect.js";
 import {
   buildMergedHooks,
   findPluginRoot,
@@ -60,6 +66,18 @@ function stripExistingBlock(toml: string): string {
   return out.join("\n").replace(/\n{3,}$/, "\n\n").trimEnd() + "\n";
 }
 
+function targetFromResult(
+  result: ConnectResult,
+  label: string,
+): ConnectTargetMutation | null {
+  if (result.kind !== "installed" || !result.mutatedPath) return null;
+  return {
+    target: result.mutatedPath,
+    ...(result.backupPath !== undefined && { backupPath: result.backupPath }),
+    label,
+  };
+}
+
 export const adapter: ConnectAdapter = {
   name: "codex",
   displayName: "Codex CLI",
@@ -72,6 +90,18 @@ export const adapter: ConnectAdapter = {
     return existsSync(CODEX_DIR);
   },
 
+  inspect() {
+    return inspectTextBlock({
+      name: "codex",
+      displayName: "Codex CLI",
+      detectDir: CODEX_DIR,
+      configPath: CODEX_TOML,
+      expectedText: TOML_BLOCK.trim(),
+      staleMarker: SECTION_HEADER,
+      expectedMutation: `append [mcp_servers.agentmemory] to ${CODEX_TOML}; --with-hooks refreshes ${CODEX_HOOKS}`,
+    });
+  },
+
   async install(opts: ConnectOptions): Promise<ConnectResult> {
     const exists = existsSync(CODEX_TOML);
     const current = exists ? readFileSync(CODEX_TOML, "utf-8") : "";
@@ -79,6 +109,26 @@ export const adapter: ConnectAdapter = {
 
     if (wired && !opts.force) {
       logAlreadyWired("Codex CLI", CODEX_TOML);
+      if (opts.withHooks) {
+        const hookResult = installCodexHooks(opts);
+        if (hookResult.kind === "skipped") {
+          p.log.warn(
+            `Codex hooks fallback skipped: ${hookResult.reason}.`,
+          );
+        } else {
+          const hookTarget = targetFromResult(hookResult, "hooks");
+          if (hookTarget) {
+            return {
+              kind: "installed",
+              mutatedPath: hookTarget.target,
+              ...(hookTarget.backupPath !== undefined && {
+                backupPath: hookTarget.backupPath,
+              }),
+              targets: [hookTarget],
+            };
+          }
+        }
+      }
       return { kind: "already-wired", mutatedPath: CODEX_TOML };
     }
 
@@ -116,12 +166,23 @@ export const adapter: ConnectAdapter = {
       "Codex picks up MCP servers on next launch. For the deeper plugin install, run: codex plugin marketplace add rohitg00/agentmemory && codex plugin add agentmemory@agentmemory",
     );
 
+    const targets: ConnectTargetMutation[] = [
+      {
+        target: CODEX_TOML,
+        ...(backupPath !== undefined && { backupPath }),
+        label: "mcp",
+      },
+    ];
+
     if (opts.withHooks) {
       const hookResult = installCodexHooks(opts);
       if (hookResult.kind === "skipped") {
         p.log.warn(
           `Codex hooks fallback skipped: ${hookResult.reason}. MCP wiring still applied.`,
         );
+      } else {
+        const hookTarget = targetFromResult(hookResult, "hooks");
+        if (hookTarget) targets.push(hookTarget);
       }
     }
 
@@ -129,6 +190,7 @@ export const adapter: ConnectAdapter = {
       kind: "installed",
       mutatedPath: CODEX_TOML,
       ...(backupPath !== undefined && { backupPath }),
+      targets,
     };
   },
 };

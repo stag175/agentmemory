@@ -243,9 +243,10 @@ export function registerSlotsFunctions(sdk: ISdk, kv: StateKV): void {
       if (sizeLimit === null) {
         return { success: false, error: "sizeLimit must be an integer between 1 and 20000" };
       }
+      const effectiveSizeLimit = sizeLimit ?? DEFAULT_SIZE_LIMIT;
       const content = typeof data?.content === "string" ? data.content : "";
-      if (content.length > sizeLimit) {
-        return { success: false, error: `content exceeds sizeLimit (${content.length} > ${sizeLimit})` };
+      if (content.length > effectiveSizeLimit) {
+        return { success: false, error: `content exceeds sizeLimit (${content.length} > ${effectiveSizeLimit})` };
       }
       const description = typeof data?.description === "string" ? data.description : "";
       const pinned = typeof data?.pinned === "boolean" ? data.pinned : true;
@@ -258,7 +259,7 @@ export function registerSlotsFunctions(sdk: ISdk, kv: StateKV): void {
         const slot: MemorySlot = {
           label,
           content,
-          sizeLimit: sizeLimit as number,
+          sizeLimit: effectiveSizeLimit,
           description,
           pinned,
           readOnly: false,
@@ -316,25 +317,26 @@ export function registerSlotsFunctions(sdk: ISdk, kv: StateKV): void {
       const label = validateLabel(data?.label);
       if (!label) return { success: false, error: "label required" };
       if (typeof data?.content !== "string") return { success: false, error: "content required (string)" };
+      const content = data.content;
       return withKeyedLock(`slot:${label}`, async () => {
         const { slot, scope } = await readSlot(kv, label);
         if (!slot) return { success: false, error: "slot not found (use mem::slot-create first)" };
         if (slot.readOnly) return { success: false, error: "slot is read-only" };
-        if (data.content.length > slot.sizeLimit) {
+        if (content.length > slot.sizeLimit) {
           return {
             success: false,
-            error: `content exceeds sizeLimit (${data.content.length} > ${slot.sizeLimit})`,
+            error: `content exceeds sizeLimit (${content.length} > ${slot.sizeLimit})`,
             sizeLimit: slot.sizeLimit,
           };
         }
-        const updated: MemorySlot = { ...slot, content: data.content, updatedAt: nowIso() };
+        const updated: MemorySlot = { ...slot, content, updatedAt: nowIso() };
         await kv.set(scopeKv(scope), label, updated);
         await recordAudit(kv, "slot_replace", "mem::slot-replace", [label], {
           scope,
           before: slot.content.length,
-          after: data.content.length,
+          after: content.length,
         });
-        return { success: true, slot: updated, size: data.content.length };
+        return { success: true, slot: updated, size: content.length };
       });
     },
   );

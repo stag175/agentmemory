@@ -665,14 +665,17 @@ describe("Mesh Functions", () => {
         createdAt: "2026-03-01T00:00:00Z",
         confidence: 0.95,
       };
-      const relWithId = { ...rel, id: "rel_1" } as MemoryRelation & { id: string };
-
       const result = (await sdk.trigger("mem::mesh-receive", {
-        relations: [relWithId],
+        relations: [rel],
       })) as { success: boolean; accepted: number };
 
       expect(result.success).toBe(true);
       expect(result.accepted).toBe(1);
+      const stored = await kv.get<MemoryRelation & { id?: string }>(
+        "mem:relations",
+        "mem_2:mem_1:supersedes",
+      );
+      expect(stored?.id).toBe("mem_2:mem_1:supersedes");
     });
 
     it("accepts all scope types in one call", async () => {

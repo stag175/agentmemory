@@ -49,6 +49,20 @@ describe("VectorIndex", () => {
     expect(results.length).toBe(3);
   });
 
+  it("does not let disallowed top hits consume the result limit", () => {
+    index.add("obs_blocked", "ses_1", new Float32Array([1, 0, 0]));
+    index.add("obs_allowed", "ses_1", new Float32Array([0.8, 0.2, 0]));
+
+    const results = index.search(
+      new Float32Array([1, 0, 0]),
+      1,
+      (obsId) => obsId === "obs_allowed",
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0].obsId).toBe("obs_allowed");
+  });
+
   it("clears all vectors", () => {
     index.add("obs_1", "ses_1", new Float32Array([0.1, 0.2, 0.3]));
     index.add("obs_2", "ses_1", new Float32Array([0.4, 0.5, 0.6]));

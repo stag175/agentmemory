@@ -1,5 +1,12 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import {
+  buildLineage,
+  eventFields,
+  firstString,
+  safeMetadata,
+  sendAgentEvent,
+  targetIdsFor,
+} from "./_lineage.js";
 
 // Inlined from ./sdk-guard so each hook bundles to a single self-contained
 // .mjs (matches the pattern used by every other hook entry in tsdown.config).
@@ -40,25 +47,45 @@ async function main() {
   if (isSdkChildContext(data)) return;
 
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
-  const agentId = data.agent_id || data.agentName;
-  const agentType = data.agent_type || data.agentDisplayName || data.agentName;
+  const agentId = firstString(data.agent_id, data.agentId, data.agentName);
+  const agentType = firstString(
+    data.agent_type,
+    data.agentDisplayName,
+    data.agentName,
+  );
+  const lineage = buildLineage(data, "subagent_start", { sessionId, agentId });
+  const fields = eventFields(lineage);
+  const headers = authHeaders();
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
-    headers: authHeaders(),
+    headers,
     body: JSON.stringify({
       hookType: "subagent_start",
-      sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
+      ...fields,
       timestamp: new Date().toISOString(),
       data: {
-        agent_id: agentId,
+        agent_id: lineage.agentId,
         agent_type: agentType,
+        lineage,
       },
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   }).catch(() => {});
+
+  sendAgentEvent(REST_URL, headers, {
+    type: "custom",
+    status: "pending",
+    ...fields,
+    functionId: "plugin::subagent_start",
+    fromAgentId: firstString(data.parent_agent_id, data.parentAgentId),
+    toAgentId: lineage.agentId,
+    targetIds: targetIdsFor(lineage.agentId),
+    metadata: {
+      hookType: "subagent_start",
+      agentType: safeMetadata(agentType),
+    },
+  });
   setTimeout(() => process.exit(0), 500).unref();
 }
 

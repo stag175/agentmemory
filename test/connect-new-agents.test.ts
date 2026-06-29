@@ -11,16 +11,30 @@ function freshHome(): string {
   return mkdtempSync(join(tmpdir(), "am-connect-"));
 }
 
+const ORIGINAL_USERPROFILE = process.env["USERPROFILE"];
+
+function setSandboxHome(home: string): void {
+  process.env["HOME"] = home;
+  process.env["USERPROFILE"] = home;
+}
+
+function restoreSandboxHome(originalHome: string | undefined): void {
+  if (originalHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = originalHome;
+  if (ORIGINAL_USERPROFILE === undefined) delete process.env["USERPROFILE"];
+  else process.env["USERPROFILE"] = ORIGINAL_USERPROFILE;
+}
+
 describe("connect: Qwen Code", () => {
   let home: string;
   const ORIG = process.env["HOME"];
   beforeEach(() => {
     home = freshHome();
     vi.resetModules();
-    process.env["HOME"] = home;
+    setSandboxHome(home);
   });
   afterEach(() => {
-    process.env["HOME"] = ORIG;
+    restoreSandboxHome(ORIG);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -55,10 +69,10 @@ describe("connect: Antigravity", () => {
   beforeEach(() => {
     home = freshHome();
     vi.resetModules();
-    process.env["HOME"] = home;
+    setSandboxHome(home);
   });
   afterEach(() => {
-    process.env["HOME"] = ORIG;
+    restoreSandboxHome(ORIG);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -88,10 +102,10 @@ describe("connect: Kiro", () => {
   beforeEach(() => {
     home = freshHome();
     vi.resetModules();
-    process.env["HOME"] = home;
+    setSandboxHome(home);
   });
   afterEach(() => {
-    process.env["HOME"] = ORIG;
+    restoreSandboxHome(ORIG);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -120,10 +134,10 @@ describe("connect: Warp", () => {
   beforeEach(() => {
     home = freshHome();
     vi.resetModules();
-    process.env["HOME"] = home;
+    setSandboxHome(home);
   });
   afterEach(() => {
-    process.env["HOME"] = ORIG;
+    restoreSandboxHome(ORIG);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -155,10 +169,10 @@ describe("connect: Cline", () => {
   beforeEach(() => {
     home = freshHome();
     vi.resetModules();
-    process.env["HOME"] = home;
+    setSandboxHome(home);
   });
   afterEach(() => {
-    process.env["HOME"] = ORIG;
+    restoreSandboxHome(ORIG);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -187,10 +201,10 @@ describe("connect: Droid (Factory.ai)", () => {
   beforeEach(() => {
     home = freshHome();
     vi.resetModules();
-    process.env["HOME"] = home;
+    setSandboxHome(home);
   });
   afterEach(() => {
-    process.env["HOME"] = ORIG;
+    restoreSandboxHome(ORIG);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -221,10 +235,10 @@ describe("connect: Zed", () => {
   beforeEach(() => {
     home = freshHome();
     vi.resetModules();
-    process.env["HOME"] = home;
+    setSandboxHome(home);
   });
   afterEach(() => {
-    process.env["HOME"] = ORIG;
+    restoreSandboxHome(ORIG);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -254,10 +268,10 @@ describe("connect: Continue.dev", () => {
   beforeEach(() => {
     home = freshHome();
     vi.resetModules();
-    process.env["HOME"] = home;
+    setSandboxHome(home);
   });
   afterEach(() => {
-    process.env["HOME"] = ORIG;
+    restoreSandboxHome(ORIG);
     rmSync(home, { recursive: true, force: true });
   });
 

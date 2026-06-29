@@ -82,13 +82,14 @@ describe("Relations Functions", () => {
       await kv.set("mem:memories", "mem_1", mem1);
       await kv.set("mem:memories", "mem_2", mem2);
 
-      const result = await sdk.trigger("mem::relate", {
+      const result = (await sdk.trigger("mem::relate", {
         sourceId: "mem_1",
         targetId: "mem_2",
         type: "related",
-      });
+      })) as { success: boolean; relationId: string; relation: { id?: string } };
 
-      expect((result as { success: boolean }).success).toBe(true);
+      expect(result.success).toBe(true);
+      expect(result.relation.id).toBe(result.relationId);
 
       const updated1 = await kv.get<Memory>("mem:memories", "mem_1");
       const updated2 = await kv.get<Memory>("mem:memories", "mem_2");

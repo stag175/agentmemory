@@ -1,3 +1,5 @@
+import type { SearchCandidateFilter } from "../types.js";
+
 // Pass byteOffset + byteLength explicitly so the round-trip survives
 // Node's Buffer pool. Buffer.from(b64, "base64") returns a slice of a
 // shared 8KB pool (poolSize), and `new Float32Array(buf.buffer)` ignores
@@ -49,6 +51,7 @@ export class VectorIndex {
   search(
     query: Float32Array,
     limit = 20,
+    candidateFilter?: SearchCandidateFilter,
   ): Array<{ obsId: string; sessionId: string; score: number }> {
     const results: Array<{
       obsId: string;
@@ -58,6 +61,9 @@ export class VectorIndex {
     let minScore = -Infinity;
 
     for (const [obsId, entry] of this.vectors) {
+      if (candidateFilter && !candidateFilter(obsId, entry.sessionId)) {
+        continue;
+      }
       const score = cosineSimilarity(query, entry.embedding);
       if (results.length < limit) {
         results.push({ obsId, sessionId: entry.sessionId, score });

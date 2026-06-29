@@ -16,14 +16,29 @@ function safeParseInt(value: string | undefined, fallback: number): number {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
-const DATA_DIR = join(homedir(), ".agentmemory");
-const ENV_FILE = join(DATA_DIR, ".env");
+function resolveHomeDir(): string {
+  return (
+    process.env["AGENTMEMORY_HOME"] ||
+    process.env["HOME"] ||
+    process.env["USERPROFILE"] ||
+    homedir()
+  );
+}
+
+function dataDir(): string {
+  return join(resolveHomeDir(), ".agentmemory");
+}
+
+function envFile(): string {
+  return join(dataDir(), ".env");
+}
 
 let warnPremiumModelShown = false;
 
 function loadEnvFile(): Record<string, string> {
-  if (!existsSync(ENV_FILE)) return {};
-  const content = readFileSync(ENV_FILE, "utf-8");
+  const file = envFile();
+  if (!existsSync(file)) return {};
+  const content = readFileSync(file, "utf-8");
   const vars: Record<string, string> = {};
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
@@ -183,7 +198,7 @@ export function loadConfig(): AgentMemoryConfig {
     tokenBudget: safeParseInt(env["TOKEN_BUDGET"], 2000),
     maxObservationsPerSession: safeParseInt(env["MAX_OBS_PER_SESSION"], 500),
     compressionModel: provider.model,
-    dataDir: DATA_DIR,
+    dataDir: dataDir(),
   };
 }
 
@@ -264,7 +279,7 @@ export function loadClaudeBridgeConfig(): ClaudeBridgeConfig {
     // under the slug dir.
     const safePath = projectPath.replace(/[/\\]/g, "-");
     memoryFilePath = join(
-      homedir(),
+      resolveHomeDir(),
       ".claude",
       "projects",
       safePath,
@@ -324,7 +339,7 @@ export function loadSnapshotConfig(): {
   return {
     enabled: env["SNAPSHOT_ENABLED"] === "true",
     interval: safeParseInt(env["SNAPSHOT_INTERVAL"], 3600),
-    dir: env["SNAPSHOT_DIR"] || join(homedir(), ".agentmemory", "snapshots"),
+    dir: env["SNAPSHOT_DIR"] || join(dataDir(), "snapshots"),
   };
 }
 
@@ -386,6 +401,90 @@ export function isAutoCompressEnabled(): boolean {
   return getMergedEnv()["AGENTMEMORY_AUTO_COMPRESS"] === "true";
 }
 
+type EnvFlag = "true" | "false" | undefined;
+
+function readEnvFlag(value: string | undefined): EnvFlag {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on", "enabled"].includes(normalized)) {
+    return "true";
+  }
+  if (["0", "false", "no", "off", "disabled"].includes(normalized)) {
+    return "false";
+  }
+  return undefined;
+}
+
+export type AutomaticCaptureControl = {
+  enabled: boolean;
+  reason?: "consent_required" | "paused" | "incognito";
+  source?: string;
+};
+
+export function getAutomaticCaptureControl(): AutomaticCaptureControl {
+  const env = getMergedEnv();
+  const incognitoKeys = [
+    "AGENTMEMORY_INCOGNITO",
+    "AGENTMEMORY_CAPTURE_INCOGNITO",
+  ];
+  for (const key of incognitoKeys) {
+    if (readEnvFlag(env[key]) === "true") {
+      return { enabled: false, reason: "incognito", source: key };
+    }
+  }
+
+  const pauseKeys = [
+    "AGENTMEMORY_CAPTURE_PAUSED",
+    "AGENTMEMORY_PAUSE_CAPTURE",
+  ];
+  for (const key of pauseKeys) {
+    if (readEnvFlag(env[key]) === "true") {
+      return { enabled: false, reason: "paused", source: key };
+    }
+  }
+
+  const consentKeys = [
+    "AGENTMEMORY_CAPTURE_CONSENT",
+    "AGENTMEMORY_CONSENT_CAPTURE",
+  ];
+  for (const key of consentKeys) {
+    if (readEnvFlag(env[key]) === "false") {
+      return { enabled: false, reason: "consent_required", source: key };
+    }
+  }
+
+  const directCaptureKeys = [
+    "AGENTMEMORY_CAPTURE",
+    "AGENTMEMORY_AUTO_CAPTURE",
+    "AGENTMEMORY_ENABLE_CAPTURE",
+    "AGENTMEMORY_CAPTURE_ENABLED",
+  ];
+  for (const key of directCaptureKeys) {
+    if (readEnvFlag(env[key]) === "false") {
+      return { enabled: false, reason: "consent_required", source: key };
+    }
+  }
+
+  if (readEnvFlag(env["AGENTMEMORY_REQUIRE_CAPTURE_CONSENT"]) === "true") {
+    const hasConsent = consentKeys.some(
+      (key) => readEnvFlag(env[key]) === "true",
+    );
+    if (!hasConsent) {
+      return {
+        enabled: false,
+        reason: "consent_required",
+        source: "AGENTMEMORY_REQUIRE_CAPTURE_CONSENT",
+      };
+    }
+  }
+
+  return { enabled: true };
+}
+
+export function isAutomaticCaptureEnabled(): boolean {
+  return getAutomaticCaptureControl().enabled;
+}
+
 // Hook-level context injection into Claude Code's conversation is OFF by
 // default as of 0.8.10 (see #143). When disabled, pre-tool-use and
 // session-start hooks still POST observations for background capture, but
@@ -411,7 +510,7 @@ export function getStandalonePersistPath(): string {
   const env = getMergedEnv();
   return (
     env["STANDALONE_PERSIST_PATH"] ||
-    join(homedir(), ".agentmemory", "standalone.json")
+    join(dataDir(), "standalone.json")
   );
 }
 

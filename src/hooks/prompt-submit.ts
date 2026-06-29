@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { buildLineage, eventFields } from "./_lineage.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -32,17 +32,16 @@ async function main() {
   if (isSdkChildContext(data)) return;
 
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
+  const lineage = buildLineage(data, "prompt_submit", { sessionId });
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({
       hookType: "prompt_submit",
-      sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
+      ...eventFields(lineage),
       timestamp: new Date().toISOString(),
-      data: { prompt: data.prompt ?? data.userPrompt },
+      data: { prompt: data.prompt ?? data.userPrompt, lineage },
     }),
     signal: AbortSignal.timeout(3000),
   }).catch(() => {});

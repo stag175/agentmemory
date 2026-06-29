@@ -1,18 +1,10 @@
 import { existsSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { agentmemoryAdapter } from "./adapters/agentmemory.js";
-import { grepAdapter } from "./adapters/grep.js";
-import { vectorAdapter } from "./adapters/vector.js";
+import { resolveBenchmarkAdapters } from "./adapters/index.js";
 import { loadLongMemEval, stratifySample } from "./load.js";
 import { aggregate, scoreQuestion } from "./score.js";
-import type { Adapter, ScoreRow } from "./types.js";
-
-const ADAPTERS: Record<string, Adapter> = {
-  grep: grepAdapter as unknown as Adapter,
-  vector: vectorAdapter as unknown as Adapter,
-  agentmemory: agentmemoryAdapter as unknown as Adapter,
-};
+import type { BenchmarkAdapterDescriptor, ScoreRow } from "./types.js";
 
 interface CliOptions {
   data: string;
@@ -64,13 +56,14 @@ async function main(): Promise<void> {
       process.exit(2);
     }
   }
-  const adapterNames = opts.adapters.split(",").map((s) => s.trim()).filter(Boolean);
-  for (const a of adapterNames) {
-    if (!ADAPTERS[a]) {
-      console.error(`unknown adapter: ${a}. options: ${Object.keys(ADAPTERS).join(",")}`);
-      process.exit(2);
-    }
+  let adapterDescriptors: BenchmarkAdapterDescriptor[];
+  try {
+    adapterDescriptors = resolveBenchmarkAdapters(opts.adapters);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(2);
   }
+  const adapterNames = adapterDescriptors.map((descriptor) => descriptor.name);
   let questions = loadLongMemEval(resolve(opts.data), limit);
   if (perType) questions = stratifySample(questions, perType);
   console.log(
@@ -84,8 +77,8 @@ async function main(): Promise<void> {
   mkdirSync(dirname(ndjsonPath), { recursive: true });
 
   const rows: ScoreRow[] = [];
-  for (const adapterName of adapterNames) {
-    const adapter = ADAPTERS[adapterName];
+  for (const descriptor of adapterDescriptors) {
+    const adapter = descriptor.adapter;
     console.log(`\n== ${adapter.name} ==`);
     for (const q of questions) {
       const t0 = performance.now();

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
@@ -9,6 +9,14 @@ import {
   resolveAdapter,
 } from "../src/cli/connect/index.js";
 import type { ConnectAdapter } from "../src/cli/connect/types.js";
+import {
+  applyConnectRollbackPlan,
+  buildConnectRollbackPlan,
+  markConnectRollbackResults,
+  mergeConnectManifestEntries,
+  readConnectManifest,
+  type ConnectRollbackPathKind,
+} from "../src/cli/connect/util.js";
 
 const EXPECTED_COPILOT_MCP_COMMAND =
   process.platform === "win32"
@@ -214,6 +222,403 @@ describe("agentmemory connect — claude-code adapter (mock filesystem)", () => 
       expect(existsSync(result.backupPath!)).toBe(true);
       expect(result.backupPath!).toContain(join(".agentmemory", "backups"));
     }
+  });
+
+  it("runAdapter writes a v2 connect manifest for real installs", async () => {
+    require("node:fs").mkdirSync(join(tmpHome, ".claude"), { recursive: true });
+    writeFileSync(
+      join(tmpHome, ".claude.json"),
+      JSON.stringify({ mcpServers: {} }),
+    );
+
+    const a = await loadAdapter();
+    const { runAdapter } = await import("../src/cli/connect/index.js?t=" + Date.now());
+    const result = await runAdapter(
+      a,
+      { dryRun: false, force: false },
+      { runId: "test-run", timestamp: "2026-06-28T12:00:00.000Z" },
+    );
+
+    expect(result.kind).toBe("installed");
+    const manifest = readConnectManifest(tmpHome);
+    expect(manifest?.version).toBe(2);
+    expect(manifest?.installed).toHaveLength(1);
+    expect(manifest?.history).toHaveLength(1);
+    expect(manifest?.installed[0]).toMatchObject({
+      agent: "claude-code",
+      target: join(tmpHome, ".claude.json"),
+      action: "updated",
+      rollback: "restore-backup",
+      runId: "test-run",
+    });
+    expect(manifest?.installed[0]?.backupPath).toContain(
+      join(".agentmemory", "backups"),
+    );
+  });
+
+  it("runAdapter dry-run does not write a connect manifest", async () => {
+    require("node:fs").mkdirSync(join(tmpHome, ".claude"), { recursive: true });
+    writeFileSync(join(tmpHome, ".claude.json"), JSON.stringify({ mcpServers: {} }));
+
+    const a = await loadAdapter();
+    const { runAdapter } = await import("../src/cli/connect/index.js?t=" + Date.now());
+    await runAdapter(
+      a,
+      { dryRun: true, force: false },
+      { runId: "dry-run", timestamp: "2026-06-28T12:00:00.000Z" },
+    );
+
+    expect(readConnectManifest(tmpHome)).toBeNull();
+  });
+});
+
+describe("agentmemory connect — rollback helpers", () => {
+  function rollbackOptions(
+    home: string,
+    kinds: Map<string, ConnectRollbackPathKind>,
+    realPaths?: Map<string, string>,
+  ) {
+    return {
+      home,
+      backupsDir: join(home, ".agentmemory", "backups"),
+      pathKind: (path: string): ConnectRollbackPathKind =>
+        kinds.get(path) ?? "missing",
+      realPath: realPaths
+        ? (path: string): string | null =>
+            realPaths.get(path) ?? realPaths.get(resolve(path)) ?? null
+        : undefined,
+    };
+  }
+
+  it("plans rollback for the latest run only", () => {
+    const oldTarget = join("home", ".old.json");
+    const latestTarget = join("home", ".claude.json");
+    const latestCreated = join("home", ".codex", "hooks.json");
+    const latestBackup = join("home", ".agentmemory", "backups", "claude.json");
+    const manifest = mergeConnectManifestEntries(null, [
+      {
+        agent: "claude-code",
+        target: oldTarget,
+        backupPath: join("home", ".agentmemory", "backups", "old.json"),
+        timestamp: "2026-06-27T12:00:00.000Z",
+        runId: "old-run",
+        action: "updated",
+        rollback: "restore-backup",
+      },
+      {
+        agent: "claude-code",
+        target: latestTarget,
+        backupPath: latestBackup,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "updated",
+        rollback: "restore-backup",
+      },
+      {
+        agent: "codex",
+        target: latestCreated,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "created",
+        rollback: "remove-created-target",
+      },
+    ]);
+
+    const plan = buildConnectRollbackPlan(
+      manifest,
+      rollbackOptions(
+        join("home"),
+        new Map([
+          [latestBackup, "file"],
+          [latestTarget, "file"],
+          [latestCreated, "file"],
+        ]),
+      ),
+    );
+
+    expect(plan).toEqual([
+      {
+        agent: "claude-code",
+        target: latestTarget,
+        backupPath: latestBackup,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "restore",
+      },
+      {
+        agent: "codex",
+        target: latestCreated,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "remove-created-target",
+      },
+    ]);
+  });
+
+  it("skips rollback restore targets outside the user home", () => {
+    const home = join("home");
+    const target = join(home, "..", "outside.json");
+    const backupPath = join(home, ".agentmemory", "backups", "claude.json");
+    const manifest = mergeConnectManifestEntries(null, [
+      {
+        agent: "claude-code",
+        target,
+        backupPath,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "updated",
+        rollback: "restore-backup",
+      },
+    ]);
+
+    const plan = buildConnectRollbackPlan(
+      manifest,
+      rollbackOptions(home, new Map([[backupPath, "file"]])),
+    );
+
+    expect(plan).toEqual([
+      expect.objectContaining({
+        target,
+        backupPath,
+        action: "skip",
+        reason: "target-outside-home",
+      }),
+    ]);
+  });
+
+  it("skips rollback restore backups outside the backup root", () => {
+    const home = join("home");
+    const target = join(home, ".claude.json");
+    const backupPath = join(home, ".agentmemory", "not-backups", "claude.json");
+    const manifest = mergeConnectManifestEntries(null, [
+      {
+        agent: "claude-code",
+        target,
+        backupPath,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "updated",
+        rollback: "restore-backup",
+      },
+    ]);
+
+    const plan = buildConnectRollbackPlan(
+      manifest,
+      rollbackOptions(
+        home,
+        new Map([
+          [target, "file"],
+          [backupPath, "file"],
+        ]),
+      ),
+    );
+
+    expect(plan).toEqual([
+      expect.objectContaining({
+        target,
+        backupPath,
+        action: "skip",
+        reason: "backup-outside-backups",
+      }),
+    ]);
+  });
+
+  it("skips rollback restore when a target parent resolves outside home", () => {
+    const home = join("home");
+    const target = join(home, "linked", "settings.json");
+    const backupRoot = join(home, ".agentmemory", "backups");
+    const backupPath = join(backupRoot, "claude.json");
+    const manifest = mergeConnectManifestEntries(null, [
+      {
+        agent: "claude-code",
+        target,
+        backupPath,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "updated",
+        rollback: "restore-backup",
+      },
+    ]);
+
+    const plan = buildConnectRollbackPlan(
+      manifest,
+      rollbackOptions(
+        home,
+        new Map([[backupPath, "file"]]),
+        new Map([
+          [home, resolve(home)],
+          [resolve(home, "linked"), resolve("outside")],
+          [backupRoot, resolve(backupRoot)],
+          [backupPath, resolve(backupPath)],
+        ]),
+      ),
+    );
+
+    expect(plan).toEqual([
+      expect.objectContaining({
+        target,
+        backupPath,
+        action: "skip",
+        reason: "target-outside-home",
+      }),
+    ]);
+  });
+
+  it("skips rollback restore when a backup real path escapes the backup root", () => {
+    const home = join("home");
+    const target = join(home, ".claude.json");
+    const backupRoot = join(home, ".agentmemory", "backups");
+    const backupPath = join(backupRoot, "linked", "claude.json");
+    const manifest = mergeConnectManifestEntries(null, [
+      {
+        agent: "claude-code",
+        target,
+        backupPath,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "updated",
+        rollback: "restore-backup",
+      },
+    ]);
+
+    const plan = buildConnectRollbackPlan(
+      manifest,
+      rollbackOptions(
+        home,
+        new Map([
+          [target, "file"],
+          [backupPath, "file"],
+        ]),
+        new Map([
+          [home, resolve(home)],
+          [target, resolve(target)],
+          [backupRoot, resolve(backupRoot)],
+          [backupPath, resolve("outside", "claude.json")],
+        ]),
+      ),
+    );
+
+    expect(plan).toEqual([
+      expect.objectContaining({
+        target,
+        backupPath,
+        action: "skip",
+        reason: "backup-outside-backups",
+      }),
+    ]);
+  });
+
+  it("skips created-target rollback removal for symlinks and directories", () => {
+    const home = join("home");
+    const symlinkTarget = join(home, ".codex", "hooks.json");
+    const directoryTarget = join(home, ".claude");
+    const manifest = mergeConnectManifestEntries(null, [
+      {
+        agent: "codex",
+        target: symlinkTarget,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "created",
+        rollback: "remove-created-target",
+      },
+      {
+        agent: "claude-code",
+        target: directoryTarget,
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "created",
+        rollback: "remove-created-target",
+      },
+    ]);
+
+    const plan = buildConnectRollbackPlan(
+      manifest,
+      rollbackOptions(
+        home,
+        new Map([
+          [symlinkTarget, "symlink"],
+          [directoryTarget, "directory"],
+        ]),
+      ),
+    );
+
+    expect(plan).toEqual([
+      expect.objectContaining({
+        target: symlinkTarget,
+        action: "skip",
+        reason: "target-symlink",
+      }),
+      expect.objectContaining({
+        target: directoryTarget,
+        action: "skip",
+        reason: "target-directory",
+      }),
+    ]);
+  });
+
+  it("marks restored and removed rollback results back onto the manifest", () => {
+    const target = join("home", ".claude.json");
+    const manifest = mergeConnectManifestEntries(null, [
+      {
+        agent: "claude-code",
+        target,
+        backupPath: join("home", ".agentmemory", "backups", "claude.json"),
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "latest-run",
+        action: "updated",
+        rollback: "restore-backup",
+      },
+    ]);
+
+    const updated = markConnectRollbackResults(
+      manifest,
+      [{ target, runId: "latest-run", status: "restored" }],
+      "2026-06-28T12:05:00.000Z",
+    );
+
+    expect(updated.installed[0]?.rollbackStatus).toBe("restored");
+    expect(updated.installed[0]?.rolledBackAt).toBe("2026-06-28T12:05:00.000Z");
+    expect(updated.history?.[0]?.rollbackStatus).toBe("restored");
+  });
+
+  it("applies restore and remove actions through injectable effects", () => {
+    const operations: string[] = [];
+    const results = applyConnectRollbackPlan(
+      [
+        {
+          agent: "claude-code",
+          target: "target.json",
+          backupPath: "backup.json",
+          runId: "latest-run",
+          action: "restore",
+        },
+        {
+          agent: "codex",
+          target: "created.json",
+          runId: "latest-run",
+          action: "remove-created-target",
+        },
+      ],
+      {
+        restoreBackup(backupPath, target) {
+          operations.push(`restore:${backupPath}:${target}`);
+          return { ok: true, message: "restored" };
+        },
+        removeTarget(target) {
+          operations.push(`remove:${target}`);
+          return { ok: true, message: "removed" };
+        },
+      },
+    );
+
+    expect(operations).toEqual([
+      "restore:backup.json:target.json",
+      "remove:created.json",
+    ]);
+    expect(results.map((result) => result.status)).toEqual([
+      "restored",
+      "removed",
+    ]);
   });
 });
 

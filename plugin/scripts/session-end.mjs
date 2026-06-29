@@ -26,7 +26,11 @@ async function main() {
 	fetch(`${REST_URL}/agentmemory/session/end`, {
 		method: "POST",
 		headers: authHeaders(),
-		body: JSON.stringify({ sessionId }),
+		body: JSON.stringify({
+			sessionId,
+			captureSource: "automatic_hook",
+			hookType: "session_end"
+		}),
 		signal: AbortSignal.timeout(3e4)
 	}).catch(() => {});
 	if (process.env["CONSOLIDATION_ENABLED"] === "true") {
@@ -54,7 +58,7 @@ async function main() {
 	setTimeout(() => process.exit(0), 1500).unref();
 }
 main();
-
 //#endregion
-export {  };
+export {};
+
 //# sourceMappingURL=session-end.mjs.map

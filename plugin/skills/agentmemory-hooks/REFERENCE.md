@@ -18,3 +18,9 @@ The Claude Code plugin registers hooks on 12 lifecycle events to capture observa
 - `TaskCompleted`
 - `UserPromptSubmit`
 <!-- AUTOGEN:hooks END -->
+
+## Lineage payloads
+
+Hook scripts include stable lineage fields when the host provides them: `sessionId`, `project`, `cwd`, `agentId`, `framework`, `nativeId`, `traceId`, `runId`, `teamId`, `taskId`, `toolCallId`, `parentEventId`, and `correlationId`. Observation hooks also include the same values under `data.lineage` so older REST servers can preserve the context even before they promote the fields into the agent-event ledger.
+
+Tool, stop, task, and subagent hooks emit best-effort `/agentmemory/agent-events` records when that endpoint exists. Metadata is shape-only and redacted before dispatch, so token-like values and sensitive metadata keys are not sent in ledger metadata.

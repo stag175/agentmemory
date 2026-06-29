@@ -10,9 +10,21 @@ import {
 import { validateInput, validateOutput } from "../src/eval/validator.js";
 import {
   scoreCompression,
+  scoreMemorySpecificity,
+  scoreRetrievalScopeCoverage,
   scoreSummary,
   scoreContextRelevance,
 } from "../src/eval/quality.js";
+import {
+  findPotentialSecretLeaks,
+  isReleaseGateStatus,
+} from "../src/eval/validator.js";
+import { MetricsStore } from "../src/eval/metrics-store.js";
+import {
+  evaluateRetrievalArenaGate,
+  runRetrievalArenaSmoke,
+} from "../benchmark/retrieval-arena-smoke.js";
+import { generateDataset, generateScaleDataset } from "../benchmark/dataset.js";
 
 describe("Zod Schemas", () => {
   describe("ObserveInputSchema", () => {
@@ -296,5 +308,140 @@ describe("Quality Scoring", () => {
       const single = scoreContextRelevance("<summary>A</summary>", "test");
       expect(multi).toBeGreaterThan(single);
     });
+  });
+
+  describe("memory-specific helpers", () => {
+    it("scores scoped memories with provenance higher than vague memories", () => {
+      const scoped = scoreMemorySpecificity({
+        title: "Billing token rotation",
+        content:
+          "The billing service rotates local development tokens after each sandbox reset.",
+        concepts: ["billing", "tokens"],
+        files: ["src/billing.ts"],
+        project: "billing",
+        sessionIds: ["ses_1"],
+        sourceObservationIds: ["obs_1"],
+        sourceHash: "abc123",
+        confidence: 0.9,
+      });
+      const vague = scoreMemorySpecificity({
+        title: "Thing",
+        content: "Remember this",
+      });
+
+      expect(scoped).toBeGreaterThan(90);
+      expect(vague).toBeLessThan(scoped);
+    });
+
+    it("scores retrieval scope coverage from latest memories only", () => {
+      const coverage = scoreRetrievalScopeCoverage([
+        { isLatest: true, project: "billing" },
+        { isLatest: true },
+        { isLatest: false },
+        { isLatest: true, project: "old", deletedAt: "2026-01-01T00:00:00Z" },
+      ]);
+
+      expect(coverage).toEqual({
+        score: 50,
+        latestCount: 2,
+        scopedCount: 1,
+        unscopedCount: 1,
+      });
+    });
+  });
+});
+
+describe("Release Gate Eval Helpers", () => {
+  it("keeps Retrieval Arena benchmark inputs deterministic", () => {
+    const first = generateDataset();
+    const second = generateDataset();
+
+    expect(first.observations.map((obs) => [obs.id, obs.timestamp])).toEqual(
+      second.observations.map((obs) => [obs.id, obs.timestamp]),
+    );
+    expect(first.queries).toEqual(second.queries);
+    expect(generateScaleDataset(16).map((obs) => [obs.id, obs.timestamp])).toEqual(
+      generateScaleDataset(16).map((obs) => [obs.id, obs.timestamp]),
+    );
+  });
+
+  it("recognizes the release-gate evidence statuses", () => {
+    expect(isReleaseGateStatus("pass")).toBe(true);
+    expect(isReleaseGateStatus("fail")).toBe(true);
+    expect(isReleaseGateStatus("blocked")).toBe(true);
+    expect(isReleaseGateStatus("not_run")).toBe(true);
+    expect(isReleaseGateStatus("warn")).toBe(false);
+  });
+
+  it("detects high-risk secret patterns in memory-shaped payloads", () => {
+    const leaks = findPotentialSecretLeaks({
+      content: "Never store ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij here",
+    });
+
+    expect(leaks).toEqual(["github_token"]);
+  });
+
+  it("reports metrics quality as not_run before any calls exist", async () => {
+    const store = new Map<string, Map<string, unknown>>();
+    const kv = {
+      get: async <T>(scope: string, key: string): Promise<T | null> =>
+        (store.get(scope)?.get(key) as T) ?? null,
+      set: async <T>(scope: string, key: string, data: T): Promise<T> => {
+        if (!store.has(scope)) store.set(scope, new Map());
+        store.get(scope)!.set(key, data);
+        return data;
+      },
+      list: async <T>(scope: string): Promise<T[]> => {
+        const entries = store.get(scope);
+        return entries ? (Array.from(entries.values()) as T[]) : [];
+      },
+    };
+    const metrics = new MetricsStore(kv as never);
+
+    expect(await metrics.getQualityEvidence(["mem::remember"])).toEqual([
+      {
+        functionId: "mem::remember",
+        status: "not_run",
+        totalCalls: 0,
+        failureCount: 0,
+        avgQualityScore: 0,
+      },
+    ]);
+
+    await metrics.record("mem::remember", 15, true, 90);
+    await metrics.record("mem::forget", 25, false, 80);
+
+    expect(await metrics.getQualityEvidence(["mem::remember", "mem::forget"])).toMatchObject([
+      { functionId: "mem::remember", status: "pass" },
+      { functionId: "mem::forget", status: "fail" },
+    ]);
+  });
+
+  it("runs the Retrieval Arena smoke gate with honest pass and fail outcomes", async () => {
+    const summary = await runRetrievalArenaSmoke({
+      minHybridRecallAt5: 0,
+      minHybridRecallAt10: 0,
+      minHybridLiftAt5: -1,
+      maxHybridLatencyMs: 10_000,
+    });
+
+    expect(summary.name).toBe("agentmemory-retrieval-arena-smoke");
+    expect(summary.dataset.observations).toBeGreaterThan(0);
+    expect(summary.dataset.queries).toBeGreaterThan(0);
+    expect(summary.status).toBe("pass");
+    expect(summary.systems.hybrid.recallAt5).toBeGreaterThanOrEqual(0);
+    expect(summary.systems.hybrid.recallAt10).toBeGreaterThanOrEqual(
+      summary.systems.hybrid.recallAt5,
+    );
+
+    const strictGate = evaluateRetrievalArenaGate(summary.systems, {
+      minHybridRecallAt5: 1.01,
+      minHybridRecallAt10: 1.01,
+      minHybridLiftAt5: 1.01,
+      maxHybridLatencyMs: 0,
+    });
+
+    expect(strictGate.status).toBe("fail");
+    expect(strictGate.failures.length).toBeGreaterThan(0);
   });
 });

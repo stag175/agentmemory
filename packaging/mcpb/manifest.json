@@ -1,0 +1,66 @@
+{
+  "manifest_version": "0.3",
+  "name": "agentmemory",
+  "display_name": "agentmemory",
+  "version": "0.9.27",
+  "description": "Persistent memory MCP server for AI coding agents.",
+  "author": {
+    "name": "Rohit Ghumare",
+    "email": "ghumare64@gmail.com"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rohitg00/agentmemory"
+  },
+  "homepage": "https://github.com/rohitg00/agentmemory#readme",
+  "documentation": "https://github.com/rohitg00/agentmemory#readme",
+  "support": "https://github.com/rohitg00/agentmemory/issues",
+  "keywords": [
+    "agentmemory",
+    "ai",
+    "coding-agent",
+    "memory",
+    "mcp"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "server/bin.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/bin.mjs"
+      ],
+      "env": {
+        "AGENTMEMORY_URL": "${user_config.agentmemory_url}",
+        "AGENTMEMORY_SECRET": "${user_config.agentmemory_secret}"
+      }
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  },
+  "user_config": {
+    "agentmemory_url": {
+      "type": "string",
+      "title": "Agentmemory REST URL",
+      "description": "Base URL for an existing agentmemory daemon.",
+      "default": "http://localhost:3111"
+    },
+    "agentmemory_secret": {
+      "type": "string",
+      "title": "Agentmemory secret",
+      "description": "Optional bearer secret for AGENTMEMORY_SECRET-protected daemons.",
+      "sensitive": true,
+      "required": false
+    }
+  }
+}

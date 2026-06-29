@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildAuthHeaders,
   buildChatUrl,
@@ -235,18 +238,21 @@ describe("_openai-shared — normalizeBaseUrl", () => {
 // api-key header instead of Authorization: Bearer.
 // ─────────────────────────────────────────────────────────────
 describe("OpenAIEmbeddingProvider — Azure auto-detection (#371)", () => {
-  const ORIGINAL_BASE = process.env["OPENAI_BASE_URL"];
-  const ORIGINAL_VERSION = process.env["OPENAI_API_VERSION"];
+  const ORIGINAL_ENV = { ...process.env };
+  let home: string;
 
   beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "am-openai-shared-"));
+    process.env = { ...ORIGINAL_ENV, HOME: home, USERPROFILE: home };
+    delete process.env["OPENAI_EMBEDDING_BASE_URL"];
+    delete process.env["OPENAI_EMBEDDING_MODEL"];
+    delete process.env["OPENAI_EMBEDDING_DIMENSIONS"];
     vi.restoreAllMocks();
   });
 
   afterEach(() => {
-    if (ORIGINAL_BASE === undefined) delete process.env["OPENAI_BASE_URL"];
-    else process.env["OPENAI_BASE_URL"] = ORIGINAL_BASE;
-    if (ORIGINAL_VERSION === undefined) delete process.env["OPENAI_API_VERSION"];
-    else process.env["OPENAI_API_VERSION"] = ORIGINAL_VERSION;
+    process.env = ORIGINAL_ENV;
+    rmSync(home, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 

@@ -49,3 +49,45 @@ export function scoreContextRelevance(
   if (context.length >= 500) score += 10;
   return Math.min(100, score);
 }
+
+export function scoreMemorySpecificity(memory: {
+  title?: string;
+  content?: string;
+  concepts?: string[];
+  files?: string[];
+  project?: string;
+  sessionIds?: string[];
+  sourceObservationIds?: string[];
+  sourceHash?: string;
+  confidence?: number;
+}): number {
+  let score = 0;
+  if (memory.title && memory.title.length >= 5 && memory.title.length <= 120) score += 15;
+  if (memory.content && memory.content.length >= 20) score += 20;
+  if (memory.content && memory.content.length >= 80) score += 10;
+  if (memory.concepts && memory.concepts.length > 0) score += 10;
+  if (memory.files && memory.files.length > 0) score += 10;
+  if (memory.project) score += 15;
+  if (memory.sessionIds && memory.sessionIds.length > 0) score += 10;
+  if (memory.sourceObservationIds && memory.sourceObservationIds.length > 0) score += 5;
+  if (memory.sourceHash) score += 5;
+  if (memory.confidence !== undefined && memory.confidence >= 0 && memory.confidence <= 1) score += 10;
+  return Math.min(100, score);
+}
+
+export function scoreRetrievalScopeCoverage(
+  memories: Array<{ isLatest?: boolean; project?: string; deletedAt?: string }>,
+): { score: number; latestCount: number; scopedCount: number; unscopedCount: number } {
+  const latest = memories.filter((m) => m.isLatest && !m.deletedAt);
+  if (latest.length === 0) {
+    return { score: 100, latestCount: 0, scopedCount: 0, unscopedCount: 0 };
+  }
+  const scopedCount = latest.filter((m) => typeof m.project === "string" && m.project.trim().length > 0).length;
+  const unscopedCount = latest.length - scopedCount;
+  return {
+    score: Math.round((scopedCount / latest.length) * 100),
+    latestCount: latest.length,
+    scopedCount,
+    unscopedCount,
+  };
+}

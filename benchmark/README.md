@@ -11,6 +11,49 @@ Two kinds of numbers live in this directory:
    throughput against a running daemon. This is the file you want when
    somebody asks "what's p99 at 100k memories under concurrency 100?".
 
+## Public comparison adapters
+
+The adapter registry for public retrieval comparisons lives under
+`eval/runner/adapters/`. Default runs stay limited to `grep`, `vector`,
+and `agentmemory`; those are the implemented runners. Competitor descriptors
+are registered as stubbed adapters until an external runner is configured.
+This keeps public scorecards honest: Mem0, Letta, Zep/Graphiti, LangMem,
+Basic Memory, OpenMemory, and Supermemory can appear in the option list
+without implying unmeasured numbers.
+
+See `docs/benchmarks/ADAPTERS.md` for the implemented/stubbed descriptor
+table and the `BENCHMARK_ADAPTER_UNAVAILABLE` skip metadata shape with
+install hints.
+
+## Retrieval Arena smoke
+
+`retrieval-arena-smoke.ts` is the quick release-gate benchmark. It does
+not start a daemon, download a dataset, or call an embedding API. Instead
+it uses the local synthetic coding-agent corpus from `dataset.ts`, builds
+BM25 plus deterministic-vector indexes in-process, and checks conservative
+recall and latency thresholds.
+
+Run it directly:
+
+```bash
+npm run bench:retrieval-smoke
+```
+
+Include it in release preflight:
+
+```bash
+npm run release:preflight:arena
+```
+
+Default `npm run release:preflight` skips this optional gate and reports it
+as `not_run optional` so the release gate is honest without making every
+preflight pay benchmark cost. Thresholds can be adjusted with:
+
+- `ARENA_MIN_HYBRID_RECALL_AT_5`
+- `ARENA_MIN_HYBRID_RECALL_AT_10`
+- `ARENA_MIN_HYBRID_LIFT_AT_5`
+- `ARENA_MAX_HYBRID_LATENCY_MS`
+
 ## load-100k.ts
 
 Hand-rolled, dependency-free load harness. Issues real HTTP against a

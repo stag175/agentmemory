@@ -11,6 +11,7 @@ import {
   readJsonSafe,
   writeJsonAtomic,
 } from "./util.js";
+import { inspectJsonMcpAdapter } from "./inspect.js";
 
 export type JsonMcpAdapterConfig = {
   name: string;
@@ -29,6 +30,7 @@ export type JsonMcpAdapterConfig = {
   // Extra fields merged into the agentmemory entry. Droid requires
   // type: "stdio"; other hosts ignore unknown fields.
   extraEntryFields?: Record<string, unknown>;
+  windowsSafe?: boolean;
 };
 
 type McpEntry = typeof AGENTMEMORY_MCP_BLOCK;
@@ -57,6 +59,10 @@ export function createJsonMcpAdapter(
 
     detect(): boolean {
       return existsSync(config.detectDir);
+    },
+
+    inspect() {
+      return inspectJsonMcpAdapter(config);
     },
 
     async install(opts: ConnectOptions): Promise<ConnectResult> {

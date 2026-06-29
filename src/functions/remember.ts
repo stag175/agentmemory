@@ -1,14 +1,73 @@
 import { TriggerAction, type ISdk } from "iii-sdk";
-import type { Memory } from "../types.js";
+import type { Memory, MemoryRevision } from "../types.js";
 import { KV, generateId, jaccardSimilarity } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import { memoryToObservation } from "../state/memory-utils.js";
+import {
+  defaultMemoryLane,
+  isMemorySearchable,
+  memoryToObservation,
+  normalizeMemoryLane,
+  normalizeMemoryPrivacyScope,
+  normalizeMemoryReviewState,
+} from "../state/memory-utils.js";
 import { deleteAccessLog } from "./access-tracker.js";
 import { recordAudit } from "./audit.js";
 import { getSearchIndex, vectorIndexAddGuarded, vectorIndexRemove, flushIndexSave } from "./search.js";
+import { recordMemoryRevision } from "./memory-lifecycle.js";
+import {
+  redactOptionalString,
+  redactStringArray,
+  scanPrivateData,
+  summarizePrivacyScans,
+} from "./privacy.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
+import { safeRecordAgentEvent } from "./agent-events.js";
+import { evaluateWriteGate, type WriteGateDecision } from "./write-gate.js";
+
+type RememberWriteGateOption =
+  | boolean
+  | "review"
+  | "require_pass"
+  | "strict"
+  | {
+      mode?: "review" | "require_pass" | "strict";
+      requirePass?: boolean;
+    };
+
+type GatedMemory = Memory & { writeGate: WriteGateDecision };
+
+function shouldRequireGatePass(option: {
+  requireGatePass?: boolean;
+  writeGate?: RememberWriteGateOption;
+}): boolean {
+  if (option.requireGatePass === true) return true;
+  if (option.writeGate === true) return true;
+  if (
+    option.writeGate === "require_pass" ||
+    option.writeGate === "strict"
+  ) {
+    return true;
+  }
+  if (
+    option.writeGate &&
+    typeof option.writeGate === "object" &&
+    !Array.isArray(option.writeGate)
+  ) {
+    return (
+      option.writeGate.requirePass === true ||
+      option.writeGate.mode === "require_pass" ||
+      option.writeGate.mode === "strict"
+    );
+  }
+  return false;
+}
+
+function isSameAgentScope(existing: Memory, agentId: string | undefined): boolean {
+  if (agentId) return existing.agentId === agentId;
+  return existing.agentId === undefined;
+}
 
 export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::remember", 
@@ -21,6 +80,18 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       sourceObservationIds?: string[];
       agentId?: string;
       project?: string;
+      lane?: Memory["lane"];
+      confidence?: number;
+      privacyScope?: Memory["privacyScope"];
+      ownerId?: string;
+      branch?: string;
+      commit?: string;
+      sourceHash?: string;
+      sourceType?: string;
+      sourceUri?: string;
+      reviewState?: Memory["reviewState"];
+      requireGatePass?: boolean;
+      writeGate?: RememberWriteGateOption;
     }) => {
       if (
         !data.content ||
@@ -49,70 +120,180 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       const memType = validTypes.has(data.type || "")
         ? (data.type as Memory["type"])
         : "fact";
+      const contentScan = scanPrivateData(data.content);
+      const content = contentScan.redacted;
+      const conceptRedaction = redactStringArray(data.concepts);
+      const fileRedaction = redactStringArray(data.files);
+      const sourceObservationRedaction = redactStringArray(
+        data.sourceObservationIds,
+      );
+      const ownerIdRedaction = redactOptionalString(data.ownerId);
+      const branchRedaction = redactOptionalString(data.branch);
+      const commitRedaction = redactOptionalString(data.commit);
+      const sourceHashRedaction = redactOptionalString(data.sourceHash);
+      const sourceTypeRedaction = redactOptionalString(data.sourceType);
+      const sourceUriRedaction = redactOptionalString(data.sourceUri);
+      const projectRedaction = redactOptionalString(data.project);
+      const laneRedaction = redactOptionalString(data.lane);
+      const privacyScopeRedaction = redactOptionalString(data.privacyScope);
+      const reviewStateRedaction = redactOptionalString(data.reviewState);
+      const lane = normalizeMemoryLane(laneRedaction.value);
+      const privacyScope = normalizeMemoryPrivacyScope(
+        privacyScopeRedaction.value,
+      );
+      const reviewState = normalizeMemoryReviewState(reviewStateRedaction.value);
+
+      const rawAgentId =
+        typeof data.agentId === "string" && data.agentId.trim().length > 0
+          ? data.agentId
+          : getAgentId();
+      const agentIdRedaction = redactOptionalString(rawAgentId);
+      const callAgentId =
+        typeof agentIdRedaction.value === "string" &&
+        agentIdRedaction.value.trim().length > 0
+          ? agentIdRedaction.value.trim().slice(0, 128)
+          : undefined;
+
+      const privacySummary = summarizePrivacyScans(
+        contentScan,
+        conceptRedaction.scan,
+        fileRedaction.scan,
+        sourceObservationRedaction.scan,
+        ownerIdRedaction.scan,
+        branchRedaction.scan,
+        commitRedaction.scan,
+        sourceHashRedaction.scan,
+        sourceTypeRedaction.scan,
+        sourceUriRedaction.scan,
+        projectRedaction.scan,
+        agentIdRedaction.scan,
+        laneRedaction.scan,
+        privacyScopeRedaction.scan,
+        reviewStateRedaction.scan,
+      );
 
       const now = new Date().toISOString();
       // Normalize project early so every subsequent comparison and storage
       // operation uses the same cleaned value. Raw data.project must not be
       // referenced below this point.
       const project =
-        typeof data.project === "string" && data.project.trim().length > 0
-          ? data.project.trim()
+        typeof projectRedaction.value === "string" &&
+        projectRedaction.value.trim().length > 0
+          ? projectRedaction.value.trim()
           : undefined;
 
       return withKeyedLock("mem:remember", async () => {
         const existingMemories = await kv.list<Memory>(KV.memories);
+        const comparableMemories = existingMemories.filter((existing) =>
+          isSameAgentScope(existing, callAgentId),
+        );
         let supersededId: string | undefined;
         let supersededVersion = 1;
         let supersededMemory: Memory | undefined;
-        const lowerContent = data.content.toLowerCase();
-        for (const existing of existingMemories) {
-          if (existing.isLatest === false) continue;
-          // Never supersede a memory that belongs to a different project.
-          // Both sides must have an explicit project for the guard to engage;
-          // an unscoped memory (legacy, no project field) is treated as a
-          // wildcard so pre-existing data is not stranded.
-          if (project && existing.project && existing.project !== project) {
-            continue;
-          }
-          const similarity = jaccardSimilarity(
-            lowerContent,
-            existing.content.toLowerCase(),
-          );
-          if (similarity > 0.7) {
-            supersededId = existing.id;
-            supersededVersion = existing.version ?? 1;
-            supersededMemory = existing;
-            break;
+        const lowerContent = content.toLowerCase();
+        if (!privacySummary.redactionApplied) {
+          for (const existing of comparableMemories) {
+            if (!isMemorySearchable(existing)) continue;
+            // Never supersede a memory that belongs to a different project.
+            // Both sides must have an explicit project for the guard to engage;
+            // an unscoped memory (legacy, no project field) is treated as a
+            // wildcard so pre-existing data is not stranded.
+            if (project && existing.project && existing.project !== project) {
+              continue;
+            }
+            const similarity = jaccardSimilarity(
+              lowerContent,
+              existing.content.toLowerCase(),
+            );
+            if (similarity > 0.7) {
+              supersededId = existing.id;
+              supersededVersion = existing.version ?? 1;
+              supersededMemory = existing;
+              break;
+            }
           }
         }
+        const requireGatePass = shouldRequireGatePass(data);
+        const writeGate: WriteGateDecision = {
+          ...evaluateWriteGate({
+            content,
+            type: memType,
+            concepts: conceptRedaction.values,
+            files: fileRedaction.values,
+            sourceObservationIds: sourceObservationRedaction.values.filter(
+              (id): id is string => typeof id === "string" && id.length > 0,
+            ),
+            project,
+            lane: lane ?? defaultMemoryLane(memType),
+            privacyScope,
+            ownerId: ownerIdRedaction.value,
+            branch: branchRedaction.value,
+            commit: commitRedaction.value,
+            sourceHash: sourceHashRedaction.value,
+            sourceType: sourceTypeRedaction.value,
+            sourceUri: sourceUriRedaction.value,
+            agentId: callAgentId,
+            existingMemories: comparableMemories,
+            privacySummary,
+          }),
+          mode: requireGatePass ? "require_pass" : "review",
+        };
 
-        // stamp the agent role on the memory so future recall can
-        // filter by agent. Request body wins (multi-agent runtimes
-        // explicitly tagging at write time), env AGENT_ID fallback,
-        // none → memory is unscoped (legacy behavior).
-        const callAgentId =
-          typeof data.agentId === "string" && data.agentId.trim().length > 0
-            ? data.agentId.trim().slice(0, 128)
-            : getAgentId();
+        if (requireGatePass && !writeGate.pass) {
+          return {
+            success: false,
+            error: "write gate rejected memory",
+            writeGate,
+          };
+        }
 
-        const memory: Memory = {
+        const memory: GatedMemory = {
           id: generateId("mem"),
           createdAt: now,
           updatedAt: now,
           type: memType,
-          title: data.content.slice(0, 80),
-          content: data.content,
-          concepts: data.concepts || [],
-          files: data.files || [],
+          title: content.slice(0, 80),
+          content,
+          concepts: conceptRedaction.values,
+          files: fileRedaction.values,
           sessionIds: [],
           strength: 7,
+          confidence:
+            typeof data.confidence === "number" && Number.isFinite(data.confidence)
+              ? Math.max(0, Math.min(1, data.confidence))
+              : undefined,
           version: supersededId ? supersededVersion + 1 : 1,
           parentId: supersededId,
           supersedes: supersededId ? [supersededId] : [],
-          sourceObservationIds: (data.sourceObservationIds || []).filter(
+          sourceObservationIds: sourceObservationRedaction.values.filter(
             (id): id is string => typeof id === "string" && id.length > 0,
           ),
           isLatest: true,
+          lane: lane ?? defaultMemoryLane(memType),
+          lifecycleState: privacySummary.redactionApplied ? "quarantined" : "active",
+          reviewState: privacySummary.redactionApplied
+            ? "needs_review"
+            : writeGate.reviewState === "needs_review"
+              ? "needs_review"
+              : reviewState ?? "unreviewed",
+          writeGate,
+          ...(privacyScope
+            ? { privacyScope }
+            : privacySummary.redactionApplied
+              ? { privacyScope: "user" as const }
+              : {}),
+          ...(privacySummary.redactionApplied
+            ? {
+                redactionApplied: true,
+                sensitivityLabels: privacySummary.labels,
+              }
+            : {}),
+          ...(ownerIdRedaction.value ? { ownerId: ownerIdRedaction.value } : {}),
+          ...(branchRedaction.value ? { branch: branchRedaction.value } : {}),
+          ...(commitRedaction.value ? { commit: commitRedaction.value } : {}),
+          ...(sourceHashRedaction.value ? { sourceHash: sourceHashRedaction.value } : {}),
+          ...(sourceTypeRedaction.value ? { sourceType: sourceTypeRedaction.value } : {}),
+          ...(sourceUriRedaction.value ? { sourceUri: sourceUriRedaction.value } : {}),
           ...(callAgentId ? { agentId: callAgentId } : {}),
           ...(project !== undefined && { project }),
         };
@@ -122,30 +303,117 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         }
 
         if (supersededMemory) {
+          const supersededPrior: Memory = {
+            ...supersededMemory,
+            concepts: [...supersededMemory.concepts],
+            files: [...supersededMemory.files],
+            sessionIds: [...supersededMemory.sessionIds],
+            supersedes: supersededMemory.supersedes
+              ? [...supersededMemory.supersedes]
+              : undefined,
+            relatedIds: supersededMemory.relatedIds
+              ? [...supersededMemory.relatedIds]
+              : undefined,
+            sourceObservationIds: supersededMemory.sourceObservationIds
+              ? [...supersededMemory.sourceObservationIds]
+              : undefined,
+          };
           supersededMemory.isLatest = false;
+          supersededMemory.lifecycleState = "superseded";
           await kv.set(KV.memories, supersededMemory.id, supersededMemory);
+          await recordMemoryRevision(
+            kv,
+            supersededMemory.id,
+            "supersede",
+            supersededPrior,
+            memory,
+            { reason: "content similarity supersession" },
+          );
+          await safeRecordAgentEvent(kv, {
+            type: "memory_superseded",
+            timestamp: now,
+            project: supersededMemory.project ?? project,
+            agentId: supersededMemory.agentId ?? callAgentId,
+            functionId: "mem::remember",
+            targetIds: [supersededMemory.id, memory.id],
+            memoryIds: [supersededMemory.id, memory.id],
+            metadata: {
+              supersededBy: memory.id,
+              reason: "content similarity supersession",
+            },
+          });
         }
         await kv.set(KV.memories, memory.id, memory);
+        await recordMemoryRevision(kv, memory.id, "create", null, memory);
+        await safeRecordAgentEvent(kv, {
+          type: "memory_written",
+          timestamp: now,
+          project: memory.project,
+          agentId: memory.agentId,
+          functionId: "mem::remember",
+          targetIds: [memory.id],
+          memoryIds: [memory.id],
+          observationIds: memory.sourceObservationIds,
+          metadata: {
+            type: memory.type,
+            lane: memory.lane,
+            lifecycleState: memory.lifecycleState,
+            reviewState: memory.reviewState,
+            writeGate: {
+              pass: memory.writeGate.pass,
+              score: memory.writeGate.score,
+              reasons: memory.writeGate.reasons,
+            },
+            supersedes: memory.supersedes ?? [],
+            redactionApplied: memory.redactionApplied === true,
+          },
+        });
+        try {
+          await recordAudit(kv, "remember", "mem::remember", [memory.id], {
+            type: memory.type,
+            project: memory.project,
+            lane: memory.lane,
+            lifecycleState: memory.lifecycleState,
+            reviewState: memory.reviewState,
+            writeGate: {
+              pass: memory.writeGate.pass,
+              score: memory.writeGate.score,
+              reasons: memory.writeGate.reasons,
+              scores: memory.writeGate.scores,
+            },
+            redactionApplied: memory.redactionApplied === true,
+            sensitivityLabels: memory.sensitivityLabels ?? [],
+          });
+        } catch (err) {
+          logger.warn("audit write failed", {
+            functionId: "mem::remember",
+            operation: "remember",
+            targetIds: [memory.id],
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
 
         // Without this, mem::remember persists the row but the BM25
         // index never sees it, so memory_smart_search and memory_recall
         // return empty even seconds after save (#257). Use try/catch so
         // an indexing failure doesn't block the save itself — the
         // restart-time rebuild will pick the memory up either way.
-        try {
-          getSearchIndex().add(memoryToObservation(memory));
-        } catch (err) {
-          logger.warn("Failed to index saved memory into BM25", {
-            memId: memory.id,
-            error: err instanceof Error ? err.message : String(err),
-          });
+        if (isMemorySearchable(memory)) {
+          try {
+            getSearchIndex().add(memoryToObservation(memory));
+          } catch (err) {
+            logger.warn("Failed to index saved memory into BM25", {
+              memId: memory.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+          await vectorIndexAddGuarded(
+            memory.id,
+            memory.sessionIds?.[0] ?? "memory",
+            memory.title + " " + memory.content,
+            { kind: "memory", logId: memory.id },
+          );
         }
-        await vectorIndexAddGuarded(
-          memory.id,
-          memory.sessionIds?.[0] ?? "memory",
-          memory.title + " " + memory.content,
-          { kind: "memory", logId: memory.id },
-        );
 
         if (supersededId) {
           await sdk.trigger({
@@ -176,20 +444,33 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       let deleted = 0;
       const deletedMemoryIds: string[] = [];
       const deletedObservationIds: string[] = [];
+      let purgedRevisionCount = 0;
       let deletedSession = false;
       const { decrementImageRef } = await import("./image-refs.js");
 
       if (data.memoryId) {
         const mem = await kv.get<Memory>(KV.memories, data.memoryId);
-        await kv.delete(KV.memories, data.memoryId);
-        if (mem?.imageRef) {
-          await decrementImageRef(kv, sdk, mem.imageRef);
+        if (mem) {
+          const revisions = await kv
+            .list<MemoryRevision>(KV.memoryHistory)
+            .catch(() => []);
+          const memoryRevisions = revisions.filter(
+            (revision) => revision.memoryId === data.memoryId,
+          );
+          for (const revision of memoryRevisions) {
+            await kv.delete(KV.memoryHistory, revision.id);
+          }
+          purgedRevisionCount = memoryRevisions.length;
+          await kv.delete(KV.memories, data.memoryId);
+          if (mem.imageRef) {
+            await decrementImageRef(kv, sdk, mem.imageRef);
+          }
+          await deleteAccessLog(kv, data.memoryId);
+          getSearchIndex().remove(data.memoryId);
+          vectorIndexRemove(data.memoryId);
+          deletedMemoryIds.push(data.memoryId);
+          deleted++;
         }
-        await deleteAccessLog(kv, data.memoryId);
-        getSearchIndex().remove(data.memoryId);
-        vectorIndexRemove(data.memoryId);
-        deletedMemoryIds.push(data.memoryId);
-        deleted++;
       }
 
       if (
@@ -252,9 +533,26 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             memoriesDeleted: deletedMemoryIds.length,
             observationsDeleted: deletedObservationIds.length,
             sessionDeleted: deletedSession,
+            purgedRevisionCount,
             reason: "user-initiated forget",
           },
         );
+        await safeRecordAgentEvent(kv, {
+          type: "memory_forgotten",
+          timestamp: new Date().toISOString(),
+          sessionId: data.sessionId,
+          functionId: "mem::forget",
+          targetIds: [...deletedMemoryIds, ...deletedObservationIds],
+          memoryIds: deletedMemoryIds,
+          observationIds: deletedObservationIds,
+          metadata: {
+            deleted,
+            memoriesDeleted: deletedMemoryIds.length,
+            observationsDeleted: deletedObservationIds.length,
+            sessionDeleted: deletedSession,
+            purgedRevisionCount,
+          },
+        });
       }
 
       logger.info("Memory forgotten", { deleted });

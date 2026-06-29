@@ -1,5 +1,13 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import {
+  buildLineage,
+  eventFields,
+  firstString,
+  safeMetadata,
+  sendAgentEvent,
+  summarizeValue,
+  targetIdsFor,
+} from "./_lineage.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -32,29 +40,46 @@ async function main() {
   if (isSdkChildContext(data)) return;
 
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
-  const toolName = data.tool_name ?? data.toolName;
+  const toolName = firstString(data.tool_name, data.toolName) ?? "unknown";
   const toolInput = data.tool_input ?? data.toolArgs;
+  const lineage = buildLineage(data, "post_tool_use", { sessionId });
+  const fields = eventFields(lineage);
+  const headers = authHeaders();
+  const timestamp = new Date().toISOString();
 
   const { imageData, cleanOutput } = extractImageData(toolOutput(data));
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
-    headers: authHeaders(),
+    headers,
     body: JSON.stringify({
       hookType: "post_tool_use",
-      sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
-      timestamp: new Date().toISOString(),
+      ...fields,
+      timestamp,
       data: {
         tool_name: toolName,
-        tool_input: toolInput,
-        tool_output: truncate(cleanOutput, 8000),
+        tool_input: safeMetadata(toolInput),
+        tool_output: safeMetadata(truncate(cleanOutput, 8000)),
+        lineage,
         ...(imageData ? { image_data: imageData } : {}),
       },
     }),
     signal: AbortSignal.timeout(3000),
   }).catch(() => {});
+
+  sendAgentEvent(REST_URL, headers, {
+    type: "tool_completed",
+    status: "ok",
+    ...fields,
+    functionId: `tool:${toolName}`,
+    targetIds: targetIdsFor(lineage.toolCallId, toolName),
+    metadata: {
+      hookType: "post_tool_use",
+      toolName,
+      toolInput: summarizeValue(toolInput),
+      toolOutput: summarizeValue(cleanOutput),
+    },
+  });
   setTimeout(() => process.exit(0), 500).unref();
 }
 

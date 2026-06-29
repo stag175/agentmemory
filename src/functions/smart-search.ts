@@ -5,13 +5,39 @@ import type {
   CompressedObservation,
   HybridSearchResult,
   Lesson,
+  Memory,
+  MemoryLane,
+  MemoryPrivacyScope,
+  QueryPlan,
+  RankedEvidence,
+  RetrievalMode,
+  SearchBackendOptions,
+  SearchMode,
+  Session,
 } from "../types.js";
+import {
+  buildQueryPlan,
+  buildCommunitySummaries,
+  hybridResultToRankedEvidence,
+  normalizeRetrievalMode,
+  normalizeSearchMode,
+  packContext,
+} from "../retrieval/context-router.js";
 import { KV } from "../state/schema.js";
+import {
+  defaultMemoryLane,
+  isMemorySearchable,
+  isMemoryTemporallyCompatible,
+  normalizeTemporalValidityFilter,
+  temporalValidityHardFilter,
+  type TemporalValidityFilter,
+} from "../state/memory-utils.js";
 import { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import {
   getAgentId,
+  getEnvVar,
   isAgentScopeIsolated,
   getFollowupWindowSeconds,
 } from "../config.js";
@@ -72,10 +98,537 @@ export function resetFollowupStatsForTests(): void {
 // full content is fetched via memory_lesson_recall when the caller needs it.
 const LESSON_CONTENT_PREVIEW_CHARS = 240;
 
+type SmartSearchFilters = {
+  agentId?: string;
+  project?: string;
+  cwd?: string;
+  branch?: string;
+  commit?: string;
+  files: string[];
+  memoryTier?: MemoryLane;
+  privacyScope?: MemoryPrivacyScope;
+  temporal?: TemporalValidityFilter;
+};
+
+type CandidateMeta = {
+  project?: string;
+  cwd?: string;
+  agentId?: string;
+  files: string[];
+  branch?: string;
+  commit?: string;
+  commitShas: string[];
+  memory?: Memory;
+  session?: Session;
+};
+
+type PrefilterPlan = {
+  active: boolean;
+  candidateIds?: Set<string>;
+  scannedMemories: number;
+  scannedSessions: number;
+  scannedObservations: number;
+};
+
+type LessonScope = {
+  project?: string;
+  agentId?: string;
+  isolated: boolean;
+};
+
+type AgentScopedLesson = Lesson & { score?: number; agentId?: unknown };
+
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function parseStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((v) => (typeof v === "string" ? v.trim() : ""))
+      .filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function authoritativeSessionId(result: HybridSearchResult): string {
+  return result.observation.sessionId || result.sessionId;
+}
+
+function searchCandidateKey(obsId: string, sessionId: string): string {
+  return `${sessionId}\0${obsId}`;
+}
+
+function normalizeHybridSessionId(result: HybridSearchResult): HybridSearchResult {
+  const sessionId = authoritativeSessionId(result);
+  return sessionId === result.sessionId ? result : { ...result, sessionId };
+}
+
+function hasHardFilters(filters: SmartSearchFilters): boolean {
+  return !!(
+    filters.agentId ||
+    filters.project ||
+    filters.cwd ||
+    filters.branch ||
+    filters.commit ||
+    filters.files.length > 0 ||
+    filters.memoryTier ||
+    filters.privacyScope ||
+    filters.temporal
+  );
+}
+
+async function candidateMeta(
+  kv: StateKV,
+  result: HybridSearchResult,
+): Promise<CandidateMeta> {
+  const memory = await kv
+    .get<Memory>(KV.memories, result.observation.id)
+    .catch(() => null);
+  if (memory) {
+    return {
+      project: memory.project,
+      agentId: memory.agentId,
+      files: memory.files ?? [],
+      branch: memory.branch,
+      commit: memory.commit,
+      commitShas: memory.commit ? [memory.commit] : [],
+      memory,
+    };
+  }
+
+  const sessionId = authoritativeSessionId(result);
+  const session = await kv
+    .get<Session>(KV.sessions, sessionId)
+    .catch(() => null);
+  return {
+    project: session?.project,
+    cwd: session?.cwd,
+    agentId: result.observation.agentId,
+    files: result.observation.files ?? [],
+    commitShas: session?.commitShas ?? [],
+    session: session ?? undefined,
+  };
+}
+
+function matchesFilters(meta: CandidateMeta, filters: SmartSearchFilters): boolean {
+  if (filters.agentId && meta.agentId !== filters.agentId) return false;
+  if (filters.project && meta.project !== filters.project) return false;
+  if (filters.cwd && meta.cwd !== filters.cwd) return false;
+  if (filters.files.length > 0) {
+    const haystack = new Set(meta.files);
+    const hasFile = filters.files.some((f) => haystack.has(f));
+    if (!hasFile) return false;
+  }
+  if (filters.branch && meta.branch !== filters.branch) return false;
+  if (filters.commit) {
+    const matchesCommit =
+      meta.commit === filters.commit || meta.commitShas.includes(filters.commit);
+    if (!matchesCommit) return false;
+  }
+  if (filters.memoryTier) {
+    if (!meta.memory) return false;
+    if ((meta.memory.lane ?? defaultMemoryLane(meta.memory.type)) !== filters.memoryTier) {
+      return false;
+    }
+  }
+  if (filters.privacyScope) {
+    if (!meta.memory) return false;
+    if ((meta.memory.privacyScope ?? "project") !== filters.privacyScope) {
+      return false;
+    }
+  }
+  if (meta.memory) {
+    if (!isMemorySearchable(meta.memory)) return false;
+    if (!isMemoryTemporallyCompatible(meta.memory, filters.temporal)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function buildHardFilters(filters: SmartSearchFilters): Record<string, unknown> {
+  return {
+    agentId: filters.agentId,
+    project: filters.project,
+    cwd: filters.cwd,
+    branch: filters.branch,
+    commit: filters.commit,
+    files: filters.files,
+    memoryTier: filters.memoryTier,
+    privacyScope: filters.privacyScope,
+  };
+}
+
+function filterStage(active: boolean, temporal?: TemporalValidityFilter): string {
+  if (!active) return "none";
+  return temporal
+    ? "pre-ranking candidate allowlist plus temporal validity post-filter safety check"
+    : "pre-ranking candidate allowlist plus post-filter safety check";
+}
+
+function memoryTokens(memory: Memory): Set<string> {
+  return new Set(
+    [memory.title, memory.content, ...(memory.concepts ?? []), ...(memory.files ?? [])]
+      .join(" ")
+      .toLowerCase()
+      .split(/[^a-z0-9_./-]+/)
+      .filter((token) => token.length > 2),
+  );
+}
+
+function tokenOverlap(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const token of a) {
+    if (b.has(token)) intersection++;
+  }
+  return intersection / (a.size + b.size - intersection);
+}
+
+function normalizeTokenBudget(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return undefined;
+  return Math.floor(parsed);
+}
+
+function memoryMatchesDriftScope(memory: Memory, filters: SmartSearchFilters): boolean {
+  if (filters.agentId && memory.agentId !== filters.agentId) return false;
+  if (filters.project && memory.project !== filters.project) return false;
+  if (filters.branch && memory.branch !== filters.branch) return false;
+  if (filters.commit && memory.commit !== filters.commit) return false;
+  if (filters.memoryTier && (memory.lane ?? defaultMemoryLane(memory.type)) !== filters.memoryTier) {
+    return false;
+  }
+  if (filters.privacyScope && (memory.privacyScope ?? "project") !== filters.privacyScope) {
+    return false;
+  }
+  if (filters.files.length > 0) {
+    const haystack = new Set((memory.files ?? []).map((file) => file.toLowerCase()));
+    const wanted = filters.files.map((file) => file.toLowerCase());
+    if (!wanted.some((file) => haystack.has(file))) return false;
+  }
+  return true;
+}
+
+function memoryRelationReasons(current: Memory, candidate: Memory): string[] {
+  const reasons = new Set<string>();
+  if ((current.supersedes ?? []).includes(candidate.id)) reasons.add("superseded_by_current");
+  if ((candidate.supersedes ?? []).includes(current.id)) reasons.add("supersedes_current");
+  const currentSources = new Set(current.sourceObservationIds ?? []);
+  if ((candidate.sourceObservationIds ?? []).some((id) => currentSources.has(id))) {
+    reasons.add("shared_source");
+  }
+  const currentConcepts = new Set((current.concepts ?? []).map((concept) => concept.toLowerCase()));
+  if ((candidate.concepts ?? []).some((concept) => currentConcepts.has(concept.toLowerCase()))) {
+    reasons.add("shared_concept");
+  }
+  const overlap = tokenOverlap(memoryTokens(current), memoryTokens(candidate));
+  if (overlap >= 0.35) reasons.add("high_text_overlap");
+  const state = candidate.lifecycleState ?? "active";
+  if (candidate.isLatest === false || state === "superseded") reasons.add("stale_candidate");
+  if (candidate.validFrom || candidate.validUntil || (candidate as { expiresAt?: string }).expiresAt || candidate.forgetAfter) {
+    reasons.add("temporal_boundary");
+  }
+  return [...reasons];
+}
+
+async function buildDriftEvidence(
+  kv: StateKV,
+  opts: {
+    query?: string;
+    filters: SmartSearchFilters;
+    results: HybridSearchResult[];
+  },
+): Promise<RankedEvidence[]> {
+  const resultIds = new Set(opts.results.map((result) => result.observation.id));
+  if (resultIds.size === 0) return [];
+  const memories = await kv.list<Memory>(KV.memories).catch(() => []);
+  const scoped = memories.filter((memory) => memoryMatchesDriftScope(memory, opts.filters));
+  const byId = new Map(scoped.map((memory) => [memory.id, memory]));
+  const selected = [...resultIds]
+    .map((id) => byId.get(id))
+    .filter((memory): memory is Memory => Boolean(memory));
+
+  return selected.flatMap((memory) => {
+    const related = scoped
+      .filter((candidate) => candidate.id !== memory.id)
+      .map((candidate) => ({
+        memory: candidate,
+        reasons: memoryRelationReasons(memory, candidate),
+      }))
+      .filter((entry) => entry.reasons.length > 0)
+      .sort((a, b) => {
+        const scoreDelta = b.reasons.length - a.reasons.length;
+        if (scoreDelta !== 0) return scoreDelta;
+        return String(b.memory.updatedAt).localeCompare(String(a.memory.updatedAt));
+      })
+      .slice(0, 5);
+    const currentReasons = memoryRelationReasons(memory, memory).filter(
+      (reason) => reason === "temporal_boundary",
+    );
+    if (related.length === 0 && currentReasons.length === 0) return [];
+    const lines = [
+      `Drift report for ${memory.title || memory.id}`,
+      ...related.map((entry) =>
+        `- ${entry.memory.id}: ${entry.memory.title || entry.memory.type} (${entry.reasons.join(", ")})`,
+      ),
+      ...currentReasons.map((reason) => `- ${memory.id}: current memory has ${reason}`),
+    ];
+    return [{
+      id: `drift_${memory.id}`,
+      sourceType: "summary" as const,
+      rank: 0,
+      title: `Drift: ${memory.title || memory.id}`,
+      content: lines.join("\n"),
+      score: related.length + currentReasons.length,
+      sourceIds: [memory.id, ...related.map((entry) => entry.memory.id)],
+      reasons: ["drift", "memory_relation_review"],
+      tokens: Math.ceil(lines.join("\n").length / 3),
+      metadata: {
+        query: opts.query,
+        memoryId: memory.id,
+        relatedCount: related.length,
+        related: related.map((entry) => ({
+          id: entry.memory.id,
+          reasons: entry.reasons,
+          lifecycleState: entry.memory.lifecycleState ?? "active",
+          isLatest: entry.memory.isLatest !== false,
+          updatedAt: entry.memory.updatedAt,
+        })),
+      },
+    }];
+  });
+}
+
+async function buildCandidatePrefilter(
+  kv: StateKV,
+  filters: SmartSearchFilters,
+): Promise<PrefilterPlan> {
+  if (!hasHardFilters(filters)) {
+    return {
+      active: false,
+      scannedMemories: 0,
+      scannedSessions: 0,
+      scannedObservations: 0,
+    };
+  }
+
+  const candidateIds = new Set<string>();
+  let scannedMemories = 0;
+  let scannedSessions = 0;
+  let scannedObservations = 0;
+
+  const memories = await kv.list<Memory>(KV.memories).catch(() => []);
+  for (const memory of memories) {
+    scannedMemories++;
+    const meta: CandidateMeta = {
+      project: memory.project,
+      cwd: undefined,
+      agentId: memory.agentId,
+      files: memory.files ?? [],
+      branch: memory.branch,
+      commit: memory.commit,
+      commitShas: memory.commit ? [memory.commit] : [],
+      memory,
+    };
+    if (matchesFilters(meta, filters)) {
+      candidateIds.add(searchCandidateKey(memory.id, memory.sessionIds?.[0] ?? "memory"));
+    }
+  }
+
+  const sessions = await kv.list<Session>(KV.sessions).catch(() => []);
+  for (const session of sessions) {
+    scannedSessions++;
+    const observations = await kv
+      .list<CompressedObservation>(KV.observations(session.id))
+      .catch(() => []);
+    for (const observation of observations) {
+      scannedObservations++;
+      const meta: CandidateMeta = {
+        project: session.project,
+        cwd: session.cwd,
+        agentId: observation.agentId,
+        files: observation.files ?? [],
+        commitShas: session.commitShas ?? [],
+        session,
+      };
+      if (matchesFilters(meta, filters)) {
+        candidateIds.add(searchCandidateKey(observation.id, observation.sessionId || session.id));
+      }
+    }
+  }
+
+  return {
+    active: true,
+    candidateIds,
+    scannedMemories,
+    scannedSessions,
+    scannedObservations,
+  };
+}
+
+async function applyHardFilters(
+  kv: StateKV,
+  results: HybridSearchResult[],
+  filters: SmartSearchFilters,
+): Promise<{
+  results: HybridSearchResult[];
+  metas: Map<string, CandidateMeta>;
+  filteredOut: number;
+}> {
+  if (!hasHardFilters(filters)) {
+    return {
+      results: results.map(normalizeHybridSessionId),
+      metas: new Map(),
+      filteredOut: 0,
+    };
+  }
+  const metas = new Map<string, CandidateMeta>();
+  const scoped: HybridSearchResult[] = [];
+  for (const result of results) {
+    const meta = await candidateMeta(kv, result);
+    metas.set(result.observation.id, meta);
+    if (matchesFilters(meta, filters)) scoped.push(normalizeHybridSessionId(result));
+  }
+  return { results: scoped, metas, filteredOut: results.length - scoped.length };
+}
+
+function buildExplain(opts: {
+  query?: string;
+  searchMode: SearchMode;
+  retrievalMode: RetrievalMode;
+  filters: SmartSearchFilters;
+  requestedLimit: number;
+  overFetchLimit: number;
+  tokenBudget?: number;
+  rawHybridCount: number;
+  filteredHybridCount: number;
+  filteredOut: number;
+  lessonsCount: number;
+  results: HybridSearchResult[];
+  prefilter: PrefilterPlan;
+  driftEvidence?: RankedEvidence[];
+}): {
+  query?: string;
+  searchMode: SearchMode;
+  queryPlan: QueryPlan;
+  rankedEvidence: RankedEvidence[];
+  plan: QueryPlan;
+  candidates: {
+    rawHybrid: number;
+    afterHardFilters: number;
+    filteredOut: number;
+    lessons: number;
+  };
+  ranking: Array<{
+    rank: number;
+    obsId: string;
+    sessionId?: string;
+    title?: string;
+    combinedScore?: number;
+    components?: RankedEvidence["components"];
+    reasons: string[];
+    graphContext?: string;
+  }>;
+  warnings: string[];
+} {
+  const hardFilters = buildHardFilters(opts.filters);
+  const warnings: string[] = [];
+  if (opts.filters.branch) {
+    warnings.push("branch filters require branch metadata on memories; observations without branch metadata are excluded");
+  }
+  if (opts.filters.commit) {
+    warnings.push("commit filters match memory.commit or Session.commitShas");
+  }
+  if (opts.retrievalMode === "as_of" && !opts.filters.temporal) {
+    warnings.push("as_of retrieval mode uses asOf or validAt when supplied; no temporal filter was provided");
+  }
+  const streams = ["bm25", "vector", "graph", "lessons"];
+  if (opts.retrievalMode === "global_community") {
+    streams.push("community_summary");
+  }
+  if (opts.retrievalMode === "drift") {
+    streams.push("drift");
+  }
+  const queryPlan = buildQueryPlan({
+    query: opts.query,
+    searchMode: opts.searchMode,
+    retrievalMode: opts.retrievalMode,
+    streams,
+    filterStage: filterStage(opts.prefilter.active, opts.filters.temporal),
+    hardFilters,
+    temporalFilter: temporalValidityHardFilter(opts.filters.temporal),
+    requestedLimit: opts.requestedLimit,
+    overFetchLimit: opts.overFetchLimit,
+    tokenBudget: opts.tokenBudget,
+    prefilter: opts.prefilter.active
+      ? {
+          candidateCount: opts.prefilter.candidateIds?.size ?? 0,
+          scannedMemories: opts.prefilter.scannedMemories,
+          scannedSessions: opts.prefilter.scannedSessions,
+          scannedObservations: opts.prefilter.scannedObservations,
+        }
+      : undefined,
+    warnings,
+  });
+  const observationEvidence = opts.results.map(hybridResultToRankedEvidence);
+  const communityEvidence = opts.retrievalMode === "global_community"
+    ? buildCommunitySummaries(observationEvidence, {
+        limit: Math.min(Math.max(observationEvidence.length, 1), 5),
+      })
+    : [];
+  const prefixEvidence = [
+    ...(opts.driftEvidence ?? []),
+    ...communityEvidence,
+  ].map((item, index) => ({ ...item, rank: index + 1 }));
+  const rankedEvidence = [
+    ...prefixEvidence,
+    ...observationEvidence.map((item) => ({
+      ...item,
+      rank: item.rank + prefixEvidence.length,
+    })),
+  ];
+  return {
+    query: opts.query,
+    searchMode: opts.searchMode,
+    queryPlan,
+    rankedEvidence,
+    plan: queryPlan,
+    candidates: {
+      rawHybrid: opts.rawHybridCount,
+      afterHardFilters: opts.filteredHybridCount,
+      filteredOut: opts.filteredOut,
+      lessons: opts.lessonsCount,
+    },
+    ranking: rankedEvidence.map((evidence) => ({
+      rank: evidence.rank,
+      obsId: evidence.id,
+      sessionId: evidence.sessionId,
+      title: evidence.title,
+      combinedScore: evidence.score,
+      components: evidence.components,
+      reasons: evidence.reasons,
+      graphContext: evidence.graphContext,
+    })),
+    warnings,
+  };
+}
+
 export function registerSmartSearchFunction(
   sdk: ISdk,
   kv: StateKV,
-  searchFn: (query: string, limit: number) => Promise<HybridSearchResult[]>,
+  searchFn: (
+    query: string,
+    limit: number,
+    options?: SearchBackendOptions,
+  ) => Promise<HybridSearchResult[]>,
 ): void {
   sdk.registerFunction("mem::smart-search",
     async (data: {
@@ -83,7 +636,22 @@ export function registerSmartSearchFunction(
       expandIds?: Array<string | { obsId: string; sessionId: string }>;
       limit?: number;
       project?: string;
+      cwd?: string;
       includeLessons?: boolean;
+      explain?: boolean;
+      searchMode?: SearchMode;
+      retrievalMode?: RetrievalMode;
+      files?: string[] | string;
+      file?: string;
+      filePath?: string;
+      branch?: string;
+      commit?: string;
+      memoryTier?: MemoryLane;
+      privacyScope?: MemoryPrivacyScope;
+      asOf?: string;
+      validAt?: string;
+      includeReport?: boolean;
+      tokenBudget?: number;
       // optional per-call agent filter for runtimes routing many
       // roles through one server. "*" opts out of the env-default
       // scope and returns hits from every agent.
@@ -105,7 +673,9 @@ export function registerSmartSearchFunction(
       // agent id is resolvable from any source. Silently letting
       // filterAgentId fall through to `undefined` would be the same
       // cross-agent leak this filter is meant to prevent.
-      const isolated = isAgentScopeIsolated();
+      const isolated =
+        isAgentScopeIsolated() ||
+        getEnvVar("AGENTMEMORY_AGENT_SCOPE") === "isolated";
       const explicitAgentId =
         typeof data.agentId === "string" && data.agentId.trim().length > 0
           ? data.agentId.trim()
@@ -115,6 +685,37 @@ export function registerSmartSearchFunction(
       const filterAgentId = wildcardAgent
         ? undefined
         : explicitAgentId ?? envAgentId;
+      const searchMode = normalizeSearchMode(data.searchMode);
+      const retrievalMode = normalizeRetrievalMode(data.retrievalMode);
+      const tokenBudget = normalizeTokenBudget(data.tokenBudget);
+      const includeStructuredReport =
+        data.explain === true || data.includeReport === true || tokenBudget !== undefined;
+      const filters: SmartSearchFilters = {
+        agentId: filterAgentId,
+        project: asNonEmptyString(data.project),
+        cwd: asNonEmptyString(data.cwd),
+        branch: asNonEmptyString(data.branch),
+        commit: asNonEmptyString(data.commit),
+        files: [
+          ...parseStringList(data.files),
+          ...parseStringList(data.file),
+          ...parseStringList(data.filePath),
+        ],
+        memoryTier: data.memoryTier,
+        privacyScope: data.privacyScope,
+      };
+      const temporal = normalizeTemporalValidityFilter({
+        asOf: data.asOf,
+        validAt: data.validAt,
+      });
+      if (temporal.error) {
+        return {
+          mode: data.expandIds && data.expandIds.length > 0 ? "expanded" : "compact",
+          results: [],
+          error: temporal.error,
+        };
+      }
+      filters.temporal = temporal.filter;
       if (
         isolated &&
         !wildcardAgent &&
@@ -156,9 +757,23 @@ export function registerSmartSearchFunction(
           if (r) expanded.push(r);
         }
 
-        const scoped = filterAgentId
-          ? expanded.filter((e) => e.observation.agentId === filterAgentId)
-          : expanded;
+        const scoped: typeof expanded = [];
+        let filteredOutOfScope = 0;
+        for (const entry of expanded) {
+          const session = await kv
+            .get<Session>(KV.sessions, entry.sessionId)
+            .catch(() => null);
+          const meta: CandidateMeta = {
+            project: session?.project,
+            cwd: session?.cwd,
+            agentId: entry.observation.agentId,
+            files: entry.observation.files ?? [],
+            commitShas: session?.commitShas ?? [],
+            session: session ?? undefined,
+          };
+          if (matchesFilters(meta, filters)) scoped.push(entry);
+          else filteredOutOfScope++;
+        }
 
         void recordAccessBatch(
           kv,
@@ -170,10 +785,49 @@ export function registerSmartSearchFunction(
           requested: data.expandIds.length,
           attempted: raw.length,
           returned: scoped.length,
-          filteredOutOfScope: expanded.length - scoped.length,
+          filteredOutOfScope,
           truncated,
         });
-        return { mode: "expanded", results: scoped, truncated };
+        const response: {
+          mode: "expanded";
+          results: typeof scoped;
+          truncated: boolean;
+          explain?: unknown;
+          queryPlan?: QueryPlan;
+        } = { mode: "expanded", results: scoped, truncated };
+        if (includeStructuredReport) {
+          const queryPlan = buildQueryPlan({
+            mode: "expandIds",
+            searchMode,
+            retrievalMode,
+            streams: ["expandIds"],
+            filterStage: filters.temporal
+              ? "temporal validity post-filter safety check"
+              : hasHardFilters(filters)
+                ? "post-filter safety check"
+                : "none",
+            hardFilters: buildHardFilters(filters),
+            temporalFilter: temporalValidityHardFilter(filters.temporal),
+            requestedLimit: raw.length,
+            overFetchLimit: raw.length,
+            tokenBudget,
+          });
+          const explain = {
+            searchMode,
+            retrievalMode,
+            queryPlan,
+            plan: {
+              mode: "expandIds",
+              hardFilters: filters,
+              attempted: raw.length,
+              returned: scoped.length,
+              filteredOut: filteredOutOfScope,
+            },
+          };
+          response.queryPlan = queryPlan;
+          if (data.explain) response.explain = explain;
+        }
+        return response;
       }
 
       if (!data.query || typeof data.query !== "string" || !data.query.trim()) {
@@ -192,22 +846,32 @@ export function registerSmartSearchFunction(
       // is a defensible middle ground: enough headroom for a small
       // workload, capped at 300 so a 100-limit request never asks for
       // thousands of hits.
-      const overFetchLimit = filterAgentId
-        ? Math.min(limit * 3, 300)
-        : limit;
+      const hardFiltering = hasHardFilters(filters);
+      const modeMultiplier = searchMode === "fast" ? 2 : searchMode === "deep" ? 10 : 5;
+      const overFetchLimit = hardFiltering
+        ? Math.min(Math.max(limit * modeMultiplier, 100), 500)
+        : searchMode === "deep"
+          ? Math.min(limit * 3, 300)
+          : limit;
+      const prefilter = await buildCandidatePrefilter(kv, filters);
+      const candidateFilter = prefilter.active
+        ? (obsId: string, sessionId: string) =>
+            prefilter.candidateIds?.has(searchCandidateKey(obsId, sessionId)) ?? false
+        : undefined;
 
       const [hybridResults, lessons] = await Promise.all([
-        searchFn(data.query, overFetchLimit),
+        searchFn(data.query, overFetchLimit, { candidateFilter, searchMode }),
         includeLessons
-          ? recallLessons(sdk, data.query, lessonLimit, data.project)
+          ? recallLessons(sdk, data.query, lessonLimit, {
+              project: filters.project,
+              agentId: filters.agentId,
+              isolated,
+            })
           : Promise.resolve([]),
       ]);
 
-      const filteredHybrid = filterAgentId
-        ? hybridResults
-            .filter((r) => r.observation.agentId === filterAgentId)
-            .slice(0, limit)
-        : hybridResults.slice(0, limit);
+      const scopedHybrid = await applyHardFilters(kv, hybridResults, filters);
+      const filteredHybrid = scopedHybrid.results.slice(0, limit);
 
       const compact: CompactSearchResult[] = filteredHybrid.map((r) => ({
         obsId: r.observation.id,
@@ -280,8 +944,64 @@ export function registerSmartSearchFunction(
         mode: "compact";
         results: CompactSearchResult[];
         lessons?: CompactLessonResult[];
+        explain?: unknown;
+        queryPlan?: QueryPlan;
+        rankedEvidence?: RankedEvidence[];
+        budgetReport?: unknown;
+        packedContext?: unknown;
+        context?: string;
+        tokens?: number;
+        truncated?: boolean;
       } = { mode: "compact", results: compact };
       if (includeLessons) response.lessons = lessons;
+      if (includeStructuredReport) {
+        const driftEvidence = retrievalMode === "drift"
+          ? await buildDriftEvidence(kv, {
+              query: data.query,
+              filters,
+              results: filteredHybrid,
+            })
+          : undefined;
+        const explain = buildExplain({
+          query: data.query,
+          searchMode,
+          retrievalMode,
+          filters,
+          requestedLimit: limit,
+          overFetchLimit,
+          tokenBudget,
+          rawHybridCount: hybridResults.length,
+          filteredHybridCount: scopedHybrid.results.length,
+          filteredOut: scopedHybrid.filteredOut,
+          lessonsCount: lessons.length,
+          results: filteredHybrid,
+          prefilter,
+          driftEvidence,
+        });
+        let rankedEvidence = explain.rankedEvidence;
+        if (tokenBudget !== undefined) {
+          const packed = packContext({
+            evidence: explain.rankedEvidence,
+            budgetTokens: tokenBudget,
+            header: `agentmemory smart-search: ${data.query}`,
+            explain: true,
+          });
+          rankedEvidence = packed.selected;
+          response.budgetReport = packed.budgetReport;
+          response.packedContext = packed;
+          response.context = packed.context;
+          response.tokens = packed.tokens;
+          response.truncated = packed.budgetReport.ignoredCount > 0;
+          explain.rankedEvidence = rankedEvidence;
+          explain.queryPlan.limits.tokenBudget = tokenBudget;
+          explain.plan = explain.queryPlan;
+          (explain as { budgetReport?: unknown }).budgetReport = packed.budgetReport;
+          (explain as { packedContext?: unknown }).packedContext = packed;
+        }
+        if (data.explain) response.explain = explain;
+        response.queryPlan = explain.queryPlan;
+        response.rankedEvidence = rankedEvidence;
+      }
       return response;
     },
   );
@@ -291,15 +1011,19 @@ async function recallLessons(
   sdk: ISdk,
   query: string,
   limit: number,
-  project?: string,
+  scope: LessonScope,
 ): Promise<CompactLessonResult[]> {
+  if (scope.isolated && !scope.agentId) return [];
   try {
     const result = (await sdk.trigger({
       function_id: "mem::lesson-recall",
-      payload: { query, limit, project },
-    })) as { success?: boolean; lessons?: Array<Lesson & { score?: number }> };
+      payload: { query, limit, project: scope.project, agentId: scope.agentId },
+    })) as { success?: boolean; lessons?: AgentScopedLesson[] };
     if (!result?.success || !Array.isArray(result.lessons)) return [];
-    return result.lessons.map((l) => ({
+    const lessons = scope.agentId
+      ? result.lessons.filter((l) => l.agentId === scope.agentId)
+      : result.lessons;
+    return lessons.map((l) => ({
       lessonId: l.id,
       content:
         l.content.length > LESSON_CONTENT_PREVIEW_CHARS

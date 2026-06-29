@@ -82,6 +82,67 @@ describe("SearchIndex", () => {
     expect(index.search("auth", 5).length).toBe(5);
   });
 
+  it("does not let disallowed top hits consume the result limit", () => {
+    index.add(
+      makeObs({
+        id: "obs_blocked",
+        title: "auth auth auth auth auth",
+        narrative: "auth auth auth auth auth",
+      }),
+    );
+    index.add(
+      makeObs({
+        id: "obs_allowed",
+        title: "auth",
+        narrative: "auth",
+      }),
+    );
+
+    const results = index.search(
+      "auth",
+      1,
+      (obsId) => obsId === "obs_allowed",
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0].obsId).toBe("obs_allowed");
+  });
+
+  it("keeps duplicate observation ids distinct across sessions", () => {
+    index.add(
+      makeObs({
+        id: "obs_shared",
+        sessionId: "ses_a",
+        title: "alpha incident",
+        narrative: "alpha only",
+      }),
+    );
+    index.add(
+      makeObs({
+        id: "obs_shared",
+        sessionId: "ses_b",
+        title: "beta incident",
+        narrative: "beta only",
+      }),
+    );
+
+    expect(index.size).toBe(2);
+    expect(index.search("alpha")).toMatchObject([
+      { obsId: "obs_shared", sessionId: "ses_a" },
+    ]);
+    expect(index.search("beta")).toMatchObject([
+      { obsId: "obs_shared", sessionId: "ses_b" },
+    ]);
+
+    const scoped = index.search(
+      "incident",
+      10,
+      (_obsId, sessionId) => sessionId === "ses_b",
+    );
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0]).toMatchObject({ obsId: "obs_shared", sessionId: "ses_b" });
+  });
+
   it("clears the index", () => {
     index.add(makeObs());
     index.clear();
@@ -161,6 +222,38 @@ describe("SearchIndex", () => {
       expect(restored.size).toBe(1);
       expect(restored.search("alpha")).toEqual([]);
       expect(restored.search("beta")).toHaveLength(1);
+    });
+
+    it("loads legacy serialized entries keyed only by observation id", () => {
+      const legacy = JSON.stringify({
+        v: 2,
+        entries: [
+          ["obs_legacy", { obsId: "obs_legacy", sessionId: "ses_old", termCount: 2 }],
+        ],
+        inverted: [["legacy", ["obs_legacy"]]],
+        docTerms: [["obs_legacy", [["legacy", 2]]]],
+        totalDocLength: 2,
+      });
+
+      const restored = SearchIndex.deserialize(legacy);
+
+      expect(restored.search("legacy")).toMatchObject([
+        { obsId: "obs_legacy", sessionId: "ses_old" },
+      ]);
+      expect(restored.has("obs_legacy", "ses_old")).toBe(true);
+    });
+
+    it("can remove one duplicate observation id by session", () => {
+      index.add(makeObs({ id: "obs_shared", sessionId: "ses_a", title: "alpha" }));
+      index.add(makeObs({ id: "obs_shared", sessionId: "ses_b", title: "beta" }));
+
+      index.remove("obs_shared", "ses_a");
+
+      expect(index.size).toBe(1);
+      expect(index.search("alpha")).toEqual([]);
+      expect(index.search("beta")).toMatchObject([
+        { obsId: "obs_shared", sessionId: "ses_b" },
+      ]);
     });
   });
 

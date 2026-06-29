@@ -1,4 +1,5 @@
 import type { CompressedObservation } from "../types.js";
+import type { SearchCandidateFilter } from "../types.js";
 import { stem } from "./stemmer.js";
 import { getSynonyms } from "./synonyms.js";
 import { segmentCjk, hasCjk } from "./cjk-segmenter.js";
@@ -7,6 +8,12 @@ interface IndexEntry {
   obsId: string;
   sessionId: string;
   termCount: number;
+}
+
+const DOC_KEY_SEPARATOR = "\0";
+
+function docKey(obsId: string, sessionId: string): string {
+  return `${sessionId}${DOC_KEY_SEPARATOR}${obsId}`;
 }
 
 export class SearchIndex {
@@ -23,60 +30,74 @@ export class SearchIndex {
     const terms = this.extractTerms(obs);
     const termFreq = new Map<string, number>();
     let termCount = 0;
+    const key = docKey(obs.id, obs.sessionId);
 
     for (const term of terms) {
       termFreq.set(term, (termFreq.get(term) || 0) + 1);
       termCount++;
     }
 
-    this.entries.set(obs.id, {
+    this.remove(obs.id, obs.sessionId);
+
+    this.entries.set(key, {
       obsId: obs.id,
       sessionId: obs.sessionId,
       termCount,
     });
-    this.docTermCounts.set(obs.id, termFreq);
+    this.docTermCounts.set(key, termFreq);
     this.totalDocLength += termCount;
 
     for (const term of termFreq.keys()) {
       if (!this.invertedIndex.has(term)) {
         this.invertedIndex.set(term, new Set());
       }
-      this.invertedIndex.get(term)!.add(obs.id);
+      this.invertedIndex.get(term)!.add(key);
     }
 
     this.sortedTerms = null;
   }
 
-  has(id: string): boolean {
-    return this.entries.has(id);
+  has(id: string, sessionId?: string): boolean {
+    if (sessionId !== undefined) return this.entries.has(docKey(id, sessionId));
+    return Array.from(this.entries.values()).some((entry) => entry.obsId === id);
   }
 
-  remove(id: string): void {
-    const entry = this.entries.get(id);
-    if (!entry) return;
+  remove(id: string, sessionId?: string): void {
+    const keys =
+      sessionId === undefined
+        ? Array.from(this.entries.entries())
+            .filter(([, entry]) => entry.obsId === id)
+            .map(([key]) => key)
+        : [docKey(id, sessionId)];
 
-    const termFreq = this.docTermCounts.get(id);
-    if (termFreq) {
-      for (const term of termFreq.keys()) {
-        const postingList = this.invertedIndex.get(term);
-        if (postingList) {
-          postingList.delete(id);
-          if (postingList.size === 0) {
-            this.invertedIndex.delete(term);
+    for (const key of keys) {
+      const entry = this.entries.get(key);
+      if (!entry) continue;
+
+      const termFreq = this.docTermCounts.get(key);
+      if (termFreq) {
+        for (const term of termFreq.keys()) {
+          const postingList = this.invertedIndex.get(term);
+          if (postingList) {
+            postingList.delete(key);
+            if (postingList.size === 0) {
+              this.invertedIndex.delete(term);
+            }
           }
         }
+        this.docTermCounts.delete(key);
       }
-      this.docTermCounts.delete(id);
-    }
 
-    this.totalDocLength = Math.max(0, this.totalDocLength - entry.termCount);
-    this.entries.delete(id);
+      this.totalDocLength = Math.max(0, this.totalDocLength - entry.termCount);
+      this.entries.delete(key);
+    }
     this.sortedTerms = null;
   }
 
   search(
     query: string,
     limit = 20,
+    candidateFilter?: SearchCandidateFilter,
   ): Array<{ obsId: string; sessionId: string; score: number }> {
     const rawTerms = this.tokenize(query.toLowerCase());
     if (rawTerms.length === 0) return [];
@@ -109,9 +130,12 @@ export class SearchIndex {
         const df = matchingDocs.size;
         const idf = Math.log((N - df + 0.5) / (df + 0.5) + 1);
 
-        for (const obsId of matchingDocs) {
-          const entry = this.entries.get(obsId)!;
-          const docTerms = this.docTermCounts.get(obsId);
+        for (const key of matchingDocs) {
+          const entry = this.entries.get(key)!;
+          if (candidateFilter && !candidateFilter(entry.obsId, entry.sessionId)) {
+            continue;
+          }
+          const docTerms = this.docTermCounts.get(key);
           const tf = docTerms?.get(term) || 0;
           const docLen = entry.termCount;
 
@@ -120,7 +144,7 @@ export class SearchIndex {
             tf + this.k1 * (1 - this.b + this.b * (docLen / avgDocLen));
           const bm25Score = idf * (numerator / denominator) * weight;
 
-          scores.set(obsId, (scores.get(obsId) || 0) + bm25Score);
+          scores.set(key, (scores.get(key) || 0) + bm25Score);
         }
       }
 
@@ -130,30 +154,33 @@ export class SearchIndex {
         if (!indexTerm.startsWith(term)) break;
         if (indexTerm === term) continue;
 
-        const obsIds = this.invertedIndex.get(indexTerm)!;
-        const prefixDf = obsIds.size;
+        const keys = this.invertedIndex.get(indexTerm)!;
+        const prefixDf = keys.size;
         const prefixIdf =
           Math.log((N - prefixDf + 0.5) / (prefixDf + 0.5) + 1) * 0.5;
-        for (const obsId of obsIds) {
-          const entry = this.entries.get(obsId)!;
-          const docTerms = this.docTermCounts.get(obsId);
+        for (const key of keys) {
+          const entry = this.entries.get(key)!;
+          if (candidateFilter && !candidateFilter(entry.obsId, entry.sessionId)) {
+            continue;
+          }
+          const docTerms = this.docTermCounts.get(key);
           const tf = docTerms?.get(indexTerm) || 0;
           const docLen = entry.termCount;
           const numerator = tf * (this.k1 + 1);
           const denominator =
             tf + this.k1 * (1 - this.b + this.b * (docLen / avgDocLen));
           scores.set(
-            obsId,
-            (scores.get(obsId) || 0) + prefixIdf * (numerator / denominator) * weight,
+            key,
+            (scores.get(key) || 0) + prefixIdf * (numerator / denominator) * weight,
           );
         }
       }
     }
 
     return Array.from(scores.entries())
-      .map(([obsId, score]) => {
-        const entry = this.entries.get(obsId)!;
-        return { obsId, sessionId: entry.sessionId, score };
+      .map(([key, score]) => {
+        const entry = this.entries.get(key)!;
+        return { obsId: entry.obsId, sessionId: entry.sessionId, score };
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
@@ -201,7 +228,7 @@ export class SearchIndex {
         [id, Array.from(counts.entries())] as [string, [string, number][]],
     );
     return JSON.stringify({
-      v: 2,
+      v: 3,
       entries,
       inverted,
       docTerms,
@@ -214,14 +241,24 @@ export class SearchIndex {
       const idx = new SearchIndex();
       const data = JSON.parse(json);
       if (!data?.entries || !data?.inverted || !data?.docTerms) return idx;
+      const keyMap = new Map<string, string>();
       for (const [key, val] of data.entries) {
-        idx.entries.set(key, val);
+        const entry = val as IndexEntry;
+        const normalizedKey = String(key).includes(DOC_KEY_SEPARATOR)
+          ? String(key)
+          : docKey(entry.obsId, entry.sessionId);
+        idx.entries.set(normalizedKey, entry);
+        keyMap.set(String(key), normalizedKey);
       }
       for (const [term, ids] of data.inverted) {
-        idx.invertedIndex.set(term, new Set(ids));
+        idx.invertedIndex.set(
+          term,
+          new Set((ids as string[]).map((id) => keyMap.get(String(id)) ?? String(id))),
+        );
       }
       for (const [id, counts] of data.docTerms) {
-        idx.docTermCounts.set(id, new Map(counts));
+        const normalizedKey = keyMap.get(String(id)) ?? String(id);
+        idx.docTermCounts.set(normalizedKey, new Map(counts));
       }
       const rawLen = Number(data.totalDocLength);
       idx.totalDocLength =

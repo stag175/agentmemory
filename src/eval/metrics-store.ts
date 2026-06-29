@@ -1,6 +1,15 @@
 import type { FunctionMetrics } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
+import type { ReleaseGateStatus } from "./validator.js";
+
+export interface QualityEvidence {
+  functionId: string;
+  status: Exclude<ReleaseGateStatus, "blocked">;
+  totalCalls: number;
+  failureCount: number;
+  avgQualityScore: number;
+ }
 
 export class MetricsStore {
   private cache = new Map<string, FunctionMetrics>();
@@ -61,5 +70,35 @@ export class MetricsStore {
     for (const m of kvMetrics) merged.set(m.functionId, m);
     for (const [id, m] of this.cache) merged.set(id, m);
     return Array.from(merged.values());
+  }
+
+  async getQualityEvidence(
+    functionIds: string[],
+    minQualityScore = 60,
+  ): Promise<QualityEvidence[]> {
+    const rows = await Promise.all(functionIds.map((id) => this.get(id)));
+    return functionIds.map((functionId, index) => {
+      const metrics = rows[index];
+      if (!metrics || metrics.totalCalls === 0) {
+        return {
+          functionId,
+          status: "not_run",
+          totalCalls: 0,
+          failureCount: 0,
+          avgQualityScore: 0,
+        };
+      }
+      const status =
+        metrics.failureCount === 0 && metrics.avgQualityScore >= minQualityScore
+          ? "pass"
+          : "fail";
+      return {
+        functionId,
+        status,
+        totalCalls: metrics.totalCalls,
+        failureCount: metrics.failureCount,
+        avgQualityScore: metrics.avgQualityScore,
+      };
+    });
   }
 }

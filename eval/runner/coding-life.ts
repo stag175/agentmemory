@@ -1,17 +1,9 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { agentmemoryAdapter } from "./adapters/agentmemory.js";
-import { grepAdapter } from "./adapters/grep.js";
-import { vectorAdapter } from "./adapters/vector.js";
+import { resolveBenchmarkAdapters } from "./adapters/index.js";
 import { aggregate, scoreQuestion } from "./score.js";
-import type { Adapter, Question, ScoreRow, Session } from "./types.js";
-
-const ADAPTERS: Record<string, Adapter> = {
-  grep: grepAdapter as unknown as Adapter,
-  vector: vectorAdapter as unknown as Adapter,
-  agentmemory: agentmemoryAdapter as unknown as Adapter,
-};
+import type { BenchmarkAdapterDescriptor, Question, ScoreRow, Session } from "./types.js";
 
 interface CliOptions {
   data: string;
@@ -46,13 +38,14 @@ async function main(): Promise<void> {
     readFileSync(resolve(opts.data, "queries.json"), "utf8"),
   ) as Array<Omit<Question, "haystack">>;
   const questions: Question[] = queriesRaw.map((q) => ({ ...q, haystack: sessions }));
-  const adapterNames = opts.adapters.split(",").map((s) => s.trim()).filter(Boolean);
-  for (const a of adapterNames) {
-    if (!ADAPTERS[a]) {
-      console.error(`unknown adapter: ${a}. options: ${Object.keys(ADAPTERS).join(",")}`);
-      process.exit(2);
-    }
+  let adapterDescriptors: BenchmarkAdapterDescriptor[];
+  try {
+    adapterDescriptors = resolveBenchmarkAdapters(opts.adapters);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(2);
   }
+  const adapterNames = adapterDescriptors.map((descriptor) => descriptor.name);
   console.log(
     `loaded ${sessions.length} sessions, ${questions.length} queries, adapters: ${adapterNames.join(",")}, k=${k}`,
   );
@@ -63,8 +56,8 @@ async function main(): Promise<void> {
   if (existsSync(ndjsonPath)) writeFileSync(ndjsonPath, "");
 
   const rows: ScoreRow[] = [];
-  for (const adapterName of adapterNames) {
-    const adapter = ADAPTERS[adapterName];
+  for (const descriptor of adapterDescriptors) {
+    const adapter = descriptor.adapter;
     console.log(`\n== ${adapter.name} ==`);
     const state = await adapter.init(sessions);
     try {

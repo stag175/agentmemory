@@ -1,0 +1,34 @@
+runtime: node
+transport:
+  type: stdio
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      agentmemory_url:
+        type: string
+        title: AgentMemory REST URL
+        default: http://localhost:3111
+        description: Base URL for an existing local agentmemory daemon.
+      agentmemory_secret:
+        type: string
+        title: AgentMemory secret
+        description: Optional bearer secret for AGENTMEMORY_SECRET-protected daemons.
+    additionalProperties: false
+  commandFunction: |
+    (config) => ({
+      command: "npx",
+      args: ["-y", "@agentmemory/mcp@0.9.27"],
+      env: {
+        AGENTMEMORY_URL: config.agentmemory_url || "http://localhost:3111",
+        ...(config.agentmemory_secret ? { AGENTMEMORY_SECRET: config.agentmemory_secret } : {})
+      }
+    })
+metadata:
+  name: agentmemory
+  displayName: AgentMemory
+  description: Persistent memory MCP server for AI coding agents.
+  repository: https://github.com/rohitg00/agentmemory
+  homepage: https://github.com/rohitg00/agentmemory#readme
+  license: Apache-2.0

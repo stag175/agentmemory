@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 
@@ -284,19 +285,37 @@ describe("Copilot hook scripts", () => {
     }
   }
 
+  function requestByPath(
+    result: { requests: ObservedRequest[] },
+    path: string,
+  ): ObservedRequest {
+    const request = result.requests.find((item) => item.path === path);
+    expect(request, `missing request to ${path}`).toBeDefined();
+    return request!;
+  }
+
   it("session-start accepts Copilot camelCase sessionId", async () => {
     const result = await runHook(
       "scripts/session-start.mjs",
-      { sessionId: "copilot-session", cwd: "C:\\repo" },
+      {
+        sessionId: "copilot-session",
+        cwd: "C:\\repo",
+        agentId: "codex-worker",
+        framework: "copilot",
+        nativeId: "native-session-1",
+      },
       { AGENTMEMORY_INJECT_CONTEXT: "true" },
     );
 
     expect(result.stdout).toBe("remembered context");
-    expect(result.requests[0]?.path).toBe("/agentmemory/session/start");
-    expect(result.requests[0]?.body).toMatchObject({
+    const request = requestByPath(result, "/agentmemory/session/start");
+    expect(request.body).toMatchObject({
       sessionId: "copilot-session",
-      project: "C:\\repo",
+      project: "repo",
       cwd: "C:\\repo",
+      agentId: "codex-worker",
+      framework: "copilot",
+      nativeId: "native-session-1",
     });
   });
 
@@ -312,8 +331,8 @@ describe("Copilot hook scripts", () => {
     );
 
     expect(result.stdout).toBe("remembered context");
-    expect(result.requests[0]?.path).toBe("/agentmemory/enrich");
-    expect(result.requests[0]?.body).toMatchObject({
+    const request = requestByPath(result, "/agentmemory/enrich");
+    expect(request.body).toMatchObject({
       sessionId: "unknown",
       files: ["src/index.ts"],
       terms: [],
@@ -328,33 +347,151 @@ describe("Copilot hook scripts", () => {
       userPrompt: "remember this prompt",
     });
 
-    expect(result.requests[0]?.path).toBe("/agentmemory/observe");
-    expect(result.requests[0]?.body).toMatchObject({
+    const request = requestByPath(result, "/agentmemory/observe");
+    expect(request.body).toMatchObject({
       hookType: "prompt_submit",
       sessionId: "copilot-session",
-      data: { prompt: "remember this prompt" },
+      data: {
+        prompt: "remember this prompt",
+        lineage: {
+          sessionId: "copilot-session",
+          project: "repo",
+          cwd: "C:\\repo",
+        },
+      },
     });
   });
 
+  it("prompt-submit resolves lineage project from ancestor .git marker", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "amem-copilot-git-"));
+    const nested = join(repo, "src", "hooks");
+    try {
+      mkdirSync(join(repo, ".git"));
+      mkdirSync(nested, { recursive: true });
+      const result = await runHook("scripts/prompt-submit.mjs", {
+        sessionId: "copilot-session",
+        cwd: nested,
+        userPrompt: "remember this prompt",
+      });
+
+      const request = requestByPath(result, "/agentmemory/observe");
+      expect(request.body).toMatchObject({
+        project: basename(repo),
+        cwd: nested,
+        data: {
+          lineage: {
+            project: basename(repo),
+            cwd: nested,
+          },
+        },
+      });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("post-tool-use emits lineage and sanitized tool_completed event metadata", async () => {
+    const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+    const result = await runHook("scripts/post-tool-use.mjs", {
+      sessionId: "copilot-session",
+      cwd: "C:\\repo",
+      agentId: "codex-worker",
+      framework: "copilot",
+      nativeId: "native-session-1",
+      toolCallId: "call-1",
+      toolName: "edit",
+      toolArgs: { filePath: "src/index.ts", token: secret },
+      toolResult: { textResultForLlm: "updated file" },
+    });
+
+    const observe = requestByPath(result, "/agentmemory/observe");
+    expect(observe.body).toMatchObject({
+      hookType: "post_tool_use",
+      sessionId: "copilot-session",
+      agentId: "codex-worker",
+      framework: "copilot",
+      nativeId: "native-session-1",
+      toolCallId: "call-1",
+      data: {
+        lineage: {
+          agentId: "codex-worker",
+          framework: "copilot",
+          nativeId: "native-session-1",
+          toolCallId: "call-1",
+        },
+      },
+    });
+
+    const event = requestByPath(result, "/agentmemory/agent-events");
+    expect(event.body).toMatchObject({
+      type: "tool_completed",
+      status: "ok",
+      sessionId: "copilot-session",
+      agentId: "codex-worker",
+      framework: "copilot",
+      nativeId: "native-session-1",
+      toolCallId: "call-1",
+      functionId: "tool:edit",
+      targetIds: ["call-1", "edit"],
+      metadata: {
+        hookType: "post_tool_use",
+        toolName: "edit",
+        toolInput: {
+          kind: "object",
+          keys: ["filePath"],
+          redactedKeyCount: 1,
+        },
+      },
+    });
+    expect(JSON.stringify(event.body)).not.toContain(secret);
+  });
+
   it("post-tool-failure accepts Copilot camelCase tool and error payloads", async () => {
+    const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
     const result = await runHook("scripts/post-tool-failure.mjs", {
       sessionId: "copilot-session",
       cwd: "C:\\repo",
+      agentId: "codex-worker",
+      framework: "copilot",
+      nativeId: "native-session-1",
+      toolCallId: "call-err",
       toolName: "edit",
-      toolArgs: { filePath: "src/index.ts" },
-      errorMessage: "failed",
+      toolArgs: { filePath: "src/index.ts", token: secret },
+      errorMessage: `failed Bearer ${secret}`,
     });
 
-    expect(result.requests[0]?.path).toBe("/agentmemory/observe");
-    expect(result.requests[0]?.body).toMatchObject({
+    const observe = requestByPath(result, "/agentmemory/observe");
+    expect(observe.body).toMatchObject({
       hookType: "post_tool_failure",
       sessionId: "copilot-session",
       data: {
         tool_name: "edit",
-        tool_input: JSON.stringify({ filePath: "src/index.ts" }),
-        error: "failed",
+        lineage: {
+          agentId: "codex-worker",
+          framework: "copilot",
+          nativeId: "native-session-1",
+          toolCallId: "call-err",
+        },
       },
     });
+
+    const event = requestByPath(result, "/agentmemory/agent-events");
+    expect(event.body).toMatchObject({
+      type: "tool_failed",
+      status: "error",
+      sessionId: "copilot-session",
+      functionId: "tool:edit",
+      targetIds: ["call-err", "edit"],
+      metadata: {
+        hookType: "post_tool_failure",
+        toolInput: {
+          kind: "object",
+          keys: ["filePath"],
+          redactedKeyCount: 1,
+        },
+      },
+    });
+    expect(JSON.stringify(event.body)).not.toContain(secret);
   });
 
   it("notification accepts Copilot camelCase notificationType", async () => {
@@ -366,14 +503,96 @@ describe("Copilot hook scripts", () => {
       message: "Approve edit",
     });
 
-    expect(result.requests[0]?.path).toBe("/agentmemory/observe");
-    expect(result.requests[0]?.body).toMatchObject({
+    const request = requestByPath(result, "/agentmemory/observe");
+    expect(request.body).toMatchObject({
       hookType: "notification",
       sessionId: "copilot-session",
       data: {
         notification_type: "permission_prompt",
         title: "Tool approval",
         message: "Approve edit",
+        lineage: {
+          sessionId: "copilot-session",
+          project: "repo",
+          cwd: "C:\\repo",
+        },
+      },
+    });
+  });
+
+  it("subagent-start emits parent and child lineage", async () => {
+    const result = await runHook("scripts/subagent-start.mjs", {
+      sessionId: "copilot-session",
+      cwd: "C:\\repo",
+      parentAgentId: "lead-agent",
+      agentId: "review-agent",
+      agentDisplayName: "Review agent",
+      framework: "copilot",
+    });
+
+    const observe = requestByPath(result, "/agentmemory/observe");
+    expect(observe.body).toMatchObject({
+      hookType: "subagent_start",
+      sessionId: "copilot-session",
+      agentId: "review-agent",
+      framework: "copilot",
+      data: {
+        agent_id: "review-agent",
+        agent_type: "Review agent",
+        lineage: {
+          agentId: "review-agent",
+          framework: "copilot",
+        },
+      },
+    });
+
+    const event = requestByPath(result, "/agentmemory/agent-events");
+    expect(event.body).toMatchObject({
+      type: "custom",
+      status: "pending",
+      functionId: "plugin::subagent_start",
+      fromAgentId: "lead-agent",
+      toAgentId: "review-agent",
+      targetIds: ["review-agent"],
+      metadata: {
+        hookType: "subagent_start",
+        agentType: "Review agent",
+      },
+    });
+  });
+
+  it("stop sends shaped session and hook trace payloads", async () => {
+    const result = await runHook("scripts/stop.mjs", {
+      sessionId: "copilot-session",
+      cwd: "C:\\repo",
+      agentId: "codex-worker",
+      framework: "copilot",
+      nativeId: "native-session-1",
+    });
+
+    expect(requestByPath(result, "/agentmemory/summarize").body).toMatchObject({
+      sessionId: "copilot-session",
+      agentId: "codex-worker",
+      framework: "copilot",
+      nativeId: "native-session-1",
+    });
+    expect(requestByPath(result, "/agentmemory/session/end").body).toMatchObject({
+      sessionId: "copilot-session",
+      agentId: "codex-worker",
+      framework: "copilot",
+      nativeId: "native-session-1",
+    });
+    expect(requestByPath(result, "/agentmemory/agent-events").body).toMatchObject({
+      type: "custom",
+      status: "ok",
+      functionId: "plugin::stop",
+      sessionId: "copilot-session",
+      agentId: "codex-worker",
+      framework: "copilot",
+      nativeId: "native-session-1",
+      metadata: {
+        hookType: "stop",
+        summarizeRequested: true,
       },
     });
   });

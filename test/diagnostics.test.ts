@@ -176,6 +176,21 @@ function makePeer(overrides: Partial<MeshPeer> = {}): MeshPeer {
   };
 }
 
+type ReleaseGateResult = {
+  overall: "pass" | "fail" | "blocked" | "not_run";
+  summary: Record<"pass" | "fail" | "blocked" | "not_run", number>;
+  checks: Record<
+    string,
+    {
+      status: "pass" | "fail" | "blocked" | "not_run";
+      message: string;
+      evidence: string[];
+      failures: string[];
+      blockers: string[];
+    }
+  >;
+};
+
 describe("Diagnostics Functions", () => {
   let sdk: ReturnType<typeof mockSdk>;
   let kv: ReturnType<typeof mockKV>;
@@ -192,18 +207,39 @@ describe("Diagnostics Functions", () => {
         success: boolean;
         checks: DiagnosticCheck[];
         summary: { pass: number; warn: number; fail: number; fixable: number };
+        releaseGate: ReleaseGateResult;
+        security: {
+          encryption: {
+            status: "pass" | "warn" | "fail";
+            cryptography: { storageWired: boolean };
+            missingFields: string[];
+          };
+        };
       };
 
       expect(result.success).toBe(true);
-      // 15 = 8 original (actions, leases, sentinels, sketches, signals,
+      // 15 passing structural checks = 8 original (actions, leases, sentinels, sketches, signals,
       // sessions, memories, mesh) + 6 added in #lesson-visibility
       // (lessons, summaries, semantic, procedural, crystals, insights) +
       // 1 added in #memory-project-scope (memory-project-coverage).
       expect(result.summary.pass).toBe(15);
       expect(result.summary.warn).toBe(0);
-      expect(result.summary.fail).toBe(0);
+      expect(result.summary.fail).toBe(1);
       expect(result.summary.fixable).toBe(0);
-      expect(result.checks.every((c) => c.status === "pass")).toBe(true);
+      const encryptionCheck = result.checks.find((c) => c.name === "encryption-readiness");
+      expect(encryptionCheck).toMatchObject({
+        category: "security",
+        status: "fail",
+        fixable: false,
+      });
+      expect(result.security.encryption.status).toBe("fail");
+      expect(result.security.encryption.cryptography.storageWired).toBe(false);
+      expect(result.security.encryption.missingFields).toContain("storage.encryptionWired");
+      expect(result.releaseGate.checks.build.status).toBe("not_run");
+      expect(result.releaseGate.checks.test.status).toBe("not_run");
+      expect(result.releaseGate.checks.retrievalScope.status).toBe("pass");
+      expect(result.releaseGate.checks.redactionForget.status).toBe("not_run");
+      expect(result.releaseGate.overall).toBe("not_run");
     });
 
     it("active action with no lease produces warn", async () => {
@@ -490,6 +526,92 @@ describe("Diagnostics Functions", () => {
       expect(
         result.checks.some((c) => c.category === "actions"),
       ).toBe(false);
+    });
+
+    it("release gate blocks redaction/forget when only redaction evidence exists", async () => {
+      const memory = makeMemory({
+        content: "Token was replaced with [REDACTED_SECRET]",
+        project: "billing",
+        redactionApplied: true,
+        sensitivityLabels: ["openai_project_key"],
+      });
+      await kv.set(KV.memories, memory.id, memory);
+
+      const result = (await sdk.trigger("mem::diagnose", {})) as {
+        releaseGate: ReleaseGateResult;
+      };
+
+      expect(result.releaseGate.checks.redactionForget.status).toBe("blocked");
+      expect(result.releaseGate.checks.redactionForget.blockers).toContain(
+        "need both redaction evidence and forget evidence",
+      );
+    });
+
+    it("release gate fails when stored memory still contains a high-risk secret", async () => {
+      const memory = makeMemory({
+        content: "Do not store ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij",
+        project: "billing",
+      });
+      await kv.set(KV.memories, memory.id, memory);
+
+      const result = (await sdk.trigger("mem::diagnose", {})) as {
+        releaseGate: ReleaseGateResult;
+      };
+
+      expect(result.releaseGate.checks.redactionForget.status).toBe("fail");
+      expect(result.releaseGate.checks.redactionForget.failures[0]).toContain(
+        "github_token",
+      );
+      expect(result.releaseGate.overall).toBe("fail");
+    });
+
+    it("release gate passes redaction/forget only when both evidence types are clean", async () => {
+      const memory = makeMemory({
+        content: "Token was replaced with [REDACTED_SECRET]",
+        project: "billing",
+        redactionApplied: true,
+        sensitivityLabels: ["openai_project_key"],
+      });
+      await kv.set(KV.memories, memory.id, memory);
+      await kv.set(KV.audit, "aud_1", {
+        id: "aud_1",
+        timestamp: new Date().toISOString(),
+        operation: "forget",
+        functionId: "mem::forget",
+        targetIds: ["mem_deleted"],
+        details: { memoriesDeleted: 1 },
+      });
+
+      const result = (await sdk.trigger("mem::diagnose", {
+        releaseGateEvidence: {
+          build: { status: "pass", evidence: ["npm run build"] },
+          test: { status: "pass", evidence: ["npm test"] },
+          docs: { status: "pass", evidence: ["npm run skills:check"] },
+          packSmoke: { status: "pass", evidence: ["npm pack --dry-run"] },
+          restMcpParity: {
+            status: "pass",
+            evidence: ["test/tool-count-consistency.test.ts"],
+          },
+        },
+      })) as { releaseGate: ReleaseGateResult };
+
+      expect(result.releaseGate.checks.redactionForget.status).toBe("pass");
+      expect(result.releaseGate.checks.retrievalScope.status).toBe("pass");
+      expect(result.releaseGate.overall).toBe("pass");
+    });
+
+    it("release gate fails retrieval scope when latest memories are unscoped", async () => {
+      const memory = makeMemory();
+      await kv.set(KV.memories, memory.id, memory);
+
+      const result = (await sdk.trigger("mem::diagnose", {})) as {
+        releaseGate: ReleaseGateResult;
+      };
+
+      expect(result.releaseGate.checks.retrievalScope.status).toBe("fail");
+      expect(result.releaseGate.checks.retrievalScope.message).toContain(
+        "latest memories have no project scope",
+      );
     });
   });
 

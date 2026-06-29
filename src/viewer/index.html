@@ -972,6 +972,62 @@
     .activity-feed-body { flex: 1; min-width: 0; }
     .activity-feed-title { font-weight: 600; color: var(--ink); font-family: var(--font-display); font-size: 13px; }
     .activity-feed-meta { font-size: 10px; color: var(--ink-faint); font-family: var(--font-mono); margin-top: 2px; }
+
+    .trust-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.85fr); gap: 16px; align-items: start; }
+    .trust-stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .trust-panel { border: 1px solid var(--border); background: var(--bg); min-width: 0; }
+    .trust-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border-light); }
+    .trust-panel-title { font-size: 11px; color: var(--ink); text-transform: uppercase; letter-spacing: 0.1em; font-family: var(--font-ui); font-weight: 700; }
+    .trust-panel-sub { font-size: 10px; color: var(--ink-faint); font-family: var(--font-mono); white-space: nowrap; }
+    .trust-table-wrap { overflow-x: auto; }
+    .trust-table { font-size: 12px; min-width: 900px; }
+    .trust-table th { white-space: nowrap; }
+    .trust-table td { line-height: 1.35; }
+    .trust-title { color: var(--ink); font-weight: 700; font-family: var(--font-display); }
+    .trust-meta { margin-top: 2px; color: var(--ink-faint); font-size: 10px; font-family: var(--font-mono); overflow-wrap: anywhere; }
+    .trust-reasons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .trust-reason { border: 1px solid var(--border-light); padding: 1px 6px; font-size: 10px; color: var(--ink-muted); font-family: var(--font-ui); }
+    .trust-event { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border-light); font-size: 12px; }
+    .trust-event:last-child { border-bottom: none; }
+    .trust-event-kind { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink); font-family: var(--font-ui); font-weight: 700; }
+    .trust-event-body { min-width: 0; }
+    .trust-used { border: 1px solid var(--border); background: var(--bg); margin-bottom: 16px; }
+    .trust-used-body { padding: 14px; }
+    .trust-used-form { display: grid; grid-template-columns: minmax(180px, 1fr) auto; gap: 8px; margin-bottom: 12px; }
+    .trust-used-form input { min-width: 0; }
+    .trust-used-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .trust-mini-stat { border: 1px solid var(--border-light); background: var(--bg-subtle); padding: 8px 10px; min-width: 0; }
+    .trust-mini-stat .label { font-size: 9px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.08em; font-family: var(--font-ui); font-weight: 700; }
+    .trust-mini-stat .value { margin-top: 3px; color: var(--ink); font-family: var(--font-mono); font-size: 16px; font-weight: 700; }
+    .trust-used-results { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 0.8fr); gap: 14px; }
+    .trust-used-section + .trust-used-section { margin-top: 12px; }
+    .trust-evidence { padding: 8px 0; border-bottom: 1px solid var(--border-light); font-size: 12px; }
+    .trust-evidence:last-child { border-bottom: none; }
+    .trust-evidence-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+    .trust-evidence-actions { flex-shrink: 0; display: flex; gap: 6px; }
+    .trust-evidence-actions .btn { font-size: 9px; padding: 2px 7px; }
+    .trust-evidence-content { margin-top: 4px; color: var(--ink-muted); line-height: 1.4; max-height: 42px; overflow: hidden; }
+    .trust-empty-line { color: var(--ink-faint); font-size: 12px; font-style: italic; padding: 8px 0; }
+    .trust-plan { background: var(--bg-subtle); border: 1px solid var(--border-light); padding: 10px; font-size: 11px; font-family: var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+    .trust-workbench { border: 1px solid var(--border); background: var(--bg); margin-bottom: 16px; }
+    .trust-workbench-body { padding: 14px; display: grid; grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr); gap: 14px; }
+    .trust-workbench-form { display: grid; gap: 8px; align-content: start; }
+    .trust-workbench-form label { display: grid; gap: 3px; font-size: 10px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.08em; font-family: var(--font-ui); font-weight: 700; }
+    .trust-workbench-form input,
+    .trust-workbench-form select,
+    .trust-workbench-form textarea { width: 100%; min-width: 0; border: 1px solid var(--border); background: var(--bg); color: var(--ink); padding: 7px 9px; font-size: 12px; font-family: var(--font-ui); }
+    .trust-workbench-form textarea { min-height: 120px; resize: vertical; font-family: var(--font-mono); line-height: 1.45; }
+    .trust-workbench-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .trust-workbench-result { border: 1px solid var(--border-light); background: var(--bg-subtle); padding: 10px; min-height: 100%; overflow: hidden; }
+    .trust-workbench-result pre { margin-top: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; font-family: var(--font-mono); }
+    .trust-workbench-history { margin-top: 10px; display: grid; gap: 6px; }
+    .trust-workbench-revision { border-top: 1px solid var(--border-light); padding-top: 6px; font-size: 12px; }
+      @media (max-width: 980px) {
+      .trust-grid,
+      .trust-used-results,
+      .trust-workbench-body { grid-template-columns: 1fr; }
+      .trust-used-form { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -997,6 +1053,7 @@
     <button data-tab="actions">Actions</button>
     <button data-tab="crystals">Crystals</button>
     <button data-tab="audit">Audit</button>
+    <button data-tab="trust">Trust</button>
     <button data-tab="activity">Activity</button>
     <button data-tab="profile">Profile</button>
     <button data-tab="replay">Replay</button>
@@ -1014,6 +1071,7 @@
   <div id="view-timeline" class="view"></div>
   <div id="view-sessions" class="view"></div>
   <div id="view-audit" class="view"></div>
+  <div id="view-trust" class="view"></div>
   <div id="view-activity" class="view"></div>
   <div id="view-profile" class="view"></div>
   <div id="view-replay" class="view"></div>
@@ -1105,7 +1163,7 @@
       task: '&#9745;', other: '&#128196;'
     };
     var CB_STATE_COLORS = { closed: 'badge-green', open: 'badge-red', 'half-open': 'badge-yellow' };
-    var TAB_IDS = ['dashboard', 'graph', 'memories', 'timeline', 'sessions', 'lessons', 'actions', 'crystals', 'audit', 'activity', 'profile', 'replay'];
+    var TAB_IDS = ['dashboard', 'graph', 'memories', 'timeline', 'sessions', 'lessons', 'actions', 'crystals', 'audit', 'trust', 'activity', 'profile', 'replay'];
     var VIEWER_TOKEN_STORAGE_KEY = 'agentmemory-viewer-token';
 
     var state = {
@@ -1116,6 +1174,7 @@
       timeline: { loaded: false, observations: [], sessionId: '', minImportance: 0, page: 0, pageSize: 50 },
       sessions: { loaded: false, items: [], selectedId: null },
       audit: { loaded: false, entries: [], opFilter: '' },
+      trust: { loaded: false, ledgerRows: [], ledgerTotal: 0, reviewQueue: [], reviewTotal: 0, events: [], eventTotal: 0, today: null, stateFilter: 'all', projectFilter: '', explainQuery: '', explainResult: null, explainLoading: false, workbench: { memoryId: '', memory: null, history: [], sourceCard: null, searchable: null, review: null, result: null, loading: false } },
       activity: { loaded: false, observations: [], sessions: [], typeFilter: '' },
       lessons: { loaded: false, items: [], search: '' },
       actions: { loaded: false, items: [], frontier: [], statusFilter: '', search: '' },
@@ -1132,6 +1191,12 @@
       var d = document.createElement('div');
       d.textContent = String(s);
       return d.innerHTML;
+    }
+    function attr(s) {
+      if (!s) return '';
+      return String(s).replace(/[&<>"']/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
     }
     function formatTime(ts) {
       if (!ts) return '';
@@ -1333,6 +1398,7 @@
         case 'actions': if (!state.actions.loaded) await loadActions(); break;
         case 'crystals': if (!state.crystals.loaded) await loadCrystals(); break;
         case 'audit': if (!state.audit.loaded) await loadAudit(); break;
+        case 'trust': if (!state.trust.loaded) await loadTrust(); break;
         case 'activity': if (!state.activity.loaded) await loadActivity(); break;
         case 'profile': if (!state.profile.loaded) await loadProfile(); break;
         case 'replay': if (!state.replay.loaded) await loadReplay(); break;
@@ -3373,6 +3439,658 @@
       if (el) el.classList.toggle('open');
     }
 
+    function trustBadgeClass(value) {
+      if (value === 'active' || value === 'trusted' || value === 'reviewed' || value === 'ok') return 'badge-green';
+      if (value === 'needs_review' || value === 'unreviewed' || value === 'quarantined' || value === 'expired' || value === 'pending') return 'badge-yellow';
+      if (value === 'deleted' || value === 'tombstoned' || value === 'rejected' || value === 'error') return 'badge-red';
+      if (value === 'archived' || value === 'superseded') return 'badge-purple';
+      return 'badge-muted';
+    }
+
+    function formatScore(value) {
+      var n = Number(value);
+      if (!Number.isFinite(n)) return '';
+      return n <= 1 ? n.toFixed(3) : n.toFixed(1);
+    }
+
+    function sourceSummary(card) {
+      if (!card) return 'No source card';
+      var bits = [];
+      if (card.observations && card.observations.length) bits.push(card.observations.length + ' obs');
+      if (card.sessions && card.sessions.length) bits.push(card.sessions.length + ' sessions');
+      if (card.sourceType) bits.push(card.sourceType);
+      if (card.commit) bits.push(String(card.commit).slice(0, 8));
+      return bits.length ? bits.join(' · ') : 'Source card empty';
+    }
+
+    function readTrustControls() {
+      var stateSelect = document.getElementById('trust-state-filter');
+      var projectInput = document.getElementById('trust-project-filter');
+      var queryInput = document.getElementById('trust-explain-query');
+      if (stateSelect) state.trust.stateFilter = stateSelect.value || 'all';
+      if (projectInput) state.trust.projectFilter = projectInput.value.trim();
+      if (queryInput) state.trust.explainQuery = queryInput.value.trim();
+    }
+
+    function trustQueryString(limit) {
+      var params = new URLSearchParams();
+      params.set('limit', String(limit));
+      if (state.trust.projectFilter) params.set('project', state.trust.projectFilter);
+      return params.toString();
+    }
+
+    async function loadTrust() {
+      var el = document.getElementById('view-trust');
+      el.innerHTML = '<div class="loading">Loading trust surface...</div>';
+      var ledgerParams = new URLSearchParams(trustQueryString(40));
+      ledgerParams.set('includeSourceCards', 'true');
+      ledgerParams.set('state', state.trust.stateFilter || 'all');
+      var results = await Promise.all([
+        apiGet('memory-ledger?' + ledgerParams.toString()),
+        apiGet('memory-review-queue?' + trustQueryString(20)),
+        apiGet('agent-events?' + trustQueryString(50)),
+        apiGet('memory/today?' + trustQueryString(20))
+      ]);
+      var ledger = results[0] || {};
+      var review = results[1] || {};
+      var events = results[2] || {};
+      var today = results[3] || {};
+      state.trust.ledgerRows = ledger.rows || [];
+      state.trust.ledgerTotal = ledger.total || 0;
+      state.trust.reviewQueue = review.queue || [];
+      state.trust.reviewTotal = review.total || 0;
+      state.trust.events = events.events || [];
+      state.trust.eventTotal = events.total || 0;
+      state.trust.today = today;
+      state.trust.loaded = true;
+      renderTrust();
+    }
+
+    async function refreshTrust() {
+      readTrustControls();
+      state.trust.loaded = false;
+      await loadTrust();
+    }
+
+    async function runTrustExplain() {
+      readTrustControls();
+      if (!state.trust.explainQuery) {
+        state.trust.explainResult = null;
+        renderTrust();
+        return;
+      }
+      state.trust.explainLoading = true;
+      renderTrust();
+      var body = {
+        query: state.trust.explainQuery,
+        limit: 8,
+        includeLessons: true,
+        searchMode: 'balanced',
+        explain: true,
+        includeReport: true,
+        tokenBudget: 1200
+      };
+      if (state.trust.projectFilter) body.project = state.trust.projectFilter;
+      var result = await apiPost('search/explain', body);
+      state.trust.explainResult = result;
+      state.trust.explainLoading = false;
+      renderTrust();
+    }
+
+    function trustWorkbench() {
+      if (!state.trust.workbench) {
+        state.trust.workbench = { memoryId: '', memory: null, history: [], sourceCard: null, searchable: null, review: null, result: null, loading: false, draft: {} };
+      }
+      if (!state.trust.workbench.draft) state.trust.workbench.draft = {};
+      return state.trust.workbench;
+    }
+
+    function trustWorkbenchDraftValue(field, fallback) {
+      var wb = trustWorkbench();
+      if (wb.draft && Object.prototype.hasOwnProperty.call(wb.draft, field)) return wb.draft[field];
+      return fallback || '';
+    }
+
+    function readTrustWorkbenchControls() {
+      var wb = trustWorkbench();
+      var memoryId = document.getElementById('trust-workbench-memory-id');
+      var title = document.getElementById('trust-workbench-title');
+      var content = document.getElementById('trust-workbench-content');
+      var lane = document.getElementById('trust-workbench-lane');
+      var reviewState = document.getElementById('trust-workbench-review-state');
+      var reason = document.getElementById('trust-workbench-reason');
+      if (memoryId) wb.memoryId = memoryId.value.trim();
+      wb.draft = {
+        title: title ? title.value : '',
+        content: content ? content.value : '',
+        lane: lane ? lane.value : '',
+        reviewState: reviewState ? reviewState.value : '',
+        reason: reason ? reason.value : ''
+      };
+      return wb;
+    }
+
+    function setTrustWorkbenchResult(result) {
+      var wb = trustWorkbench();
+      wb.result = result;
+      renderTrust();
+    }
+
+    async function inspectTrustWorkbench(resultOverride, useExistingSelection) {
+      var wb = useExistingSelection ? trustWorkbench() : readTrustWorkbenchControls();
+      if (!wb.memoryId) {
+        setTrustWorkbenchResult({ success: false, error: 'memoryId is required' });
+        return;
+      }
+      wb.loading = true;
+      wb.result = resultOverride || { action: 'inspect', pending: true };
+      renderTrust();
+      var historyPath = 'memory/history?memoryId=' + encodeURIComponent(wb.memoryId);
+      var results = await Promise.all([
+        apiPost('memory/inspect', { memoryId: wb.memoryId }),
+        apiGet(historyPath)
+      ]);
+      var inspected = results[0] || {};
+      var history = results[1] || {};
+      wb.loading = false;
+      wb.memory = inspected.memory || null;
+      wb.sourceCard = inspected.sourceCard || null;
+      wb.searchable = inspected.searchable;
+      wb.review = inspected.review || null;
+      wb.history = inspected.history || history.history || [];
+      wb.draft = {};
+      wb.result = resultOverride || {
+        action: 'inspect',
+        success: inspected.success !== false && !!wb.memory,
+        searchable: inspected.searchable,
+        historyCount: wb.history.length,
+        error: inspected.error
+      };
+      renderTrust();
+    }
+
+    async function selectTrustWorkbenchMemory(memoryId) {
+      var wb = trustWorkbench();
+      wb.memoryId = memoryId || '';
+      wb.draft = {};
+      wb.result = null;
+      await inspectTrustWorkbench(null, true);
+    }
+
+    function trustWorkbenchMutationPayload(action, dryRun) {
+      var wb = readTrustWorkbenchControls();
+      var reason = wb.draft.reason || 'viewer reversible edit workbench';
+      if (!wb.memoryId) return { error: 'memoryId is required' };
+      if (action === 'update') {
+        return {
+          path: 'memory/update',
+          body: {
+            memoryId: wb.memoryId,
+            title: wb.draft.title,
+            content: wb.draft.content,
+            lane: wb.draft.lane || undefined,
+            reviewState: wb.draft.reviewState || undefined,
+            reason: reason,
+            actor: 'viewer-workbench'
+          }
+        };
+      }
+      if (action === 'archive') {
+        return { path: 'memory/archive', body: { memoryId: wb.memoryId, reason: reason, actor: 'viewer-workbench' } };
+      }
+      if (action === 'restore') {
+        return { path: 'memory/restore', body: { memoryId: wb.memoryId, reason: reason, actor: 'viewer-workbench' } };
+      }
+      if (action === 'tombstone') {
+        return { path: 'memory/delete', body: { memoryId: wb.memoryId, mode: 'tombstone', dryRun: !!dryRun, reason: reason, actor: 'viewer-workbench' } };
+      }
+      return { error: 'unknown workbench action' };
+    }
+
+    async function runTrustWorkbenchMutation(action, dryRun) {
+      var request = trustWorkbenchMutationPayload(action, dryRun);
+      if (request.error) {
+        setTrustWorkbenchResult({ success: false, error: request.error });
+        return;
+      }
+      if (action === 'tombstone' && !dryRun && !window.confirm('Tombstone this memory? Restore can recover the last revision.')) return;
+      var wb = trustWorkbench();
+      wb.loading = true;
+      wb.result = { action: action, pending: true, dryRun: !!dryRun };
+      renderTrust();
+      var result = await apiPost(request.path, request.body);
+      wb.loading = false;
+      wb.result = result || { success: false, error: 'request failed', action: action };
+      if (result && result.success !== false && !dryRun) {
+        state.trust.loaded = false;
+        await loadTrust();
+        await inspectTrustWorkbench(result);
+        return;
+      }
+      renderTrust();
+    }
+
+    function renderTrust() {
+      var el = document.getElementById('view-trust');
+      var rows = state.trust.ledgerRows || [];
+      var queue = state.trust.reviewQueue || [];
+      var events = state.trust.events || [];
+      var today = state.trust.today || {};
+      var todayCounts = today.counts || {};
+      var needsReview = rows.filter(function(row) { return row.reviewState === 'needs_review' || row.reviewState === 'unreviewed'; }).length;
+      var redactedEvents = events.filter(function(event) { return event.redactionApplied; }).length;
+      var stateOptions = ['all', 'active', 'quarantined', 'archived', 'expired', 'tombstoned', 'deleted', 'superseded'];
+
+      var html = '<div class="toolbar">';
+      html += '<select id="trust-state-filter" aria-label="Ledger state filter">';
+      stateOptions.forEach(function(opt) {
+        html += '<option value="' + esc(opt) + '"' + ((state.trust.stateFilter || 'all') === opt ? ' selected' : '') + '>' + esc(opt) + '</option>';
+      });
+      html += '</select>';
+      html += '<input type="text" id="trust-project-filter" placeholder="Project filter" value="' + esc(state.trust.projectFilter) + '">';
+      html += '<button class="btn" data-action="trust-apply-filters">Apply</button>';
+      html += '<button class="btn" data-action="trust-refresh">Refresh</button>';
+      html += '</div>';
+
+      html += '<div class="stats-grid">';
+      html += '<div class="stat-card"><div class="label">Ledger Rows</div><div class="value">' + rows.length + '</div><div class="sub">' + state.trust.ledgerTotal + ' total</div></div>';
+      html += '<div class="stat-card"><div class="label">Review Queue</div><div class="value">' + queue.length + '</div><div class="sub">' + state.trust.reviewTotal + ' total</div></div>';
+      html += '<div class="stat-card"><div class="label">Needs Review</div><div class="value">' + needsReview + '</div><div class="sub">visible ledger rows</div></div>';
+      html += '<div class="stat-card"><div class="label">Agent Events</div><div class="value">' + events.length + '</div><div class="sub">' + state.trust.eventTotal + ' total · ' + redactedEvents + ' redacted</div></div>';
+      html += '<div class="stat-card"><div class="label">Today</div><div class="value">' + (todayCounts.observations || 0) + '</div><div class="sub">' + (todayCounts.failedCommands || 0) + ' failed · ' + (todayCounts.unresolvedClaims || 0) + ' unresolved</div></div>';
+      html += '</div>';
+
+      html += renderTrustToday(today);
+      html += renderTrustUsed();
+      html += renderTrustWorkbench(rows, queue);
+      html += '<div class="trust-grid">';
+      html += '<div class="trust-stack">' + renderTrustLedger(rows) + renderTrustReviewQueue(queue) + '</div>';
+      html += renderTrustEvents(events);
+      html += '</div>';
+
+      var __focus = captureSearchFocus(['trust-project-filter', 'trust-explain-query', 'trust-workbench-memory-id', 'trust-workbench-title', 'trust-workbench-content', 'trust-workbench-reason']);
+      el.innerHTML = html;
+      var stateSelect = document.getElementById('trust-state-filter');
+      if (stateSelect) {
+        stateSelect.addEventListener('change', function() {
+          state.trust.stateFilter = this.value || 'all';
+          refreshTrust();
+        });
+      }
+      var projectInput = document.getElementById('trust-project-filter');
+      if (projectInput) {
+        projectInput.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter') refreshTrust();
+        });
+      }
+      var explainInput = document.getElementById('trust-explain-query');
+      if (explainInput) {
+        explainInput.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter') runTrustExplain();
+        });
+      }
+      restoreSearchFocus(__focus);
+    }
+
+    function renderTrustUsed() {
+      var html = '<div class="trust-used">';
+      html += '<div class="trust-panel-head"><div class="trust-panel-title">Memory Used</div><div class="trust-panel-sub">/search/explain</div></div>';
+      html += '<div class="trust-used-body">';
+      html += '<div class="trust-used-form">';
+      html += '<input type="text" id="trust-explain-query" placeholder="Prompt / task" value="' + esc(state.trust.explainQuery) + '">';
+      html += '<button class="btn btn-primary" data-action="trust-search-explain">Trace</button>';
+      html += '</div>';
+      if (state.trust.explainLoading) {
+        html += '<div class="loading">Tracing memory...</div>';
+      } else if (!state.trust.explainResult) {
+        html += '<div class="empty-state"><p>No memory trace.</p></div>';
+      } else {
+        html += renderTrustExplainResult(state.trust.explainResult);
+      }
+      html += '</div></div>';
+      return html;
+    }
+
+    function trustResultList(value) {
+      return Array.isArray(value) ? value : [];
+    }
+
+    function trustEvidenceId(item) {
+      if (!item) return '';
+      return item.id || item.obsId || item.memoryId || item.lessonId || (item.sourceIds && item.sourceIds[0]) || '';
+    }
+
+    function trustEvidenceKind(item) {
+      if (!item) return '';
+      return item.sourceType || item.type || item.source || item.stream || item.kind || '';
+    }
+
+    function trustEvidenceMetadata(item) {
+      if (!item || !item.metadata || typeof item.metadata !== 'object') return {};
+      return item.metadata;
+    }
+
+    function trustEvidenceMemoryId(item) {
+      if (!item) return '';
+      var meta = trustEvidenceMetadata(item);
+      if (typeof item.memoryId === 'string' && item.memoryId) return item.memoryId;
+      if (typeof meta.memoryId === 'string' && meta.memoryId) return meta.memoryId;
+      var id = trustEvidenceId(item);
+      if (trustEvidenceKind(item) === 'memory' && id) return id;
+      if (id && id.indexOf('mem_') === 0) return id;
+      return '';
+    }
+
+    function trustEvidenceSourceFacts(item) {
+      if (!item) return [];
+      var meta = trustEvidenceMetadata(item);
+      var facts = [];
+      var sourceIds = Array.isArray(item.sourceIds) ? item.sourceIds : [];
+      var sourceObservationIds = Array.isArray(item.sourceObservationIds) ? item.sourceObservationIds : [];
+      if (!sourceObservationIds.length && Array.isArray(meta.sourceObservationIds)) sourceObservationIds = meta.sourceObservationIds;
+      if (item.sourceCard) facts.push(sourceSummary(item.sourceCard));
+      if (sourceObservationIds.length) facts.push(sourceObservationIds.length + ' source obs');
+      if (sourceIds.length) facts.push(sourceIds.length + ' source refs');
+      if (item.sourceUri || meta.sourceUri) facts.push('source uri');
+      if (item.sourceHash || meta.sourceHash) facts.push('source hash');
+      if (item.sessionId) facts.push('session');
+      return facts.filter(Boolean);
+    }
+
+    function trustEvidenceSourceLabel(item) {
+      var facts = trustEvidenceSourceFacts(item);
+      return facts.length ? facts.join(' · ') : 'No source evidence';
+    }
+
+    function trustEvidenceScore(item) {
+      if (!item) return undefined;
+      if (item.score !== undefined) return item.score;
+      if (item.combinedScore !== undefined) return item.combinedScore;
+      return undefined;
+    }
+
+    function renderTrustMemoryList(label, items, emptyText) {
+      var html = '<div class="trust-used-section"><div class="trust-panel-title" style="margin-bottom:8px;">' + esc(label) + '</div>';
+      if (!items.length) {
+        html += '<div class="trust-empty-line">' + esc(emptyText) + '</div></div>';
+        return html;
+      }
+      items.slice(0, 8).forEach(function(item) {
+        var id = trustEvidenceId(item);
+        var memoryId = trustEvidenceMemoryId(item);
+        var score = trustEvidenceScore(item);
+        var content = item.content || item.narrative || item.text || '';
+        var sourceFacts = trustEvidenceSourceFacts(item);
+        html += '<div class="trust-evidence">';
+        html += '<div class="trust-evidence-head"><div class="trust-title">' + esc(item.title || id || 'Memory') + '</div>';
+        if (memoryId) {
+          html += '<div class="trust-evidence-actions"><button class="btn" data-action="trust-workbench-select" data-memory-id="' + attr(memoryId) + '">Open Workbench</button></div>';
+        }
+        html += '</div>';
+        html += '<div class="trust-meta">' + esc([item.rank ? 'rank ' + item.rank : '', trustEvidenceKind(item), id, item.sessionId, score !== undefined ? 'score ' + formatScore(score) : '', item.tokens ? item.tokens + ' tokens' : ''].filter(Boolean).join(' · ')) + '</div>';
+        html += '<div class="trust-meta">' + esc(trustEvidenceSourceLabel(item)) + '</div>';
+        if (content) html += '<div class="trust-evidence-content">' + esc(truncate(content, 220)) + '</div>';
+        html += '<div class="trust-reasons"><span class="badge ' + (sourceFacts.length ? 'badge-green' : 'badge-yellow') + '">' + (sourceFacts.length ? 'source-backed' : 'needs source') + '</span></div>';
+        if (item.reasons && item.reasons.length) {
+          html += '<div class="trust-reasons">' + item.reasons.slice(0, 4).map(function(reason) { return '<span class="trust-reason">' + esc(reason) + '</span>'; }).join('') + '</div>';
+        }
+        html += '</div>';
+      });
+      html += '</div>';
+      return html;
+    }
+
+    function renderTrustExplainResult(result) {
+      if (result.error) return '<div class="empty-state"><p>' + esc(result.error) + '</p></div>';
+      var explain = result.explain || {};
+      var packed = result.packedContext || explain.packedContext || null;
+      var budget = result.budgetReport || explain.budgetReport || (packed && packed.budgetReport) || null;
+      var evidence = trustResultList(result.rankedEvidence || explain.rankedEvidence || explain.ranking);
+      var results = trustResultList(result.results);
+      var injected = trustResultList(packed && packed.selected);
+      var plan = result.queryPlan || (result.explain && (result.explain.queryPlan || result.explain.plan)) || null;
+      var retrieved = results.length ? results : evidence;
+      var ignoredCount = budget ? (budget.ignoredCount || 0) : trustResultList(packed && packed.ignored).length;
+      var html = '<div class="trust-used-results">';
+      html += '<div>';
+      html += '<div class="trust-used-summary">';
+      html += '<div class="trust-mini-stat"><div class="label">Retrieved</div><div class="value">' + retrieved.length + '</div></div>';
+      html += '<div class="trust-mini-stat"><div class="label">Injected</div><div class="value">' + injected.length + '</div></div>';
+      html += '<div class="trust-mini-stat"><div class="label">Ignored</div><div class="value">' + ignoredCount + '</div></div>';
+      html += '</div>';
+      html += renderTrustMemoryList('Retrieved', retrieved, 'None');
+      html += renderTrustMemoryList('Injected', injected, 'None');
+      html += '</div>';
+      html += '<div>';
+      html += renderTrustMemoryList('Ranking', evidence, 'None');
+      html += '<div class="trust-used-section"><div class="trust-panel-title" style="margin-bottom:8px;">Plan</div><pre class="trust-plan">' + esc(JSON.stringify(plan || {}, null, 2)) + '</pre></div>';
+      html += '</div>';
+      html += '</div>';
+      return html;
+    }
+
+    function todayRows(value) {
+      return Array.isArray(value) ? value : [];
+    }
+
+    function todayEntity(row) {
+      if (!row || typeof row !== 'object') return {};
+      return row.memory || row.observation || row;
+    }
+
+    function todayRowMemoryId(row) {
+      var entity = todayEntity(row);
+      if (typeof entity.id === 'string' && entity.id.indexOf('mem_') === 0) return entity.id;
+      if (typeof entity.memoryId === 'string') return entity.memoryId;
+      if (row && typeof row.targetMemoryId === 'string') return row.targetMemoryId;
+      return '';
+    }
+
+    function todayRowMeta(row) {
+      var entity = todayEntity(row);
+      return [
+        entity.id,
+        entity.project,
+        entity.agentId,
+        entity.type || entity.action,
+        entity.lifecycleState,
+        entity.reviewState,
+        row.temporalStatus,
+        typeof row.score === 'number' ? 'score ' + formatScore(row.score) : ''
+      ].filter(Boolean).join(' · ');
+    }
+
+    function renderTrustTodaySection(label, rows, emptyText) {
+      var html = '<div class="trust-used-section"><div class="trust-panel-title" style="margin-bottom:8px;">' + esc(label) + '</div>';
+      if (!rows.length) {
+        html += '<div class="trust-empty-line">' + esc(emptyText) + '</div></div>';
+        return html;
+      }
+      rows.slice(0, 6).forEach(function(row) {
+        var entity = todayEntity(row);
+        var memoryId = todayRowMemoryId(row);
+        html += '<div class="trust-evidence">';
+        html += '<div class="trust-evidence-head"><div class="trust-title">' + esc(truncate(entity.title || entity.id || 'Inbox item', 92)) + '</div>';
+        if (memoryId) {
+          html += '<div class="trust-evidence-actions"><button class="btn" data-action="trust-workbench-select" data-memory-id="' + attr(memoryId) + '">Open Workbench</button></div>';
+        }
+        html += '</div>';
+        html += '<div class="trust-meta">' + esc(todayRowMeta(row)) + '</div>';
+        if (row.reason || entity.reason) html += '<div class="trust-meta">' + esc(row.reason || entity.reason) + '</div>';
+        if (row.reasons && row.reasons.length) {
+          html += '<div class="trust-reasons">' + row.reasons.slice(0, 5).map(function(reason) { return '<span class="trust-reason">' + esc(reason) + '</span>'; }).join('') + '</div>';
+        }
+        html += '</div>';
+      });
+      html += '</div>';
+      return html;
+    }
+
+    function renderTrustToday(today) {
+      var counts = (today && today.counts) || {};
+      var windowInfo = today && today.window ? today.window : {};
+      var summary = [
+        (counts.sessions || 0) + ' sessions',
+        (counts.newMemories || 0) + ' new memories',
+        (counts.reviewQueue || 0) + ' in review'
+      ].join(' · ');
+      var html = '<div class="trust-used">';
+      html += '<div class="trust-panel-head"><div><div class="trust-panel-title">Today in Memory</div><div class="trust-panel-sub">/memory/today</div></div><div class="trust-panel-sub">' + esc(summary) + '</div></div>';
+      html += '<div class="trust-used-body">';
+      if (windowInfo.since || windowInfo.until) {
+        html += '<div class="trust-meta">' + esc([windowInfo.since, windowInfo.until].filter(Boolean).join(' → ')) + '</div>';
+      }
+      html += '<div class="trust-used-results">';
+      html += '<div>';
+      html += renderTrustTodaySection('Failed Commands', todayRows(today && today.failedCommands), 'No failed commands today.');
+      html += renderTrustTodaySection('Successful Fixes', todayRows(today && today.successfulFixes), 'No successful fixes detected today.');
+      html += renderTrustTodaySection('New Preferences', todayRows(today && today.newPreferences), 'No new preferences today.');
+      html += '</div><div>';
+      html += renderTrustTodaySection('Unresolved Claims', todayRows(today && today.unresolvedClaims), 'No unresolved claims detected today.');
+      html += renderTrustTodaySection('Proposed Consolidations', todayRows(today && today.proposedConsolidations), 'No pending proposals today.');
+      html += '</div></div></div></div>';
+      return html;
+    }
+
+    function optionList(options, selected) {
+      return options.map(function(opt) {
+        return '<option value="' + attr(opt) + '"' + (selected === opt ? ' selected' : '') + '>' + esc(opt) + '</option>';
+      }).join('');
+    }
+
+    function renderTrustWorkbench() {
+      var wb = trustWorkbench();
+      var memory = wb.memory || {};
+      var memoryId = wb.memoryId || memory.id || '';
+      var lane = trustWorkbenchDraftValue('lane', memory.lane || '');
+      var reviewState = trustWorkbenchDraftValue('reviewState', memory.reviewState || '');
+      var result = wb.result;
+      var history = wb.history || [];
+      var meta = [memory.id, memory.project, memory.agentId].filter(Boolean).join(' · ');
+      var laneOptions = ['', 'episode', 'semantic_fact', 'procedure', 'reflection', 'artifact_index'];
+      var reviewOptions = ['', 'unreviewed', 'reviewed', 'needs_review', 'trusted', 'rejected'];
+
+      var html = '<div class="trust-workbench" id="trust-workbench">';
+      html += '<div class="trust-panel-head"><div class="trust-panel-title">Reversible Edit Workbench</div><div class="trust-panel-sub">/memory/inspect + lifecycle</div></div>';
+      html += '<div class="trust-workbench-body">';
+      html += '<div class="trust-workbench-form">';
+      html += '<label>Memory ID<input type="text" id="trust-workbench-memory-id" value="' + attr(memoryId) + '" placeholder="mem_..." spellcheck="false"></label>';
+      html += '<div class="trust-workbench-actions">';
+      html += '<button class="btn" data-action="trust-workbench-inspect">Inspect</button>';
+      html += '<button class="btn btn-primary" data-action="trust-workbench-update">Update</button>';
+      html += '<button class="btn" data-action="trust-workbench-archive">Archive</button>';
+      html += '<button class="btn" data-action="trust-workbench-restore">Restore</button>';
+      html += '<button class="btn" data-action="trust-workbench-preview-tombstone">Preview Tombstone</button>';
+      html += '<button class="btn btn-danger" data-action="trust-workbench-tombstone">Tombstone</button>';
+      html += '</div>';
+      html += '<label>Title<input type="text" id="trust-workbench-title" value="' + attr(trustWorkbenchDraftValue('title', memory.title || '')) + '"></label>';
+      html += '<label>Content<textarea id="trust-workbench-content">' + esc(trustWorkbenchDraftValue('content', memory.content || '')) + '</textarea></label>';
+      html += '<label>Lane<select id="trust-workbench-lane">' + optionList(laneOptions, lane) + '</select></label>';
+      html += '<label>Review State<select id="trust-workbench-review-state">' + optionList(reviewOptions, reviewState) + '</select></label>';
+      html += '<label>Reason<input type="text" id="trust-workbench-reason" value="' + attr(trustWorkbenchDraftValue('reason', '')) + '" placeholder="viewer edit reason"></label>';
+      html += '</div>';
+
+      html += '<div class="trust-workbench-result">';
+      if (wb.loading) {
+        html += '<div class="loading">Running lifecycle operation...</div>';
+      }
+      if (memory.id) {
+        html += '<div class="trust-title">' + esc(truncate(memory.title || memory.id, 90)) + '</div>';
+        html += '<div class="trust-meta">' + esc(meta) + '</div>';
+        html += '<div class="trust-reasons">';
+        html += '<span class="badge ' + trustBadgeClass(memory.lifecycleState) + '">' + esc(memory.lifecycleState || 'unknown') + '</span>';
+        html += '<span class="badge ' + trustBadgeClass(memory.reviewState) + '">' + esc(memory.reviewState || 'unreviewed') + '</span>';
+        html += '<span class="badge ' + (wb.searchable ? 'badge-green' : 'badge-muted') + '">' + (wb.searchable ? 'searchable' : 'not searchable') + '</span>';
+        html += '</div>';
+        html += '<div class="trust-meta">' + esc(sourceSummary(wb.sourceCard)) + '</div>';
+      } else if (!wb.loading) {
+        html += '<div class="empty-state"><p>No memory selected.</p></div>';
+      }
+      if (history.length) {
+        html += '<div class="trust-workbench-history"><div class="trust-panel-title">Revision History</div>';
+        history.slice(0, 5).forEach(function(revision) {
+          html += '<div class="trust-workbench-revision">';
+          html += '<div class="trust-title">' + esc(revision.operation || revision.action || 'revision') + '</div>';
+          html += '<div class="trust-meta">' + esc([revision.timestamp ? formatTime(revision.timestamp) : '', revision.actor, revision.reason].filter(Boolean).join(' · ')) + '</div>';
+          html += '</div>';
+        });
+        html += '</div>';
+      }
+      if (result) {
+        html += '<pre>' + esc(JSON.stringify(result, null, 2)) + '</pre>';
+      }
+      html += '</div></div></div>';
+      return html;
+    }
+
+    function renderTrustLedger(rows) {
+      var html = '<div class="trust-panel">';
+      html += '<div class="trust-panel-head"><div class="trust-panel-title">Memory Ledger</div><div class="trust-panel-sub">/memory-ledger</div></div>';
+      if (rows.length === 0) {
+        html += '<div class="empty-state"><p>No ledger rows match the current filters.</p></div></div>';
+        return html;
+      }
+      html += '<div class="trust-table-wrap"><table class="trust-table"><tr><th>Memory</th><th>Lane</th><th>Lifecycle</th><th>Review</th><th>Usage</th><th>Source</th><th>Workbench</th></tr>';
+      rows.forEach(function(row) {
+        html += '<tr>';
+        html += '<td><div class="trust-title">' + esc(truncate(row.title || row.id, 72)) + '</div><div class="trust-meta">' + esc([row.id, row.project, row.agentId].filter(Boolean).join(' · ')) + '</div></td>';
+        html += '<td><span class="badge badge-muted">' + esc(row.lane || row.type || '') + '</span></td>';
+        html += '<td><span class="badge ' + trustBadgeClass(row.lifecycleState) + '">' + esc(row.lifecycleState || 'unknown') + '</span></td>';
+        html += '<td><span class="badge ' + trustBadgeClass(row.reviewState) + '">' + esc(row.reviewState || 'unreviewed') + '</span></td>';
+        html += '<td><div>' + (row.accessCount || 0) + ' access</div><div class="trust-meta">' + esc(row.lastUsed ? formatTime(row.lastUsed) : 'never used') + '</div></td>';
+        html += '<td><div>' + esc(sourceSummary(row.sourceCard)) + '</div><div class="trust-meta">' + esc([row.sourceObservationCount ? row.sourceObservationCount + ' source obs' : '', row.sessionCount ? row.sessionCount + ' sessions' : ''].filter(Boolean).join(' · ')) + '</div></td>';
+        html += '<td><button class="btn" data-action="trust-workbench-select" data-memory-id="' + attr(row.id || '') + '">Open</button></td>';
+        html += '</tr>';
+      });
+      html += '</table></div></div>';
+      return html;
+    }
+
+    function renderTrustReviewQueue(queue) {
+      var html = '<div class="trust-panel">';
+      html += '<div class="trust-panel-head"><div class="trust-panel-title">Review Queue</div><div class="trust-panel-sub">/memory-review-queue</div></div>';
+      if (queue.length === 0) {
+        html += '<div class="empty-state"><p>No memories currently require review.</p></div></div>';
+        return html;
+      }
+      queue.forEach(function(row) {
+        var memory = row.memory || {};
+        html += '<div class="trust-event">';
+        html += '<div><div class="trust-event-kind">' + esc(row.temporalStatus || memory.reviewState || 'review') + '</div><div class="trust-meta">score ' + esc(formatScore(row.score)) + '</div></div>';
+        html += '<div class="trust-event-body"><div class="trust-title">' + esc(truncate(memory.title || memory.id || 'Untitled memory', 90)) + '</div>';
+        html += '<div class="trust-meta">' + esc([memory.id, memory.project, memory.lifecycleState].filter(Boolean).join(' · ')) + '</div>';
+        html += '<div class="trust-reasons">' + (row.reasons || []).slice(0, 6).map(function(reason) { return '<span class="trust-reason">' + esc(reason) + '</span>'; }).join('') + '</div>';
+        if (memory.id) html += '<div class="trust-workbench-actions" style="margin-top:8px;"><button class="btn" data-action="trust-workbench-select" data-memory-id="' + attr(memory.id) + '">Open Workbench</button></div>';
+        html += '</div></div>';
+      });
+      html += '</div>';
+      return html;
+    }
+
+    function renderTrustEvents(events) {
+      var html = '<div class="trust-panel">';
+      html += '<div class="trust-panel-head"><div class="trust-panel-title">Agent Events</div><div class="trust-panel-sub">/agent-events</div></div>';
+      if (events.length === 0) {
+        html += '<div class="empty-state"><p>No agent events recorded yet.</p></div></div>';
+        return html;
+      }
+      events.forEach(function(event) {
+        var ids = []
+          .concat(event.memoryIds || [])
+          .concat(event.observationIds || [])
+          .concat(event.signalIds || [])
+          .concat(event.targetIds || []);
+        html += '<div class="trust-event">';
+        html += '<div><div class="trust-event-kind">' + esc(event.type || 'event') + '</div><div class="trust-meta">' + esc(shortTime(event.timestamp)) + '</div></div>';
+        html += '<div class="trust-event-body"><div class="trust-title">' + esc(event.functionId || event.agentId || event.framework || event.id) + '</div>';
+        html += '<div class="trust-meta">' + esc([event.project, event.sessionId, event.status].filter(Boolean).join(' · ')) + '</div>';
+        if (ids.length) html += '<div class="trust-meta">' + esc(ids.slice(0, 4).join(', ')) + (ids.length > 4 ? ' +' + (ids.length - 4) : '') + '</div>';
+        html += '</div></div>';
+      });
+      html += '</div>';
+      return html;
+    }
+
     async function loadProfile() {
       var el = document.getElementById('view-profile');
       el.innerHTML = '<div class="loading">Loading profile...</div>';
@@ -3939,6 +4657,42 @@
       if (action === 'toggle-audit') {
         var auditIndex = parseInt(target.getAttribute('data-audit-index') || '', 10);
         if (!Number.isNaN(auditIndex)) toggleAuditDetail(auditIndex);
+      }
+      if (action === 'trust-refresh' || action === 'trust-apply-filters') {
+        refreshTrust();
+        return;
+      }
+      if (action === 'trust-search-explain') {
+        runTrustExplain();
+        return;
+      }
+      if (action === 'trust-workbench-select') {
+        selectTrustWorkbenchMemory(target.getAttribute('data-memory-id') || '');
+        return;
+      }
+      if (action === 'trust-workbench-inspect') {
+        inspectTrustWorkbench();
+        return;
+      }
+      if (action === 'trust-workbench-update') {
+        runTrustWorkbenchMutation('update', false);
+        return;
+      }
+      if (action === 'trust-workbench-archive') {
+        runTrustWorkbenchMutation('archive', false);
+        return;
+      }
+      if (action === 'trust-workbench-restore') {
+        runTrustWorkbenchMutation('restore', false);
+        return;
+      }
+      if (action === 'trust-workbench-preview-tombstone') {
+        runTrustWorkbenchMutation('tombstone', true);
+        return;
+      }
+      if (action === 'trust-workbench-tombstone') {
+        runTrustWorkbenchMutation('tombstone', false);
+        return;
       }
       if (action === 'replay-select') {
         var rSid = target.getAttribute('data-session-id');

@@ -73,5 +73,30 @@
     "id": "sess-015",
     "timestamp": "2026-04-17T16:45:00Z",
     "content": "[user] preferences: stick to async-std not tokio for new code. team agreed in arch review."
+  },
+  {
+    "id": "sess-016",
+    "timestamp": "2026-04-18T09:10:00Z",
+    "content": "[user] stale branch trap: codex/parser-cache is three commits behind main before parser cache work. main renamed src/config.rs to src/settings.rs yesterday.\n[assistant] noted. rebase codex/parser-cache before editing parser cache, otherwise the fix lands on the old config.rs path and misses settings.rs. no code changes until branch is current."
+  },
+  {
+    "id": "sess-017",
+    "timestamp": "2026-04-18T13:25:00Z",
+    "content": "[user] onboard the next agent to shipctl quickly\n[assistant] repo map: start at src/main.rs then src/commands/mod.rs. persistent state lives in ~/.shipctl/state.db. tests are workspace-wide; run cargo test --workspace before edits. release code is under xtask/release.rs."
+  },
+  {
+    "id": "sess-018",
+    "timestamp": "2026-04-19T10:05:00Z",
+    "content": "[user] retry queue still flaky. remind the next agent what failed already.\n[assistant] failed fix to avoid: global Mutex around drain_pending deadlocked shutdown when the signal handler waited on the same lock. use per-queue lease tokens instead; Mira proved that path in the draft."
+  },
+  {
+    "id": "sess-019",
+    "timestamp": "2026-04-19T15:50:00Z",
+    "content": "[user] stale dist artifacts need cleanup but don't delete anything scary\n[assistant] deletion correctness rule: read dist-manifest.json, resolve each path, verify every target stays under target/dist, then delete only manifest-listed files. avoid glob deletes like target/dist/*.zip because old release candidates share the directory."
+  },
+  {
+    "id": "sess-020",
+    "timestamp": "2026-04-20T11:40:00Z",
+    "content": "[assistant] cross-agent handoff from Mira to Jules: continue trace propagation. failing test is trace_propagates_across_retry. keep span_id stable across retry_with_backoff. do not reopen exporter refactor; it was intentionally deferred."
   }
 ]

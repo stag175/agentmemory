@@ -1,27 +1,38 @@
 #!/usr/bin/env node
-import { execSync } from "node:child_process";
-import { basename } from "node:path";
-
+import { existsSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 //#region src/hooks/_project.ts
+const gitTopByDir = /* @__PURE__ */ new Map();
+function findGitAncestor(dir) {
+	const start = resolve(dir);
+	const cached = gitTopByDir.get(start);
+	if (cached) return cached;
+	const visited = [];
+	let current = start;
+	while (true) {
+		const currentCached = gitTopByDir.get(current);
+		if (currentCached) {
+			for (const item of visited) gitTopByDir.set(item, currentCached);
+			return currentCached;
+		}
+		visited.push(current);
+		if (existsSync(join(current, ".git"))) {
+			for (const item of visited) gitTopByDir.set(item, current);
+			return current;
+		}
+		const parent = dirname(current);
+		if (parent === current) return void 0;
+		current = parent;
+	}
+}
 function resolveProject(cwd) {
 	const explicit = process.env["AGENTMEMORY_PROJECT_NAME"];
 	if (explicit && explicit.trim()) return explicit.trim();
 	const dir = cwd && cwd.trim() ? cwd : process.cwd();
-	try {
-		const top = execSync("git rev-parse --show-toplevel", {
-			cwd: dir,
-			stdio: [
-				"ignore",
-				"pipe",
-				"ignore"
-			],
-			timeout: 500
-		}).toString().trim();
-		if (top) return basename(top);
-	} catch {}
+	const ancestor = findGitAncestor(dir);
+	if (ancestor) return basename(ancestor);
 	return basename(dir);
 }
-
 //#endregion
 //#region src/hooks/subagent-stop.ts
 function isSdkChildContext(payload) {
@@ -70,7 +81,7 @@ async function main() {
 	setTimeout(() => process.exit(0), 500).unref();
 }
 main();
-
 //#endregion
-export {  };
+export {};
+
 //# sourceMappingURL=subagent-stop.mjs.map

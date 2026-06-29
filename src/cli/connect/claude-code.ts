@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import * as p from "@clack/prompts";
-import type { ConnectAdapter, ConnectOptions, ConnectResult } from "./types.js";
+import type {
+  ConnectAdapter,
+  ConnectOptions,
+  ConnectResult,
+  ConnectTargetMutation,
+} from "./types.js";
 import {
   AGENTMEMORY_MCP_BLOCK,
   backupFile,
@@ -12,6 +17,7 @@ import {
   readJsonSafe,
   writeJsonAtomic,
 } from "./util.js";
+import { inspectJsonEntry } from "./inspect.js";
 import {
   buildMergedHooks,
   findPluginRoot,
@@ -36,6 +42,18 @@ function entryMatches(entry: unknown): boolean {
   return args.includes("@agentmemory/mcp");
 }
 
+function targetFromResult(
+  result: ConnectResult,
+  label: string,
+): ConnectTargetMutation | null {
+  if (result.kind !== "installed" || !result.mutatedPath) return null;
+  return {
+    target: result.mutatedPath,
+    ...(result.backupPath !== undefined && { backupPath: result.backupPath }),
+    label,
+  };
+}
+
 export const adapter: ConnectAdapter = {
   name: "claude-code",
   displayName: "Claude Code",
@@ -46,6 +64,18 @@ export const adapter: ConnectAdapter = {
 
   detect(): boolean {
     return existsSync(CLAUDE_DIR);
+  },
+
+  inspect() {
+    return inspectJsonEntry({
+      name: "claude-code",
+      displayName: "Claude Code",
+      detectDir: CLAUDE_DIR,
+      configPath: CLAUDE_JSON,
+      wrapperKey: "mcpServers",
+      expectedEntry: AGENTMEMORY_MCP_BLOCK,
+      expectedMutation: `add mcpServers.agentmemory to ${CLAUDE_JSON}`,
+    });
   },
 
   async install(opts: ConnectOptions): Promise<ConnectResult> {
@@ -67,6 +97,18 @@ export const adapter: ConnectAdapter = {
           p.log.warn(
             `Claude Code hooks fallback skipped: ${hookResult.reason}.`,
           );
+        } else {
+          const hookTarget = targetFromResult(hookResult, "hooks");
+          if (hookTarget) {
+            return {
+              kind: "installed",
+              mutatedPath: hookTarget.target,
+              ...(hookTarget.backupPath !== undefined && {
+                backupPath: hookTarget.backupPath,
+              }),
+              targets: [hookTarget],
+            };
+          }
         }
       }
       return { kind: "already-wired", mutatedPath: CLAUDE_JSON };
@@ -105,16 +147,27 @@ export const adapter: ConnectAdapter = {
       "Restart Claude Code (or run `/mcp` inside a session) to pick up the new server.",
     );
 
+    const targets: ConnectTargetMutation[] = [
+      {
+        target: CLAUDE_JSON,
+        ...(backupPath !== undefined && { backupPath }),
+        label: "mcp",
+      },
+    ];
+
     if (opts.withHooks) {
       const hookResult = installClaudeHooks(opts);
       if (hookResult.kind === "skipped") {
         p.log.warn(
           `Claude Code hooks fallback skipped: ${hookResult.reason}. MCP wiring still applied.`,
         );
+      } else {
+        const hookTarget = targetFromResult(hookResult, "hooks");
+        if (hookTarget) targets.push(hookTarget);
       }
     }
 
-    return { kind: "installed", mutatedPath: CLAUDE_JSON, backupPath };
+    return { kind: "installed", mutatedPath: CLAUDE_JSON, backupPath, targets };
   },
 };
 

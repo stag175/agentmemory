@@ -63,7 +63,9 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
             ? Math.max(0, Math.min(1, data.confidence))
             : computeConfidence(source, target, data.type);
 
-        const relation: MemoryRelation = {
+        const relationId = generateId("rel");
+        const relation: MemoryRelation & { id: string } = {
+          id: relationId,
           type: data.type,
           sourceId: data.sourceId,
           targetId: data.targetId,
@@ -71,7 +73,6 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
           confidence,
         };
 
-        const relationId = generateId("rel");
         await kv.set(KV.relations, relationId, relation);
 
         if (!source.relatedIds) source.relatedIds = [];
@@ -168,14 +169,15 @@ export function registerRelationsFunction(sdk: ISdk, kv: StateKV): void {
         version: evolved.version,
       });
 
-      const relation: MemoryRelation = {
+      const relationId = generateId("rel");
+      const relation: MemoryRelation & { id: string } = {
+        id: relationId,
         type: "supersedes",
         sourceId: evolved.id,
         targetId: existing.id,
         createdAt: now,
         confidence: 1.0,
       };
-      const relationId = generateId("rel");
       await kv.set(KV.relations, relationId, relation);
       await safeAudit(kv, "evolve", "mem::evolve", [relationId], {
         operation: "supersedes",

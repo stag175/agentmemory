@@ -1,5 +1,6 @@
 {
   "name": "@agentmemory/agentmemory",
+  "mcpName": "io.github.rohitg00/agentmemory",
   "version": "0.9.27",
   "description": "Persistent memory for AI coding agents, powered by iii-engine's three primitives",
   "type": "module",
@@ -17,7 +18,7 @@
     "agentmemory": "dist/cli.mjs"
   },
   "scripts": {
-    "build": "tsdown && (cp iii-config.yaml dist/ 2>/dev/null || true) && (cp iii-config.docker.yaml dist/ 2>/dev/null || true) && (cp docker-compose.yml dist/ 2>/dev/null || true) && (cp .env.example dist/ 2>/dev/null || true) && mkdir -p dist/viewer && cp src/viewer/index.html dist/viewer/ && cp src/viewer/favicon.svg dist/viewer/",
+    "build": "tsdown && node scripts/copy-build-assets.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/cli.mjs",
     "migrate": "node dist/functions/migrate.js",
@@ -25,8 +26,11 @@
     "test:watch": "vitest --exclude test/integration.test.ts",
     "test:integration": "vitest run test/integration.test.ts",
     "test:all": "vitest run",
+    "release:preflight": "node scripts/release-preflight.mjs",
+    "release:preflight:arena": "node scripts/release-preflight.mjs --with-retrieval-arena",
     "skills:gen": "tsx scripts/skills/generate.ts",
     "skills:check": "tsx scripts/skills/generate.ts --check && tsx scripts/skills/check.ts",
+    "bench:retrieval-smoke": "node --import tsx benchmark/retrieval-arena-smoke.ts",
     "bench:load": "node --import tsx benchmark/load-100k.ts",
     "eval:longmemeval": "tsx eval/runner/longmemeval.ts",
     "eval:coding-life": "tsx eval/runner/coding-life.ts"
@@ -45,9 +49,12 @@
   "files": [
     "dist/",
     "plugin/",
+    "packaging/",
     "iii-config.yaml",
     "iii-config.docker.yaml",
     "docker-compose.yml",
+    "server.json",
+    "smithery.yaml",
     ".env.example",
     "LICENSE",
     "README.md",

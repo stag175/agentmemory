@@ -377,3 +377,458 @@ export function dryRunPlan(
   }
   return lines;
 }
+
+export type ReleaseGateCliStatus = "pass" | "fail" | "blocked" | "not_run";
+
+export type ReleaseGateCliKey =
+  | "build"
+  | "test"
+  | "docs"
+  | "packSmoke"
+  | "redactionForget"
+  | "retrievalScope"
+  | "restMcpParity";
+
+export type ReleaseGateCliEvidence = Partial<
+  Record<
+    ReleaseGateCliKey,
+    {
+      status?: ReleaseGateCliStatus;
+      message?: string;
+      evidence?: string[];
+      failures?: string[];
+      blockers?: string[];
+    }
+  >
+>;
+
+export type DiagnoseCliPlan = {
+  help: boolean;
+  json: boolean;
+  releaseGate: boolean;
+  payload: {
+    categories?: string[];
+    releaseGateEvidence?: ReleaseGateCliEvidence;
+  };
+};
+
+export type ReleaseGateCliCheck = {
+  status: ReleaseGateCliStatus;
+  message: string;
+  evidence?: string[];
+  failures?: string[];
+  blockers?: string[];
+  nextAction?: string;
+};
+
+export type ReleaseGateCliReport = {
+  overall: ReleaseGateCliStatus;
+  summary?: Record<ReleaseGateCliStatus, number>;
+  checks?: Partial<Record<ReleaseGateCliKey, ReleaseGateCliCheck>>;
+  blockingFindings?: Array<
+    ReleaseGateCliCheck & {
+      key: ReleaseGateCliKey;
+    }
+  >;
+  nextActions?: string[];
+};
+
+export type VersionsReport = {
+  agentmemoryVersion: string;
+  nodeVersion: string;
+  platform: string;
+  arch: string;
+  rest: {
+    baseUrl: string;
+    reachable: boolean;
+    version?: string;
+    status?: string;
+    error?: string;
+  };
+  iii: {
+    pinnedVersion: string;
+    override: boolean;
+  };
+  tools: {
+    all: number;
+    core: number;
+  };
+};
+
+type CliFlags = Record<string, string | boolean | string[]>;
+
+const RELEASE_GATE_CLI_STATUSES = new Set<ReleaseGateCliStatus>([
+  "pass",
+  "fail",
+  "blocked",
+  "not_run",
+]);
+
+const RELEASE_GATE_CLI_KEYS: ReleaseGateCliKey[] = [
+  "build",
+  "test",
+  "docs",
+  "packSmoke",
+  "redactionForget",
+  "retrievalScope",
+  "restMcpParity",
+];
+
+const RELEASE_GATE_FLAG_NAMES: Record<ReleaseGateCliKey, string> = {
+  build: "build",
+  test: "test",
+  docs: "docs",
+  packSmoke: "pack-smoke",
+  redactionForget: "redaction-forget",
+  retrievalScope: "retrieval-scope",
+  restMcpParity: "rest-mcp-parity",
+};
+
+export const DIAGNOSE_CLI_HELP = `Usage:
+  agentmemory diagnose [--json] [--categories a,b]
+  agentmemory diagnose --categories security [--json]
+  agentmemory diagnose --release-gate [--json] [--build status] [--test status] [--docs status] [--pack-smoke status] [--rest-mcp-parity status]
+
+Categories: actions, leases, sentinels, sketches, signals, sessions, memories, lessons, summaries, semantic, procedural, crystals, insights, mesh, security.
+Security diagnostics include encryption readiness; JSON responses include security.encryption when the daemon supports it.
+Release gate statuses: pass, fail, blocked, not_run.
+Evidence flags: --<check>-message text, --<check>-evidence text, --<check>-failure text, --<check>-blocker text.
+`;
+
+export function parseCliFlags(argv: string[]): {
+  positionals: string[];
+  flags: CliFlags;
+} {
+  const positionals: string[] = [];
+  const flags: CliFlags = {};
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i] ?? "";
+    if (!token.startsWith("--") || token === "--") {
+      positionals.push(token);
+      continue;
+    }
+    const raw = token.slice(2);
+    const eq = raw.indexOf("=");
+    if (eq !== -1) {
+      addCliFlag(flags, raw.slice(0, eq), raw.slice(eq + 1));
+      continue;
+    }
+    const next = argv[i + 1];
+    if (next !== undefined && !next.startsWith("--")) {
+      addCliFlag(flags, raw, next);
+      i++;
+    } else {
+      addCliFlag(flags, raw, true);
+    }
+  }
+  return { positionals, flags };
+}
+
+function addCliFlag(flags: CliFlags, key: string, value: string | boolean): void {
+  const existing = flags[key];
+  if (existing === undefined) {
+    flags[key] = value;
+    return;
+  }
+  flags[key] = Array.isArray(existing)
+    ? [...existing, String(value)]
+    : [String(existing), String(value)];
+}
+
+function cliFlagValue(flags: CliFlags, key: string): string | boolean | string[] | undefined {
+  return flags[key];
+}
+
+function cliString(flags: CliFlags, key: string): string | undefined {
+  const value = cliFlagValue(flags, key);
+  if (Array.isArray(value)) return value[value.length - 1]?.trim() || undefined;
+  if (typeof value === "string") return value.trim() || undefined;
+  return undefined;
+}
+
+function cliStringList(flags: CliFlags, key: string): string[] {
+  const value = cliFlagValue(flags, key);
+  if (value === undefined || typeof value === "boolean") return [];
+  const values = Array.isArray(value) ? value : [value];
+  return values.map((item) => item.trim()).filter(Boolean);
+}
+
+function csv(value: string | undefined): string[] | undefined {
+  const values = (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return values.length > 0 ? values : undefined;
+}
+
+function asReleaseGateCliStatus(value: string, flag: string): ReleaseGateCliStatus {
+  if (RELEASE_GATE_CLI_STATUSES.has(value as ReleaseGateCliStatus)) {
+    return value as ReleaseGateCliStatus;
+  }
+  throw new Error(`--${flag} must be one of: pass, fail, blocked, not_run`);
+}
+
+export function buildDiagnoseCliPlan(argv: string[]): DiagnoseCliPlan {
+  const { flags } = parseCliFlags(argv);
+  const help = flags.help === true || flags.h === true;
+  const json = flags.json === true;
+  const releaseGate = flags["release-gate"] === true;
+  const categories = csv(cliString(flags, "categories") ?? cliString(flags, "category"));
+  const releaseGateEvidence: ReleaseGateCliEvidence = {};
+
+  for (const key of RELEASE_GATE_CLI_KEYS) {
+    const flag = RELEASE_GATE_FLAG_NAMES[key];
+    const rawStatus = cliString(flags, flag);
+    const message = cliString(flags, `${flag}-message`);
+    const evidence = cliStringList(flags, `${flag}-evidence`);
+    const failures = cliStringList(flags, `${flag}-failure`);
+    const blockers = cliStringList(flags, `${flag}-blocker`);
+    if (
+      rawStatus === undefined &&
+      message === undefined &&
+      evidence.length === 0 &&
+      failures.length === 0 &&
+      blockers.length === 0
+    ) {
+      continue;
+    }
+    if (rawStatus === undefined) {
+      throw new Error(`--${flag} status is required when supplying ${flag} evidence`);
+    }
+    releaseGateEvidence[key] = {
+      status: asReleaseGateCliStatus(rawStatus, flag),
+      ...(message !== undefined && { message }),
+      ...(evidence.length > 0 && { evidence }),
+      ...(failures.length > 0 && { failures }),
+      ...(blockers.length > 0 && { blockers }),
+    };
+  }
+
+  return {
+    help,
+    json,
+    releaseGate,
+    payload: {
+      ...(categories && { categories }),
+      ...(Object.keys(releaseGateEvidence).length > 0 && { releaseGateEvidence }),
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+type DiagnoseCheckStatus = "pass" | "warn" | "fail";
+
+type DiagnoseCliCheck = {
+  name: string;
+  category: string;
+  status: DiagnoseCheckStatus;
+  message: string;
+  fixable?: boolean;
+};
+
+const DIAGNOSE_CHECK_STATUSES = new Set<DiagnoseCheckStatus>([
+  "pass",
+  "warn",
+  "fail",
+]);
+
+function extractDiagnoseChecks(result: unknown): DiagnoseCliCheck[] {
+  if (!isRecord(result) || !Array.isArray(result.checks)) return [];
+  return result.checks.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const { name, category, status, message, fixable } = item;
+    if (
+      typeof name !== "string" ||
+      typeof category !== "string" ||
+      typeof message !== "string" ||
+      !DIAGNOSE_CHECK_STATUSES.has(status as DiagnoseCheckStatus)
+    ) {
+      return [];
+    }
+    return [
+      {
+        name,
+        category,
+        status: status as DiagnoseCheckStatus,
+        message,
+        ...(typeof fixable === "boolean" && { fixable }),
+      },
+    ];
+  });
+}
+
+function diagnosticFindings(result: unknown): DiagnoseCliCheck[] {
+  return extractDiagnoseChecks(result).filter((check) => check.status !== "pass");
+}
+
+function formatDiagnosticCheck(check: DiagnoseCliCheck): string {
+  return `- ${check.name} [${check.status}]: ${check.message}${check.fixable ? " (fixable)" : ""}`;
+}
+
+function appendDiagnosticSections(
+  lines: string[],
+  result: unknown,
+  options: { includePassingSecurity: boolean },
+): void {
+  const checks = extractDiagnoseChecks(result);
+  const securityChecks = checks.filter((check) => check.category === "security");
+  const visibleSecurityChecks = options.includePassingSecurity
+    ? securityChecks
+    : securityChecks.filter((check) => check.status !== "pass");
+
+  if (visibleSecurityChecks.length > 0) {
+    lines.push("Security:");
+    for (const check of visibleSecurityChecks) {
+      lines.push(formatDiagnosticCheck(check));
+    }
+  }
+
+  const findings = checks.filter(
+    (check) => check.status !== "pass" && check.category !== "security",
+  );
+  if (findings.length > 0) {
+    lines.push("Diagnostic findings:");
+    for (const check of findings) {
+      lines.push(formatDiagnosticCheck(check));
+    }
+  }
+}
+
+export function extractReleaseGateReport(result: unknown): ReleaseGateCliReport | null {
+  if (!isRecord(result) || !isRecord(result.releaseGate)) return null;
+  const gate = result.releaseGate;
+  const overall = gate.overall;
+  if (!RELEASE_GATE_CLI_STATUSES.has(overall as ReleaseGateCliStatus)) return null;
+  return gate as ReleaseGateCliReport;
+}
+
+export function releaseGateExitCode(report: ReleaseGateCliReport | null): number {
+  return report?.overall === "pass" ? 0 : 1;
+}
+
+export function formatDiagnoseJson(result: unknown, releaseGateOnly: boolean): string {
+  const gate = releaseGateOnly ? extractReleaseGateReport(result) : null;
+  const findings = releaseGateOnly ? diagnosticFindings(result) : [];
+  const value = releaseGateOnly
+    ? gate
+      ? {
+          ...gate,
+          ...(findings.length > 0 && { diagnosticFindings: findings }),
+        }
+      : {
+          success: false,
+          error: "releaseGate unavailable in diagnostics response",
+        }
+    : result;
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+export function formatDiagnoseText(result: unknown, releaseGateOnly: boolean): string {
+  const gate = extractReleaseGateReport(result);
+  const lines: string[] = [];
+  if (!releaseGateOnly && isRecord(result) && isRecord(result.summary)) {
+    const summary = result.summary as Record<string, unknown>;
+    lines.push(
+      `Diagnostics: pass=${summary.pass ?? 0}, warn=${summary.warn ?? 0}, fail=${summary.fail ?? 0}, fixable=${summary.fixable ?? 0}`,
+    );
+  }
+  const appendReleaseGateDiagnostics = () => {
+    if (releaseGateOnly) {
+      appendDiagnosticSections(lines, result, { includePassingSecurity: false });
+    }
+  };
+  if (!releaseGateOnly) {
+    appendDiagnosticSections(lines, result, { includePassingSecurity: true });
+  }
+  if (!gate) {
+    if (releaseGateOnly) lines.push("Release gate: unavailable");
+    appendReleaseGateDiagnostics();
+    return lines.join("\n");
+  }
+  lines.push(`Release gate: ${gate.overall}`);
+  if (gate.summary) {
+    lines.push(
+      `Summary: pass=${gate.summary.pass}, fail=${gate.summary.fail}, blocked=${gate.summary.blocked}, not_run=${gate.summary.not_run}`,
+    );
+  }
+  const findingsFromChecks = RELEASE_GATE_CLI_KEYS.flatMap((key) => {
+    const check = gate.checks?.[key];
+    return check && check.status !== "pass" ? [{ key, ...check }] : [];
+  });
+  const findings =
+    gate.blockingFindings && gate.blockingFindings.length > 0
+      ? gate.blockingFindings
+      : findingsFromChecks;
+  if (findings.length === 0) {
+    lines.push("Blocking findings: none");
+    appendReleaseGateDiagnostics();
+    return lines.join("\n");
+  }
+  lines.push("Blocking findings:");
+  for (const finding of findings) {
+    lines.push(`- ${finding.key} [${finding.status}]: ${finding.message}`);
+    if (finding.failures?.length) {
+      lines.push(`  failures: ${finding.failures.join("; ")}`);
+    }
+    if (finding.blockers?.length) {
+      lines.push(`  blockers: ${finding.blockers.join("; ")}`);
+    }
+    if (finding.nextAction) {
+      lines.push(`  next: ${finding.nextAction}`);
+    }
+  }
+  appendReleaseGateDiagnostics();
+  return lines.join("\n");
+}
+
+export function buildVersionsReport(input: {
+  agentmemoryVersion: string;
+  nodeVersion: string;
+  platform: string;
+  arch: string;
+  baseUrl: string;
+  pinnedIiiVersion: string;
+  iiiVersionOverridden: boolean;
+  allToolsCount: number;
+  coreToolsCount: number;
+  restHealth?: unknown;
+  restError?: string;
+}): VersionsReport {
+  const restHealth = isRecord(input.restHealth) ? input.restHealth : undefined;
+  return {
+    agentmemoryVersion: input.agentmemoryVersion,
+    nodeVersion: input.nodeVersion,
+    platform: input.platform,
+    arch: input.arch,
+    rest: {
+      baseUrl: input.baseUrl,
+      reachable: Boolean(restHealth),
+      ...(typeof restHealth?.version === "string" && { version: restHealth.version }),
+      ...(typeof restHealth?.status === "string" && { status: restHealth.status }),
+      ...(!restHealth && input.restError && { error: input.restError }),
+    },
+    iii: {
+      pinnedVersion: input.pinnedIiiVersion,
+      override: input.iiiVersionOverridden,
+    },
+    tools: {
+      all: input.allToolsCount,
+      core: input.coreToolsCount,
+    },
+  };
+}
+
+export function formatVersionsReport(report: VersionsReport, json: boolean): string {
+  if (json) return `${JSON.stringify(report, null, 2)}\n`;
+  return [
+    `agentmemory: ${report.agentmemoryVersion}`,
+    `node: ${report.nodeVersion}`,
+    `platform: ${report.platform}/${report.arch}`,
+    `iii pinned: ${report.iii.pinnedVersion}${report.iii.override ? " (env override)" : ""}`,
+    `REST: ${report.rest.reachable ? `${report.rest.version ?? "?"} at ${report.rest.baseUrl} (${report.rest.status ?? "unknown"})` : `unreachable at ${report.rest.baseUrl}`}`,
+    `tools: ${report.tools.all} all, ${report.tools.core} core`,
+  ].join("\n");
+}

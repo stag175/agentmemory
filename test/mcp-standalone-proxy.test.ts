@@ -1,7 +1,12 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { handleToolCall } from "../src/mcp/standalone.js";
 import { resetHandleForTests } from "../src/mcp/rest-proxy.js";
 import { InMemoryKV } from "../src/mcp/in-memory-kv.js";
+import { registerApiTriggers } from "../src/triggers/api.js";
+import { mockKV, mockSdk } from "./helpers/mocks.js";
 
 type FetchMock = ReturnType<typeof vi.fn>;
 
@@ -14,6 +19,18 @@ function installFetch(handler: (url: string, init?: RequestInit) => Response): F
 }
 
 const BASE = "http://localhost:3111";
+const tempRoots: string[] = [];
+
+function tempDir(): string {
+  const root = mkdtempSync(join(tmpdir(), "rules-resolver-standalone-"));
+  tempRoots.push(root);
+  return root;
+}
+
+function write(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content);
+}
 
 describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
   const originalFetch = globalThis.fetch;
@@ -28,6 +45,9 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     resetHandleForTests();
     globalThis.fetch = originalFetch;
     delete process.env["AGENTMEMORY_URL"];
+    for (const root of tempRoots.splice(0)) {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("proxies memory_sessions to GET /agentmemory/sessions when server is up", async () => {
@@ -54,10 +74,12 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
   });
 
   it("proxies memory_smart_search to POST /agentmemory/smart-search", async () => {
+    let smartSearchBody: Record<string, unknown> | undefined;
     installFetch((url, init) => {
       if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
       if (url.endsWith("/agentmemory/smart-search")) {
         const body = JSON.parse((init?.body as string) || "{}");
+        smartSearchBody = body;
         return new Response(
           JSON.stringify({
             mode: "compact",
@@ -69,10 +91,420 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       }
       return new Response("", { status: 404 });
     });
-    const res = await handleToolCall("memory_smart_search", { query: "auth bug", limit: 5 });
+    const res = await handleToolCall("memory_smart_search", {
+      query: "auth bug",
+      limit: 5,
+      searchMode: "deep",
+      retrievalMode: "global_community",
+      project: "billing",
+      cwd: "C:\\repo\\billing",
+      files: "src/auth.ts, src/session.ts",
+      branch: "main",
+      commit: "abc123",
+      memoryTier: "procedure",
+      privacyScope: "project",
+      agentId: "codex",
+      sessionId: "sess_1",
+      asOf: "2026-02-01T00:00:00.000Z",
+      explain: true,
+      includeReport: true,
+      tokenBudget: 1200,
+    });
     const body = JSON.parse(res.content[0].text);
     expect(body.query).toBe("auth bug");
     expect(body.results[0].id).toBe("m1");
+    expect(smartSearchBody).toEqual({
+      query: "auth bug",
+      limit: 5,
+      project: "billing",
+      cwd: "C:\\repo\\billing",
+      searchMode: "deep",
+      retrievalMode: "global_community",
+      files: ["src/auth.ts", "src/session.ts"],
+      branch: "main",
+      commit: "abc123",
+      memoryTier: "procedure",
+      privacyScope: "project",
+      agentId: "codex",
+      sessionId: "sess_1",
+      asOf: "2026-02-01T00:00:00.000Z",
+      explain: true,
+      includeReport: true,
+      tokenBudget: 1200,
+    });
+  });
+
+  it("proxies memory_search_explain cwd to POST /agentmemory/search/explain", async () => {
+    let explainBody: Record<string, unknown> | undefined;
+    installFetch((url, init) => {
+      if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
+      if (url.endsWith("/agentmemory/search/explain")) {
+        explainBody = JSON.parse((init?.body as string) || "{}");
+        return new Response(
+          JSON.stringify({ success: true, explain: { queryPlan: { filters: explainBody } } }),
+          { status: 200 },
+        );
+      }
+      return new Response("", { status: 404 });
+    });
+
+    await handleToolCall("memory_search_explain", {
+      query: "auth bug",
+      cwd: "/repo/billing",
+      files: "src/auth.ts",
+    });
+
+    expect(explainBody).toMatchObject({
+      query: "auth bug",
+      cwd: "/repo/billing",
+      files: ["src/auth.ts"],
+    });
+  });
+
+  it("proxies memory_create to POST /agentmemory/memory/create", async () => {
+    let createBody: Record<string, unknown> | undefined;
+    installFetch((url, init) => {
+      if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
+      if (url.endsWith("/agentmemory/memory/create")) {
+        createBody = JSON.parse((init?.body as string) || "{}");
+        return new Response(
+          JSON.stringify({
+            success: true,
+            memory: { id: "mem_created", content: createBody.content },
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("", { status: 404 });
+    });
+
+    const res = await handleToolCall("memory_create", {
+      content: "Use lifecycle create proxy",
+      type: "fact",
+      concepts: "lifecycle,create",
+      files: "src/mcp/standalone.ts",
+      project: "agentmemory",
+      lane: "semantic_fact",
+      confidence: 0.75,
+      sourceObservationIds: "obs_1,obs_2",
+      requireGatePass: true,
+    });
+    const body = JSON.parse(res.content[0].text);
+    expect(body.success).toBe(true);
+    expect(body.memory.id).toBe("mem_created");
+    expect(createBody).toMatchObject({
+      content: "Use lifecycle create proxy",
+      type: "fact",
+      concepts: ["lifecycle", "create"],
+      files: ["src/mcp/standalone.ts"],
+      sourceObservationIds: ["obs_1", "obs_2"],
+      project: "agentmemory",
+      lane: "semantic_fact",
+      confidence: 0.75,
+      requireGatePass: true,
+    });
+  });
+
+  it("proxies memory_rules_resolve to POST /agentmemory/rules/resolve", async () => {
+    const root = tempDir();
+    let rulesBody: Record<string, unknown> | undefined;
+    installFetch((url, init) => {
+      if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
+      if (url.endsWith("/agentmemory/rules/resolve")) {
+        rulesBody = JSON.parse((init?.body as string) || "{}");
+        return new Response(
+          JSON.stringify({
+            success: true,
+            includeContent: false,
+            workspaceRoot: rulesBody.workspaceRoot,
+            scannedAt: "2026-06-28T00:00:00.000Z",
+            rules: [],
+            warnings: [],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("", { status: 404 });
+    });
+
+    const res = await handleToolCall("memory_rules_resolve", {
+      workspaceRoot: root,
+      instructionGlobs: "docs/*.md",
+      maxBytes: 4096,
+      includeContent: false,
+    });
+    const body = JSON.parse(res.content[0].text);
+    expect(body.success).toBe(true);
+    expect(rulesBody).toEqual({
+      workspaceRoot: resolve(root),
+      instructionGlobs: ["docs/*.md"],
+      maxFileBytes: 4096,
+      includeContent: false,
+    });
+  });
+
+  it("rejects invalid standalone searchMode before proxying search", async () => {
+    installFetch((url) => {
+      if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
+      return new Response("", { status: 404 });
+    });
+
+    await expect(
+      handleToolCall("memory_smart_search", {
+        query: "auth bug",
+        searchMode: "sideways",
+      }),
+    ).rejects.toThrow("searchMode must be one of: fast, balanced, deep");
+  });
+
+  it("REST context and smart-search adapters forward validated Context Router knobs", async () => {
+    const sdk = mockSdk();
+    const kv = mockKV();
+    let contextPayload: Record<string, unknown> | undefined;
+    let smartPayload: Record<string, unknown> | undefined;
+
+    sdk.registerFunction("mem::context", async (payload) => {
+      contextPayload = payload as Record<string, unknown>;
+      return { ok: true };
+    });
+    sdk.registerFunction("mem::smart-search", async (payload) => {
+      smartPayload = payload as Record<string, unknown>;
+      return { ok: true };
+    });
+    registerApiTriggers(sdk as never, kv as never, undefined);
+
+    const context = await sdk.trigger("api::context", {
+      headers: {},
+      query_params: {},
+      body: {
+        sessionId: "sess_1",
+        project: "billing",
+        tokenBudget: "600",
+        explain: "true",
+        includeReport: true,
+        ignored: "drop me",
+      },
+    });
+    expect(context).toMatchObject({ status_code: 200 });
+    expect(contextPayload).toEqual({
+      sessionId: "sess_1",
+      project: "billing",
+      budget: 600,
+      tokenBudget: 600,
+      explain: true,
+      includeReport: true,
+    });
+
+    const smart = await sdk.trigger("api::smart-search", {
+      headers: { "x-agentmemory-source": "viewer" },
+      query_params: {},
+      body: {
+        query: "auth bug",
+        limit: 7,
+        searchMode: "FAST",
+        retrievalMode: "global_community",
+        explain: "false",
+        includeReport: "yes",
+        budget: "900",
+        files: ["src/auth.ts"],
+        cwd: "C:\\repo\\billing",
+        branch: "main",
+        memoryTier: "procedure",
+        privacyScope: "project",
+        asOf: "2026-02-01T00:00:00.000Z",
+        ignored: "drop me",
+      },
+    });
+    expect(smart).toMatchObject({ status_code: 200 });
+    expect(smartPayload).toMatchObject({
+      query: "auth bug",
+      limit: 7,
+      searchMode: "fast",
+      retrievalMode: "global_community",
+      explain: false,
+      includeReport: true,
+      tokenBudget: 900,
+      files: ["src/auth.ts"],
+      cwd: "C:\\repo\\billing",
+      branch: "main",
+      memoryTier: "procedure",
+      privacyScope: "project",
+      asOf: "2026-02-01T00:00:00.000Z",
+      source: "viewer",
+    });
+    expect(smartPayload).not.toHaveProperty("ignored");
+
+    const explain = await sdk.trigger("api::search-explain", {
+      headers: {},
+      query_params: {},
+      body: {
+        query: "auth bug",
+        searchMode: "deep",
+        retrievalMode: "as_of",
+        explain: false,
+        includeReport: true,
+        tokenBudget: 300,
+        filePath: "src/auth.ts",
+        cwd: "/repo/billing",
+        validAt: "2026-02-01T00:00:00.000Z",
+        agentId: "codex",
+        sessionId: "sess_1",
+      },
+    });
+    expect(explain).toMatchObject({ status_code: 200 });
+    expect(smartPayload).toMatchObject({
+      query: "auth bug",
+      searchMode: "deep",
+      retrievalMode: "as_of",
+      explain: true,
+      includeReport: true,
+      tokenBudget: 300,
+      filePath: "src/auth.ts",
+      cwd: "/repo/billing",
+      validAt: "2026-02-01T00:00:00.000Z",
+      agentId: "codex",
+      sessionId: "sess_1",
+    });
+
+    const rejected = await sdk.trigger("api::smart-search", {
+      headers: {},
+      query_params: {},
+      body: { query: "auth bug", searchMode: "sideways" },
+    });
+    expect(rejected).toMatchObject({
+      status_code: 400,
+      body: { error: "searchMode must be one of: fast, balanced, deep" },
+    });
+
+    const rejectedRetrievalMode = await sdk.trigger("api::smart-search", {
+      headers: {},
+      query_params: {},
+      body: { query: "auth bug", retrievalMode: "sideways" },
+    });
+    expect(rejectedRetrievalMode).toMatchObject({
+      status_code: 400,
+      body: {
+        error: "retrievalMode must be one of: basic, local_graph, global_community, drift, as_of",
+      },
+    });
+  });
+
+  it("REST memory-create forwards only the explicit create payload", async () => {
+    const sdk = mockSdk();
+    const kv = mockKV();
+    let createPayload: Record<string, unknown> | undefined;
+
+    sdk.registerFunction("mem::memory-create", async (payload) => {
+      createPayload = payload as Record<string, unknown>;
+      return { success: true, memory: { id: "mem_created" } };
+    });
+    registerApiTriggers(sdk as never, kv as never, undefined);
+
+    const created = await sdk.trigger("api::memory-create", {
+      headers: {},
+      query_params: {},
+      body: {
+        content: "Use REST lifecycle create",
+        type: "fact",
+        concepts: ["rest", "create"],
+        files: ["src/triggers/api.ts"],
+        project: "agentmemory",
+        sourceObservationIds: ["obs_1"],
+        requireGatePass: true,
+        ignored: "drop me",
+      },
+    });
+
+    expect(created).toMatchObject({ status_code: 201 });
+    expect(createPayload).toEqual({
+      content: "Use REST lifecycle create",
+      type: "fact",
+      concepts: ["rest", "create"],
+      files: ["src/triggers/api.ts"],
+      sourceObservationIds: ["obs_1"],
+      project: "agentmemory",
+      requireGatePass: true,
+    });
+
+    const rejected = await sdk.trigger("api::memory-create", {
+      headers: {},
+      query_params: {},
+      body: {
+        content: "bad gate flag",
+        requireGatePass: "true",
+      },
+    });
+    expect(rejected).toMatchObject({
+      status_code: 400,
+      body: { error: "requireGatePass must be a boolean" },
+    });
+  });
+
+  it("REST memory-delete forwards source selectors and rejects invalid dryRun", async () => {
+    const sdk = mockSdk();
+    const kv = mockKV();
+    let deletePayload: Record<string, unknown> | undefined;
+
+    sdk.registerFunction("mem::memory-delete", async (payload) => {
+      deletePayload = payload as Record<string, unknown>;
+      return { success: true, deleted: 2 };
+    });
+    registerApiTriggers(sdk as never, kv as never, undefined);
+
+    const deleted = await sdk.trigger("api::memory-delete", {
+      headers: {},
+      query_params: {},
+      body: {
+        sourceObservationId: "obs_1",
+        sourceHash: "hash_1",
+        sourceUri: "file:///repo/source.md",
+        project: "billing",
+        agentId: "codex-a",
+        mode: "hard",
+        dryRun: true,
+        reason: "source removed upstream",
+        actor: "operator",
+        ignored: "drop me",
+      },
+    });
+
+    expect(deleted).toMatchObject({ status_code: 200 });
+    expect(deletePayload).toEqual({
+      memoryId: undefined,
+      sourceObservationId: "obs_1",
+      sourceHash: "hash_1",
+      sourceUri: "file:///repo/source.md",
+      project: "billing",
+      agentId: "codex-a",
+      mode: "hard",
+      reason: "source removed upstream",
+      actor: "operator",
+      dryRun: true,
+    });
+
+    const missingSelector = await sdk.trigger("api::memory-delete", {
+      headers: {},
+      query_params: {},
+      body: { reason: "missing target" },
+    });
+    expect(missingSelector).toMatchObject({
+      status_code: 400,
+      body: { error: "memoryId or source selector is required" },
+    });
+
+    const rejected = await sdk.trigger("api::memory-delete", {
+      headers: {},
+      query_params: {},
+      body: {
+        sourceObservationId: "obs_1",
+        project: "billing",
+        dryRun: "true",
+      },
+    });
+    expect(rejected).toMatchObject({
+      status_code: 400,
+      body: { error: "dryRun must be a boolean" },
+    });
   });
 
   it("proxies memory_recall to POST /agentmemory/search and forwards format/token_budget (#507)", async () => {
@@ -167,6 +599,62 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     ]);
   });
 
+  it("proxies memory_delete source selectors to the REST endpoint", async () => {
+    const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    installFetch((url, init) => {
+      const method = init?.method || "GET";
+      if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
+      calls.push({
+        url,
+        method,
+        body: init?.body ? JSON.parse(init.body as string) : undefined,
+      });
+      if (url.endsWith("/agentmemory/memory/delete") && method === "POST") {
+        return new Response(
+          JSON.stringify({ success: true, deleted: 2, dryRun: true }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      return new Response("method not allowed", { status: 405, statusText: "Method Not Allowed" });
+    });
+
+    const res = await handleToolCall("memory_delete", {
+      sourceObservationId: "obs_1",
+      sourceHash: "hash_1",
+      sourceUri: "file:///repo/source.md",
+      project: "billing",
+      agentId: "codex-a",
+      mode: "hard",
+      dryRun: "true",
+      reason: "source removed upstream",
+    });
+
+    expect(JSON.parse(res.content[0].text)).toEqual({
+      success: true,
+      deleted: 2,
+      dryRun: true,
+    });
+    expect(calls).toEqual([
+      {
+        url: `${BASE}/agentmemory/memory/delete`,
+        method: "POST",
+        body: {
+          sourceObservationId: "obs_1",
+          sourceHash: "hash_1",
+          sourceUri: "file:///repo/source.md",
+          project: "billing",
+          agentId: "codex-a",
+          mode: "hard",
+          reason: "source removed upstream",
+          dryRun: true,
+        },
+      },
+    ]);
+  });
+
   it("local fallback returns the same shape as proxy for memory_smart_search", async () => {
     installFetch(() => {
       throw new Error("ECONNREFUSED");
@@ -178,6 +666,46 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     expect(body).toHaveProperty("mode", "compact");
     expect(Array.isArray(body.results)).toBe(true);
     expect(body.results[0].content).toBe("shape-check entry");
+  });
+
+  it("local memory_search_explain honors and reports cwd filters", async () => {
+    installFetch(() => {
+      throw new Error("ECONNREFUSED");
+    });
+    const localKv = new InMemoryKV(undefined);
+    await handleToolCall(
+      "memory_save",
+      { content: "cwd-only shape", cwd: "/repo/billing" },
+      localKv,
+    );
+
+    const res = await handleToolCall(
+      "memory_search_explain",
+      { query: "cwd-only", cwd: "/repo/other" },
+      localKv,
+    );
+    const body = JSON.parse(res.content[0].text);
+
+    expect(body.results).toEqual([]);
+    expect(body.explain.queryPlan.filters.cwd).toBe("/repo/other");
+  });
+
+  it("local fallback resolves rules from an explicit workspace root", async () => {
+    installFetch(() => {
+      throw new Error("ECONNREFUSED");
+    });
+    const root = tempDir();
+    write(join(root, "AGENTS.md"), "codex instructions\n");
+
+    const res = await handleToolCall("memory_rules_resolve", {
+      workspaceRoot: root,
+      includeContent: false,
+    }, new InMemoryKV(undefined));
+    const body = JSON.parse(res.content[0].text);
+    expect(body.success).toBe(true);
+    expect(body.fallback).toBe(true);
+    expect(body.rules[0].relativePath).toBe("AGENTS.md");
+    expect(body.rules[0]).not.toHaveProperty("content");
   });
 
   it("attaches Bearer token on the proxied tool request, not just the probe", async () => {
@@ -339,7 +867,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     expect(joined).toMatch(/AGENTMEMORY_FORCE_PROXY/);
   });
 
-  it("local fallback tools/list returns all 7 IMPLEMENTED_TOOLS regardless of AGENTMEMORY_TOOLS env (#234)", async () => {
+  it("local fallback tools/list returns the implemented fallback tools regardless of AGENTMEMORY_TOOLS env (#234)", async () => {
     const { handleToolsList } = await import("../src/mcp/standalone.js");
     installFetch(() => {
       throw new Error("ECONNREFUSED");
@@ -348,20 +876,32 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     const before = await handleToolsList();
     const beforeTools = before.tools as Array<{ name: string }>;
     expect(beforeTools.map((t) => t.name).sort()).toEqual([
+      "memory_archive",
       "memory_audit",
+      "memory_create",
+      "memory_delete",
+      "memory_expire",
       "memory_export",
       "memory_governance_delete",
+      "memory_history",
+      "memory_inspect",
+      "memory_ledger",
       "memory_recall",
+      "memory_restore",
+      "memory_review_queue",
+      "memory_rules_resolve",
       "memory_save",
+      "memory_search_explain",
       "memory_sessions",
       "memory_smart_search",
+      "memory_update",
     ]);
-    expect(beforeTools).toHaveLength(7);
+    expect(beforeTools).toHaveLength(19);
 
     resetHandleForTests();
     process.env["AGENTMEMORY_TOOLS"] = "core";
     const core = await handleToolsList();
-    expect((core.tools as unknown[]).length).toBe(7);
+    expect((core.tools as unknown[]).length).toBe(19);
     delete process.env["AGENTMEMORY_TOOLS"];
   });
 

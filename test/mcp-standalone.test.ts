@@ -16,7 +16,11 @@ vi.mock("../src/mcp/transport.js", () => ({
 }));
 
 vi.mock("../src/config.js", () => ({
+  getAgentId: vi.fn(() => process.env["AGENT_ID"]),
   getStandalonePersistPath: vi.fn(() => "/tmp/test-standalone.json"),
+  isAgentScopeIsolated: vi.fn(
+    () => process.env["AGENTMEMORY_AGENT_SCOPE"] === "isolated",
+  ),
 }));
 
 import {
@@ -25,7 +29,7 @@ import {
   V040_TOOLS,
 } from "../src/mcp/tools-registry.js";
 import { InMemoryKV } from "../src/mcp/in-memory-kv.js";
-import { handleToolCall } from "../src/mcp/standalone.js";
+import { handleToolCall, handleToolsList } from "../src/mcp/standalone.js";
 import {
   resetHandleForTests,
   setLivezProbe,
@@ -50,6 +54,9 @@ const fetchTrap = vi.fn(async (url: unknown) => {
   );
 });
 
+const ORIGINAL_AGENT_ID = process.env["AGENT_ID"];
+const ORIGINAL_AGENT_SCOPE = process.env["AGENTMEMORY_AGENT_SCOPE"];
+
 describe("Tools Registry", () => {
   it("getAllTools returns all tools with unique names", () => {
     const tools = getAllTools();
@@ -62,6 +69,7 @@ describe("Tools Registry", () => {
       "memory_lesson_recall",
       "memory_obsidian_export",
       "memory_save",
+      "memory_create",
       "memory_recall",
     ]) {
       expect(tools.some((t) => t.name === required)).toBe(true);
@@ -145,6 +153,8 @@ describe("handleToolCall", () => {
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
+    delete process.env["AGENT_ID"];
+    delete process.env["AGENTMEMORY_AGENT_SCOPE"];
     vi.mocked(writeFileSync).mockClear();
     instantLocalFallbackProbe.mockClear();
     fetchTrap.mockClear();
@@ -160,12 +170,32 @@ describe("handleToolCall", () => {
   afterEach(() => {
     (globalThis as { fetch: typeof fetch }).fetch = originalFetch;
     resetHandleForTests();
+    if (ORIGINAL_AGENT_ID === undefined) delete process.env["AGENT_ID"];
+    else process.env["AGENT_ID"] = ORIGINAL_AGENT_ID;
+    if (ORIGINAL_AGENT_SCOPE === undefined) {
+      delete process.env["AGENTMEMORY_AGENT_SCOPE"];
+    } else {
+      process.env["AGENTMEMORY_AGENT_SCOPE"] = ORIGINAL_AGENT_SCOPE;
+    }
   });
 
   it("livez probe stub is invoked instead of the real fetch (issue #449)", async () => {
     const kv = new InMemoryKV();
     await handleToolCall("memory_save", { content: "regression guard" }, kv);
     expect(instantLocalFallbackProbe).toHaveBeenCalledTimes(1);
+    expect(fetchTrap).not.toHaveBeenCalled();
+  });
+
+  it("local fallback keeps diagnose/status parity server-only when no daemon is reachable", async () => {
+    expect(getAllTools().some((tool) => tool.name === "memory_diagnose")).toBe(true);
+
+    const listed = await handleToolsList();
+    const localToolNames = listed.tools.map((tool) => (tool as { name: string }).name);
+    expect(localToolNames).not.toContain("memory_diagnose");
+
+    await expect(
+      handleToolCall("memory_diagnose", { categories: "storage" }, new InMemoryKV()),
+    ).rejects.toThrow("Unknown tool: memory_diagnose");
     expect(fetchTrap).not.toHaveBeenCalled();
   });
 
@@ -183,6 +213,119 @@ describe("handleToolCall", () => {
       expect.any(String),
       "utf-8",
     );
+  });
+
+  it("memory_create local fallback returns lifecycle create metadata", async () => {
+    const kv = new InMemoryKV();
+    const result = await handleToolCall(
+      "memory_create",
+      {
+        content: "Use explicit lifecycle create in standalone fallback",
+        concepts: "lifecycle,create",
+        files: "src/mcp/standalone.ts",
+        project: "agentmemory",
+        lane: "semantic_fact",
+        confidence: 0.82,
+        sourceObservationIds: "obs_a,obs_b",
+      },
+      kv,
+    );
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.success).toBe(true);
+    expect(parsed.memory.project).toBe("agentmemory");
+    expect(parsed.memory.lane).toBe("semantic_fact");
+    expect(parsed.memory.sourceObservationIds).toEqual(["obs_a", "obs_b"]);
+    expect(parsed.sourceCard.sourceObservationIds).toEqual(["obs_a", "obs_b"]);
+    expect(parsed.history.map((row: { action: string }) => row.action)).toEqual(["create"]);
+    expect(parsed.fallback).toBe(true);
+  });
+
+  it("memory_delete local fallback propagates a scoped source selector", async () => {
+    const kv = new InMemoryKV();
+    const first = JSON.parse((await handleToolCall(
+      "memory_create",
+      {
+        content: "Local source delete should target the first memory",
+        project: "billing",
+        agentId: "codex-a",
+        sourceObservationIds: "obs_local_delete",
+        sourceHash: "hash-local-delete",
+        sourceUri: "file:///repo/billing/source.md",
+      },
+      kv,
+    )).content[0].text);
+    const second = JSON.parse((await handleToolCall(
+      "memory_create",
+      {
+        content: "Local source delete should target the second memory",
+        project: "billing",
+        agentId: "codex-a",
+        sourceObservationIds: "obs_local_delete",
+        sourceHash: "hash-local-delete",
+        sourceUri: "file:///repo/billing/source.md",
+      },
+      kv,
+    )).content[0].text);
+    const other = JSON.parse((await handleToolCall(
+      "memory_create",
+      {
+        content: "Local source delete must not cross agent scope",
+        project: "billing",
+        agentId: "codex-b",
+        sourceObservationIds: "obs_local_delete",
+      },
+      kv,
+    )).content[0].text);
+
+    const dryRun = JSON.parse((await handleToolCall(
+      "memory_delete",
+      {
+        sourceObservationId: "obs_local_delete",
+        project: "billing",
+        agentId: "codex-a",
+        dryRun: true,
+      },
+      kv,
+    )).content[0].text);
+
+    expect(dryRun.success).toBe(true);
+    expect(dryRun.deleted).toBe(0);
+    expect(dryRun.wouldDelete).toBe(2);
+    expect(dryRun.propagation.targetIds.sort()).toEqual(
+      [first.memory.id, second.memory.id].sort(),
+    );
+    expect(
+      (await kv.get<{ lifecycleState?: string }>("mem:memories", first.memory.id))
+        ?.lifecycleState,
+    ).toBe("active");
+
+    const deleted = JSON.parse((await handleToolCall(
+      "memory_delete",
+      {
+        sourceObservationId: "obs_local_delete",
+        project: "billing",
+        agentId: "codex-a",
+      },
+      kv,
+    )).content[0].text);
+
+    expect(deleted.success).toBe(true);
+    expect(deleted.deleted).toBe(2);
+    expect(deleted.propagation.deletedIds.sort()).toEqual(
+      [first.memory.id, second.memory.id].sort(),
+    );
+    expect(
+      (await kv.get<{ lifecycleState?: string }>("mem:memories", first.memory.id))
+        ?.lifecycleState,
+    ).toBe("tombstoned");
+    expect(
+      (await kv.get<{ lifecycleState?: string }>("mem:memories", second.memory.id))
+        ?.lifecycleState,
+    ).toBe("tombstoned");
+    expect(
+      (await kv.get<{ lifecycleState?: string }>("mem:memories", other.memory.id))
+        ?.lifecycleState,
+    ).toBe("active");
   });
 
   it("memory_save without persist path does not call writeFileSync", async () => {
@@ -220,6 +363,86 @@ describe("handleToolCall", () => {
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.results).toHaveLength(1);
     expect(parsed.results[0].content).toBe("TypeScript is great");
+  });
+
+  it("memory_save preserves agent scope and memory_recall applies local hard filters", async () => {
+    const kv = new InMemoryKV();
+    await handleToolCall(
+      "memory_save",
+      {
+        content: "Scoped billing retry policy",
+        project: "billing",
+        agentId: "codex-a",
+      },
+      kv,
+    );
+    await handleToolCall(
+      "memory_save",
+      {
+        content: "Scoped billing retry policy from another agent",
+        project: "billing",
+        agentId: "codex-b",
+      },
+      kv,
+    );
+
+    const scoped = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_recall",
+          { query: "scoped billing retry", project: "billing", agentId: "codex-a" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    const cwdScoped = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_recall",
+          { query: "scoped billing retry", cwd: "C:\\other\\repo" },
+          kv,
+        )
+      ).content[0].text,
+    );
+
+    expect(scoped.results).toHaveLength(1);
+    expect(scoped.results[0].agentId).toBe("codex-a");
+    expect(cwdScoped.results).toEqual([]);
+  });
+
+  it("memory_save uses env AGENT_ID and recall fails closed in isolated fallback mode", async () => {
+    const kv = new InMemoryKV();
+    process.env["AGENTMEMORY_AGENT_SCOPE"] = "isolated";
+    process.env["AGENT_ID"] = "codex-env";
+
+    const saved = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_save",
+          { content: "Env scoped standalone memory" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(saved.memory.agentId).toBe("codex-env");
+
+    const recall = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_recall",
+          { query: "env scoped standalone" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(recall.results.map((memory: { id: string }) => memory.id)).toEqual([
+      saved.saved,
+    ]);
+
+    delete process.env["AGENT_ID"];
+    await expect(
+      handleToolCall("memory_recall", { query: "env scoped standalone" }, kv),
+    ).rejects.toThrow("AGENTMEMORY_AGENT_SCOPE=isolated");
   });
 
   it("memory_save accepts concepts/files as arrays (plugin skill format, #139)", async () => {
@@ -337,6 +560,127 @@ describe("handleToolCall", () => {
     expect(byConcept.results).toHaveLength(1);
   });
 
+  it("local fallback redacts and quarantines sensitive saved memories", async () => {
+    const kv = new InMemoryKV();
+    const secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJ";
+    const saved = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_save",
+          {
+            content: `do not store ${secret}`,
+            concepts: [secret],
+            files: [`src/${secret}.ts`],
+          },
+          kv,
+        )
+      ).content[0].text,
+    );
+
+    expect(saved.memory.lifecycleState).toBe("quarantined");
+    expect(JSON.stringify(saved)).not.toContain(secret);
+
+    const recall = JSON.parse(
+      (
+        await handleToolCall("memory_smart_search", { query: "store" }, kv)
+      ).content[0].text,
+    );
+    expect(recall.results).toHaveLength(0);
+
+    const inspect = JSON.parse(
+      (
+        await handleToolCall("memory_inspect", { memoryId: saved.saved }, kv)
+      ).content[0].text,
+    );
+    expect(JSON.stringify(inspect)).not.toContain(secret);
+    expect(inspect.searchable).toBe(false);
+
+    const queue = JSON.parse(
+      (await handleToolCall("memory_review_queue", {}, kv)).content[0].text,
+    );
+    expect(queue.queue[0].memory.id).toBe(saved.saved);
+    expect(queue.queue[0].reasons).toContain("sensitive_quarantine");
+  });
+
+  it("local fallback supports lifecycle, explain, history, and ledger tools", async () => {
+    const kv = new InMemoryKV();
+    const saved = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_save",
+          {
+            content: "Use vitest for local MCP lifecycle tests",
+            project: "agentmemory",
+          },
+          kv,
+        )
+      ).content[0].text,
+    );
+
+    const updated = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_update",
+          {
+            memoryId: saved.saved,
+            content: "Use vitest for local MCP lifecycle and ledger tests",
+            reason: "tighten wording",
+          },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(updated.memory.version).toBe(2);
+
+    const explain = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_search_explain",
+          { query: "ledger", project: "agentmemory" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(explain.results).toHaveLength(1);
+    expect(explain.explain.candidateCounts.returned).toBe(1);
+
+    await handleToolCall("memory_expire", { memoryId: saved.saved }, kv);
+    const afterExpire = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_search_explain",
+          { query: "ledger", project: "agentmemory" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(afterExpire.results).toHaveLength(0);
+
+    await handleToolCall("memory_restore", { memoryId: saved.saved }, kv);
+    const history = JSON.parse(
+      (
+        await handleToolCall("memory_history", { memoryId: saved.saved }, kv)
+      ).content[0].text,
+    );
+    expect(history.history.map((row: { action: string }) => row.action)).toEqual([
+      "create",
+      "update",
+      "expire",
+      "restore",
+    ]);
+
+    const ledger = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_ledger",
+          { project: "agentmemory", state: "all" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(ledger.rows[0].id).toBe(saved.saved);
+  });
+
   it("memory_sessions honours the limit arg (#139)", async () => {
     const kv = new InMemoryKV();
     for (let i = 0; i < 5; i++) {
@@ -378,6 +722,62 @@ describe("handleToolCall", () => {
       kv,
     );
     expect(JSON.parse(huge.content[0].text).results).toHaveLength(100);
+  });
+
+  it("memory_smart_search local fallback honors retrievalMode and asOf filters", async () => {
+    const kv = new InMemoryKV();
+    await kv.set("mem:memories", "mem_current_policy", {
+      id: "mem_current_policy",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      type: "fact",
+      title: "Billing policy",
+      content: "Billing policy uses invoice holds.",
+      concepts: ["billing", "policy"],
+      files: ["src/billing.ts"],
+      sessionIds: [],
+      validFrom: "2026-01-01T00:00:00.000Z",
+      validUntil: "2026-03-01T00:00:00.000Z",
+      isLatest: true,
+    });
+    await kv.set("mem:memories", "mem_future_policy", {
+      id: "mem_future_policy",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      type: "fact",
+      title: "Billing policy future",
+      content: "Billing policy starts later.",
+      concepts: ["billing", "policy"],
+      files: ["src/billing.ts"],
+      sessionIds: [],
+      validFrom: "2026-03-01T00:00:00.000Z",
+      isLatest: true,
+    });
+
+    const result = await handleToolCall(
+      "memory_smart_search",
+      {
+        query: "billing policy",
+        retrievalMode: "as_of",
+        asOf: "2026-02-01T00:00:00.000Z",
+        explain: true,
+      },
+      kv,
+    );
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.results.map((memory: { id: string }) => memory.id)).toEqual([
+      "mem_current_policy",
+    ]);
+    expect(parsed.queryPlan).toMatchObject({
+      retrievalMode: "as_of",
+      hardFilters: {
+        temporalValidity: {
+          source: "asOf",
+          validAt: "2026-02-01T00:00:00.000Z",
+        },
+      },
+    });
   });
 
   it("memory_governance_delete removes memories by id array (#139)", async () => {

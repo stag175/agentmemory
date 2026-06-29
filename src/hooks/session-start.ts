@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { buildLineage, eventFields } from "./_lineage.js";
 import { resolveProject } from "./_project.js";
 
 // Inlined from ./sdk-guard so each hook bundles to a single self-contained
@@ -54,12 +55,24 @@ async function main() {
     `ses_${Date.now().toString(36)}`;
   const cwd = (data.cwd as string) || process.cwd();
   const project = resolveProject(data.cwd as string | undefined);
+  const lineage = buildLineage(data, "session_start", {
+    sessionId,
+    cwd,
+    project,
+  });
 
   const url = `${REST_URL}/agentmemory/session/start`;
   const init: RequestInit = {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ sessionId, project, cwd }),
+    body: JSON.stringify({
+      ...eventFields(lineage),
+      sessionId,
+      project,
+      cwd,
+      captureSource: "automatic_hook",
+      hookType: "session_start",
+    }),
   };
 
   if (!INJECT_CONTEXT) {

@@ -3,6 +3,7 @@ import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
 import type { Signal } from "../types.js";
 import { recordAudit } from "./audit.js";
+import { safeRecordAgentEvent } from "./agent-events.js";
 
 export function registerSignalsFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::signal-send", 
@@ -51,6 +52,25 @@ export function registerSignalsFunction(sdk: ISdk, kv: StateKV): void {
         from: data.from,
         to: data.to,
         type: signal.type,
+      });
+      await safeRecordAgentEvent(kv, {
+        type: signal.type === "handoff" ? "handoff_sent" : "signal_sent",
+        timestamp: signal.createdAt,
+        agentId: signal.from,
+        fromAgentId: signal.from,
+        toAgentId: signal.to,
+        handoffFrom: signal.type === "handoff" ? signal.from : undefined,
+        handoffTo: signal.type === "handoff" ? signal.to : undefined,
+        functionId: "mem::signal-send",
+        targetIds: [signal.id],
+        signalIds: [signal.id],
+        correlationId: signal.threadId,
+        parentEventId: signal.replyTo,
+        metadata: {
+          type: signal.type,
+          threadId: signal.threadId,
+          replyTo: signal.replyTo,
+        },
       });
 
       return { success: true, signal };
@@ -109,6 +129,22 @@ export function registerSignalsFunction(sdk: ISdk, kv: StateKV): void {
             afterReadAt: sig.readAt,
           });
           await kv.set(KV.signals, sig.id, sig);
+          await safeRecordAgentEvent(kv, {
+            type: "signal_read",
+            timestamp: sig.readAt,
+            agentId: data.agentId,
+            fromAgentId: sig.from,
+            toAgentId: sig.to,
+            functionId: "mem::signal-read",
+            targetIds: [sig.id],
+            signalIds: [sig.id],
+            correlationId: sig.threadId,
+            metadata: {
+              type: sig.type,
+              beforeReadAt,
+              afterReadAt: sig.readAt,
+            },
+          });
         }
       }
 

@@ -80,7 +80,7 @@ agentmemory connect <agent>
 
 If you cannot tell which agent you are, default to `claude-code`. After wiring, restart the agent or run its MCP reload command (for example `/mcp` in Claude Code) so it picks up the server.
 
-Expect: the agent now lists agentmemory's tools. With the server running you should see the full set of 53 tools (for example `memory_save`, `memory_smart_search`, `memory_sessions`). If you see only 7 tools, the MCP shim could not reach a server, see Troubleshooting.
+Expect: the agent now lists agentmemory's tools. With the server running you should see the full set of 65 tools (for example `memory_save`, `memory_create`, `memory_smart_search`, `memory_sessions`). If you see only 19 tools, the MCP shim could not reach a server, see Troubleshooting.
 
 ## 6. Install native skills
 
@@ -128,7 +128,7 @@ These are off by default because they spend tokens. Enable them only if the user
 
 ## Tool surface
 
-The MCP server exposes 53 tools by default (`--tools all`). Use `--tools core` (or `AGENTMEMORY_TOOLS=core`) for a lean 8-tool set on hosts with tight tool limits. The 8 core tools cover save, recall, consolidate, smart search, sessions, diagnose, lesson save, and reflect.
+The MCP server exposes 65 tools by default (`--tools all`). Use `--tools core` (or `AGENTMEMORY_TOOLS=core`) for a lean 8-tool set on hosts with tight tool limits. The 8 core tools cover save, recall, consolidate, smart search, sessions, diagnose, lesson save, and reflect.
 
 ## Lifecycle commands
 
@@ -147,7 +147,7 @@ The MCP server exposes 53 tools by default (`--tools all`). Use `--tools core` (
 - Port already in use: another instance or process holds 3111. Stop it, or relocate with `agentmemory --instance 1`.
 - Server starts but `livez` never returns 200: re-run with `agentmemory --verbose` to see engine stderr.
 - Engine version warning on start: harmless. agentmemory uses its own pinned engine in `~/.agentmemory/bin` regardless of any `iii` on `PATH`. Set `AGENTMEMORY_III_VERSION` only to override deliberately.
-- Only 7 tools visible in the agent: the MCP shim is in local fallback because it could not reach a server. Start `npx @agentmemory/agentmemory` and ensure `AGENTMEMORY_URL` points at it (default `http://localhost:3111`), then reload MCP.
+- Only 19 tools visible in the agent: the MCP shim is in local fallback because it could not reach a server. Start `npx @agentmemory/agentmemory` and ensure `AGENTMEMORY_URL` points at it (default `http://localhost:3111`), then reload MCP.
 - Windows: use WSL2 for the path above. Native Windows runs the server but `connect` and the automated engine install are not supported.
 
 ## Report success

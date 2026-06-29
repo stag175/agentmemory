@@ -13,6 +13,7 @@
 
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
+import type { ConnectManifest } from "./connect/types.js";
 
 export type RemovePlanItem = {
   /** Stable id, used in tests and CLI output. */
@@ -48,22 +49,6 @@ export type RemoveContext = {
   localBinIiiVersion: string | null;
   /** Loaded connect manifest, or null if missing. */
   connectManifest: ConnectManifest | null;
-};
-
-/**
- * The `agentmemory connect` PR writes this manifest at
- * ~/.agentmemory/backups/connect-manifest.json. We tolerate it being absent
- * (older versions, fresh installs) by treating it as `{ installed: [] }`.
- */
-export type ConnectManifest = {
-  installed: Array<{
-    /** Target path the connect command wrote (symlink or file). */
-    target: string;
-    /** Agent label, e.g. "claude-code", "cursor". */
-    agent?: string;
-    /** Whether this was a symlink (true) or copy (false). */
-    symlink?: boolean;
-  }>;
 };
 
 export function pidfilePath(home: string): string {

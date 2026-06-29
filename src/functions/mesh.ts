@@ -350,7 +350,7 @@ export function registerMeshFunction(
           await withKeyedLock(`mem:relation:${relKey}`, async () => {
             const existing = await kv.get<MemoryRelation>(KV.relations, relKey);
             if (!existing) {
-              await kv.set(KV.relations, relKey, rel);
+              await kv.set(KV.relations, relKey, { ...rel, id: relKey });
               await recordAudit(kv, "mesh_sync", "mem::mesh-receive", [relKey], {
                 action: "mesh.receive.relation",
                 accepted: true,
@@ -476,7 +476,7 @@ async function applySyncData(
       const wrote = await withKeyedLock(`mem:relation:${relKey}`, async () => {
         const existing = await kv.get<MemoryRelation>(KV.relations, relKey);
         if (!existing) {
-          await kv.set(KV.relations, relKey, rel);
+          await kv.set(KV.relations, relKey, { ...rel, id: relKey });
           return true;
         }
         return false;

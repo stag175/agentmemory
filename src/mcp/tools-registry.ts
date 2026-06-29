@@ -130,6 +130,24 @@ export const CORE_TOOLS: McpToolDef[] = [
           description: "Comma-separated observation IDs to expand",
         },
         limit: { type: "number", description: "Max results (default 10)" },
+        searchMode: { type: "string", description: "Retrieval mode: fast, balanced, or deep" },
+        retrievalMode: { type: "string", description: "Plan mode: basic, local_graph, global_community, drift, or as_of" },
+        project: { type: "string", description: "Project scope filter" },
+        cwd: { type: "string", description: "Current working directory hard filter" },
+        files: { type: "string", description: "Comma-separated file filters" },
+        file: { type: "string", description: "Single file filter alias" },
+        filePath: { type: "string", description: "Single file path filter alias" },
+        branch: { type: "string", description: "Branch metadata filter" },
+        commit: { type: "string", description: "Commit metadata filter" },
+        memoryTier: { type: "string", description: "episode, semantic_fact, procedure, reflection, or artifact_index" },
+        privacyScope: { type: "string", description: "user, project, team, agent, or temporary" },
+        asOf: { type: "string", description: "ISO timestamp for temporal/as_of replay filters" },
+        validAt: { type: "string", description: "ISO timestamp alias for temporal validity filtering" },
+        agentId: { type: "string", description: "Agent scope filter; pass * to opt out when supported" },
+        sessionId: { type: "string", description: "Session anchor for retrieval diagnostics" },
+        explain: { type: "boolean", description: "Include query-plan and scoring explanation when supported" },
+        includeReport: { type: "boolean", description: "Include context budget/report metadata when supported" },
+        tokenBudget: { type: "number", description: "Optional token budget for packed context output" },
       },
       required: ["query"],
     },
@@ -666,7 +684,7 @@ export const V051_TOOLS: McpToolDef[] = [
   {
     name: "memory_diagnose",
     description:
-      "Run health checks across all subsystems (actions, leases, sentinels, sketches, signals, sessions, memories, mesh). Identifies stuck, orphaned, and inconsistent state.",
+      "Run health checks across all subsystems (actions, leases, sentinels, sketches, signals, sessions, memories, mesh, security). Identifies stuck, orphaned, inconsistent, and unwired security state.",
     inputSchema: {
       type: "object",
       properties: {
@@ -853,6 +871,221 @@ export const V073_TOOLS: McpToolDef[] = [
   },
 ];
 
+export const ROADMAP_TOOLS: McpToolDef[] = [
+  {
+    name: "memory_create",
+    description:
+      "Explicitly create a memory through the lifecycle API while reusing remember write-gate, provenance, and history handling.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "Memory content to create" },
+        type: { type: "string", description: "pattern, preference, architecture, bug, workflow, or fact" },
+        concepts: { type: "string", description: "Comma-separated concepts" },
+        files: { type: "string", description: "Comma-separated file paths" },
+        ttlDays: { type: "number", description: "Optional retention TTL in days" },
+        sourceObservationIds: { type: "string", description: "Comma-separated source observation IDs" },
+        project: { type: "string", description: "Project scope" },
+        lane: { type: "string", description: "episode, semantic_fact, procedure, reflection, or artifact_index" },
+        confidence: { type: "number", description: "Confidence from 0 to 1" },
+        privacyScope: { type: "string", description: "user, project, team, agent, or temporary" },
+        ownerId: { type: "string", description: "Owner identifier" },
+        branch: { type: "string", description: "Source branch metadata" },
+        commit: { type: "string", description: "Source commit metadata" },
+        sourceHash: { type: "string", description: "Content-addressed source hash" },
+        sourceType: { type: "string", description: "manual, observation, import, or another source type" },
+        sourceUri: { type: "string", description: "Source URI or path" },
+        reviewState: { type: "string", description: "unreviewed, reviewed, needs_review, trusted, or rejected" },
+        agentId: { type: "string", description: "Agent scope for the created memory" },
+        requireGatePass: { type: "boolean", description: "Reject the create if the write gate does not pass" },
+      },
+      required: ["content"],
+    },
+  },
+  {
+    name: "memory_inspect",
+    description:
+      "Inspect one memory with lifecycle state, source card, revision history, and whether it is currently searchable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memoryId: { type: "string", description: "Memory ID to inspect" },
+      },
+      required: ["memoryId"],
+    },
+  },
+  {
+    name: "memory_history",
+    description:
+      "Return the revision history for a memory, including updates, expiration, archive, restore, and tombstone events.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memoryId: { type: "string", description: "Memory ID to inspect" },
+      },
+      required: ["memoryId"],
+    },
+  },
+  {
+    name: "memory_update",
+    description:
+      "Edit a memory in place while preserving a revision entry and refreshing search indexes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memoryId: { type: "string", description: "Memory ID to update" },
+        content: { type: "string", description: "Replacement memory content" },
+        title: { type: "string", description: "Replacement title" },
+        concepts: { type: "string", description: "Comma-separated concepts" },
+        files: { type: "string", description: "Comma-separated file paths" },
+        confidence: { type: "number", description: "Confidence from 0 to 1" },
+        strength: { type: "number", description: "Strength from 0 to 10" },
+        lane: { type: "string", description: "episode, semantic_fact, procedure, reflection, or artifact_index" },
+        reviewState: { type: "string", description: "unreviewed, reviewed, needs_review, trusted, or rejected" },
+        privacyScope: { type: "string", description: "user, project, team, agent, or temporary" },
+        reason: { type: "string", description: "Why the edit was made" },
+      },
+      required: ["memoryId"],
+    },
+  },
+  {
+    name: "memory_expire",
+    description:
+      "Expire a memory so it stops being retrieved while retaining an auditable revision trail.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memoryId: { type: "string", description: "Memory ID to expire" },
+        expiresAt: { type: "string", description: "Optional ISO expiration timestamp; defaults to now" },
+        reason: { type: "string", description: "Why the memory expired" },
+      },
+      required: ["memoryId"],
+    },
+  },
+  {
+    name: "memory_archive",
+    description:
+      "Archive a memory so it remains inspectable but no longer participates in search.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memoryId: { type: "string", description: "Memory ID to archive" },
+        reason: { type: "string", description: "Why the memory was archived" },
+      },
+      required: ["memoryId"],
+    },
+  },
+  {
+    name: "memory_restore",
+    description:
+      "Restore an archived, expired, or tombstoned memory from its revision trail.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memoryId: { type: "string", description: "Memory ID to restore" },
+        reason: { type: "string", description: "Why the memory was restored" },
+      },
+      required: ["memoryId"],
+    },
+  },
+  {
+    name: "memory_delete",
+    description:
+      "Tombstone or hard-delete a memory, or propagate deletion to memories linked to a source selector.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memoryId: { type: "string", description: "Memory ID to delete" },
+        sourceObservationId: { type: "string", description: "Source observation ID whose linked memories should be deleted" },
+        sourceHash: { type: "string", description: "Source hash whose linked memories should be deleted" },
+        sourceUri: { type: "string", description: "Source URI whose linked memories should be deleted" },
+        project: { type: "string", description: "Project scope guard for source-linked deletion" },
+        agentId: { type: "string", description: "Agent scope guard for source-linked deletion" },
+        mode: { type: "string", description: "tombstone (default) or hard" },
+        dryRun: { type: "boolean", description: "Return the deletion propagation report without mutating state" },
+        reason: { type: "string", description: "Why the memory was deleted" },
+      },
+    },
+  },
+  {
+    name: "memory_search_explain",
+    description:
+      "Run smart search and include the query plan, hard filters, candidate counts, score components, and why each result appeared.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        limit: { type: "number", description: "Max results (default 10)" },
+        project: { type: "string", description: "Project scope filter" },
+        cwd: { type: "string", description: "Current working directory hard filter" },
+        searchMode: { type: "string", description: "fast, balanced, or deep" },
+        retrievalMode: { type: "string", description: "basic, local_graph, global_community, drift, or as_of" },
+        files: { type: "string", description: "Comma-separated file filters" },
+        file: { type: "string", description: "Single file filter alias" },
+        filePath: { type: "string", description: "Single file path filter alias" },
+        branch: { type: "string", description: "Branch metadata filter" },
+        commit: { type: "string", description: "Commit metadata filter" },
+        memoryTier: { type: "string", description: "episode, semantic_fact, procedure, reflection, or artifact_index" },
+        privacyScope: { type: "string", description: "user, project, team, agent, or temporary" },
+        asOf: { type: "string", description: "ISO timestamp for temporal/as_of replay filters" },
+        validAt: { type: "string", description: "ISO timestamp alias for temporal validity filtering" },
+        agentId: { type: "string", description: "Agent scope filter; pass * to opt out when supported" },
+        sessionId: { type: "string", description: "Session anchor for retrieval diagnostics" },
+        includeReport: { type: "boolean", description: "Include context budget/report metadata when supported" },
+        tokenBudget: { type: "number", description: "Optional token budget for packed context output" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "memory_rules_resolve",
+    description:
+      "Resolve workspace instruction files such as AGENTS.md, CLAUDE.md, Cursor rules, and custom rule globs into normalized precedence-ordered records.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceRoot: { type: "string", description: "Absolute workspace root to scan; defaults to the server cwd" },
+        cwd: { type: "string", description: "Absolute cwd alias used when workspaceRoot is omitted" },
+        instructionGlobs: { type: "string", description: "Comma-separated relative custom rule globs, for example **/INSTRUCTIONS.md" },
+        ignoreDirectories: { type: "string", description: "Comma-separated directory names to skip in addition to defaults" },
+        maxDepth: { type: "number", description: "Maximum directory depth to scan (default 10, max 50)" },
+        maxBytes: { type: "number", description: "Maximum bytes per rule file (default 262144, max 1048576)" },
+        includeContent: { type: "boolean", description: "Set true to include rule file content; false returns hashes and metadata only" },
+      },
+    },
+  },
+  {
+    name: "memory_ledger",
+    description:
+      "List memories as a Memory Ledger with type, scope, lifecycle, review state, source counts, last use, and optional source cards.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project filter" },
+        state: { type: "string", description: "active, archived, expired, tombstoned, deleted, superseded, or all" },
+        type: { type: "string", description: "Memory type filter" },
+        lane: { type: "string", description: "Memory lane filter" },
+        reviewState: { type: "string", description: "Review state filter" },
+        includeSourceCards: { type: "string", description: "Set to true to include source cards" },
+        limit: { type: "number", description: "Max rows (default 100)" },
+        offset: { type: "number", description: "Pagination offset" },
+      },
+    },
+  },
+  {
+    name: "memory_review_queue",
+    description:
+      "List memories that need curation because they are unreviewed, low-confidence, source-light, legacy, or often retrieved.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project filter" },
+        limit: { type: "number", description: "Max rows (default 50)" },
+      },
+    },
+  },
+];
+
 export const V010_SLOTS_TOOLS: McpToolDef[] = [
   {
     name: "memory_slot_list",
@@ -945,13 +1178,14 @@ export function getAllTools(): McpToolDef[] {
     ...V061_TOOLS,
     ...V070_TOOLS,
     ...V073_TOOLS,
+    ...ROADMAP_TOOLS,
     ...V010_SLOTS_TOOLS,
   ];
 }
 
 // default switched from "core" (8 essential tools) to "all"
-// (full 53-tool surface). README and plugin manifests have always
-// advertised 53 tools "in proxy mode"; the old default left OpenCode /
+// (full tool surface). README and plugin manifests advertise the full
+// proxy-mode surface; the old default left OpenCode /
 // Claude Code users seeing 8 with no indication the other tools existed.
 // Users who want the lean essentials can still set AGENTMEMORY_TOOLS=core.
 export function getVisibleTools(): McpToolDef[] {

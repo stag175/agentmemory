@@ -5,11 +5,15 @@ import { StateKV } from "../state/kv.js";
 import { stripPrivateData } from "./privacy.js";
 import { DedupMap } from "./dedup.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import { isAutoCompressEnabled } from "../config.js";
+import {
+  getAgentId,
+  getAutomaticCaptureControl,
+  isAutoCompressEnabled,
+} from "../config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
-import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
+import { safeRecordAgentEvent } from "./agent-events.js";
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -55,6 +59,22 @@ export function registerObserveFunction(
           success: false,
           error:
             "Invalid payload: sessionId, hookType, and timestamp are required",
+        };
+      }
+
+      const captureControl = getAutomaticCaptureControl();
+      if (!captureControl.enabled) {
+        logger.info("Observation capture skipped", {
+          sessionId: payload.sessionId,
+          hook: payload.hookType,
+          reason: captureControl.reason,
+          source: captureControl.source,
+        });
+        return {
+          success: true,
+          skipped: true,
+          reason: captureControl.reason,
+          source: captureControl.source,
         };
       }
 
@@ -272,6 +292,17 @@ export function registerObserveFunction(
               ? { firstPrompt: trimmedPrompt }
               : {}),
           });
+          await safeRecordAgentEvent(kv, {
+            type: "session_started",
+            timestamp: payload.timestamp ?? ts,
+            sessionId: payload.sessionId,
+            project: payload.project,
+            cwd: payload.cwd,
+            agentId: inheritedAgentId,
+            functionId: "mem::observe",
+            targetIds: [payload.sessionId],
+            metadata: { implicit: true, hookType: payload.hookType },
+          });
         }
 
         // Per-observation LLM compression is opt-in as of 0.8.8 (#138).
@@ -325,6 +356,24 @@ export function registerObserveFunction(
             },
           });
         }
+
+        await safeRecordAgentEvent(kv, {
+          type: "observation_recorded",
+          timestamp: payload.timestamp,
+          sessionId: payload.sessionId,
+          project: payload.project,
+          cwd: payload.cwd,
+          agentId: raw.agentId,
+          functionId: "mem::observe",
+          targetIds: [obsId],
+          observationIds: [obsId],
+          metadata: {
+            hookType: payload.hookType,
+            toolName: raw.toolName,
+            modality: raw.modality ?? "text",
+            compression: isAutoCompressEnabled() ? "llm" : "synthetic",
+          },
+        });
 
         logger.info("Observation captured", {
           obsId,

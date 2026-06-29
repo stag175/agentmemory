@@ -7,11 +7,14 @@ import {
   type ChildProcess,
 } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -24,9 +27,18 @@ import * as p from "@clack/prompts";
 import { generateId } from "./state/schema.js";
 import {
   buildDiagnostics,
+  buildDiagnoseCliPlan,
+  buildVersionsReport,
+  DIAGNOSE_CLI_HELP,
   dryRunPlan,
+  extractReleaseGateReport,
+  formatDiagnoseJson,
+  formatDiagnoseText,
+  formatVersionsReport,
   parseEnvFile,
+  releaseGateExitCode,
   type Diagnostic,
+  type DiagnoseCliPlan,
   type DiagnosticFixResult,
   type DoctorContext,
   type DoctorEffects,
@@ -35,12 +47,22 @@ import {
   buildRemovePlan,
   formatPlan,
   legacyLocalBinIii,
-  type ConnectManifest,
   type RemoveOptions,
 } from "./cli/remove-plan.js";
+import {
+  applyConnectRollbackPlan,
+  buildConnectRollbackPlan,
+  formatConnectRollbackPlan,
+  markConnectRollbackResults,
+  readConnectManifest,
+  writeConnectManifest,
+  type ConnectRollbackPathKind,
+} from "./cli/connect/util.js";
 import { renderSplash } from "./cli/splash.js";
 import { isFirstRun, readPrefs, resetPrefs, writePrefs } from "./cli/preferences.js";
 import { runOnboarding } from "./cli/onboarding.js";
+import { runMemoryCommand } from "./cli/memory-lifecycle.js";
+import { classifyInstallMethod, formatInstallMethod } from "./cli/install-method.js";
 import { setBootVerbose } from "./logger.js";
 import { VERSION } from "./version.js";
 import { getAllTools, ESSENTIAL_TOOLS } from "./mcp/tools-registry.js";
@@ -150,7 +172,14 @@ Commands:
                      (${wrapList(knownAgents(), 21)}).
                      No arg = interactive picker. --all wires every detected agent.
                      --dry-run shows what would change. --force re-installs.
+                     connect frameworks lists read-only runtime setup helpers.
+  rollback --last    Restore the most recent connect backup(s). Add --dry-run to preview.
   status             Show connection status, memory count, flags, and health
+  diagnose           Run daemon diagnostics. --release-gate emits the release gate.
+                     Add --json for machine-readable output.
+  versions           Print local CLI/runtime versions. Add --json for automation.
+  memory <cmd>       Inspect, update, delete, ledger, review, and explain memories
+                     (try: agentmemory memory help)
   doctor             Interactive diagnostic + fixer. [F]ix · [S]kip · [?]more · [Q]uit
                      --all: apply every fix without prompting (CI)
                      --dry-run: show what each fix would do, don't execute
@@ -197,6 +226,8 @@ Quick start:
   npx @agentmemory/agentmemory          # start with local iii-engine or Docker
   npx @agentmemory/agentmemory demo     # see semantic recall in 30 seconds
   npx @agentmemory/agentmemory doctor   # diagnose config + feature flags
+  npx @agentmemory/agentmemory diagnose --release-gate --json
+  npx @agentmemory/agentmemory versions --json
   npx @agentmemory/agentmemory status   # health + memory count + flags
   npx @agentmemory/agentmemory upgrade  # upgrade agentmemory + iii runtime
   npx @agentmemory/agentmemory mcp      # standalone MCP server (no engine)
@@ -1332,8 +1363,50 @@ async function apiFetch<T = unknown>(base: string, path: string, timeoutMs = 500
   }
 }
 
+type ApiJsonResult<T> =
+  | { ok: true; status: number; data: T }
+  | { ok: false; status?: number; data?: T; error: string };
+
+async function apiJson<T = unknown>(
+  base: string,
+  path: string,
+  options: {
+    method?: "GET" | "POST";
+    body?: Record<string, unknown>;
+    timeoutMs?: number;
+  } = {},
+): Promise<ApiJsonResult<T>> {
+  try {
+    const method = options.method ?? "GET";
+    const headers: Record<string, string> = {};
+    const secret = process.env["AGENTMEMORY_SECRET"];
+    if (secret) headers["Authorization"] = `Bearer ${secret}`;
+    if (method === "POST") headers["Content-Type"] = "application/json";
+    const res = await fetch(`${base}/agentmemory/${path}`, {
+      method,
+      signal: AbortSignal.timeout(options.timeoutMs ?? 5000),
+      headers,
+      ...(method === "POST" && { body: JSON.stringify(options.body ?? {}) }),
+    });
+    const text = await res.text();
+    const data = text ? (JSON.parse(text) as T) : (null as T);
+    if (!res.ok) {
+      const error =
+        data && typeof data === "object" && "error" in data
+          ? String((data as { error?: unknown }).error)
+          : `${res.status} ${res.statusText}`;
+      return { ok: false, status: res.status, data, error };
+    }
+    return { ok: true, status: res.status, data };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 async function runStatus() {
-  const port = getRestPort();
   const base = getBaseUrl();
   p.intro("agentmemory status");
 
@@ -1427,6 +1500,100 @@ async function runStatus() {
     p.log.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
+}
+
+async function runDiagnoseCmd(): Promise<void> {
+  const tail = args.slice(1);
+  if (tail[0] === "help") {
+    process.stdout.write(DIAGNOSE_CLI_HELP);
+    return;
+  }
+
+  let plan: DiagnoseCliPlan;
+  try {
+    plan = buildDiagnoseCliPlan(tail);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (tail.includes("--json")) {
+      process.stdout.write(`${JSON.stringify({ success: false, error: message }, null, 2)}\n`);
+    } else {
+      p.log.error(message);
+    }
+    process.exit(2);
+  }
+
+  if (plan.help) {
+    process.stdout.write(DIAGNOSE_CLI_HELP);
+    return;
+  }
+
+  const result = await apiJson<Record<string, unknown>>(getBaseUrl(), "diagnostics", {
+    method: "POST",
+    body: plan.payload,
+    timeoutMs: 10000,
+  });
+
+  if (!result.ok) {
+    if (plan.json) {
+      process.stdout.write(
+        `${JSON.stringify({ success: false, error: result.error, status: result.status }, null, 2)}\n`,
+      );
+    } else {
+      p.log.error(`Diagnostics unavailable: ${result.error}`);
+      p.log.info("Start with: npx @agentmemory/agentmemory");
+    }
+    process.exit(1);
+  }
+
+  if (plan.json) {
+    process.stdout.write(formatDiagnoseJson(result.data, plan.releaseGate));
+  } else {
+    p.intro("agentmemory diagnose");
+    p.note(
+      formatDiagnoseText(result.data, plan.releaseGate),
+      plan.releaseGate ? "release gate" : "diagnostics",
+    );
+  }
+
+  if (plan.releaseGate) {
+    process.exitCode = releaseGateExitCode(extractReleaseGateReport(result.data));
+  }
+}
+
+async function runVersionsCmd(): Promise<void> {
+  const tail = args.slice(1);
+  const json = tail.includes("--json");
+  const health = await apiJson<Record<string, unknown>>(getBaseUrl(), "health", {
+    timeoutMs: 1500,
+  });
+  const report = buildVersionsReport({
+    agentmemoryVersion: VERSION,
+    nodeVersion: process.version,
+    platform: platform(),
+    arch: process.arch,
+    baseUrl: getBaseUrl(),
+    pinnedIiiVersion: IIPINNED_VERSION,
+    iiiVersionOverridden: Boolean(process.env["AGENTMEMORY_III_VERSION"]),
+    allToolsCount: ALL_TOOLS_COUNT,
+    coreToolsCount: CORE_TOOLS_COUNT,
+    restHealth: health.data,
+    restError: health.ok ? undefined : health.error,
+  });
+  const formatted = formatVersionsReport(report, json);
+  if (json) {
+    process.stdout.write(formatted);
+  } else {
+    p.note(formatted, "versions");
+  }
+}
+
+async function runMemoryCmd(): Promise<void> {
+  await runMemoryCommand(args.slice(1), {
+    baseUrl: getBaseUrl(),
+    env: process.env,
+    fetchImpl: fetch,
+    stdout: process.stdout,
+  });
 }
 
 type DoctorCheck = { name: string; ok: boolean; hint?: string };
@@ -2287,14 +2454,21 @@ async function runUpgrade() {
   p.intro("agentmemory upgrade");
 
   const cwd = process.cwd();
-  const hasPackageJson = existsSync(join(cwd, "package.json"));
-  const hasPnpmLock = existsSync(join(cwd, "pnpm-lock.yaml"));
+  const installMethod = classifyInstallMethod({
+    cwd,
+    cliDir: __dirname,
+    env: process.env,
+    argv: process.argv,
+    execPath: process.execPath,
+    platform: process.platform,
+  });
 
   const pnpmBin = whichBinary("pnpm");
   const npmBin = whichBinary("npm");
   const dockerBin = whichBinary("docker");
 
   p.log.info(`Working directory: ${cwd}`);
+  p.log.info(`Install source: ${formatInstallMethod(installMethod)}`);
   const requireSuccess = (ok: boolean, label: string): void => {
     if (!ok) {
       p.log.error(`Upgrade aborted: ${label} failed.`);
@@ -2302,31 +2476,59 @@ async function runUpgrade() {
     }
   };
 
-  if (hasPackageJson) {
+  if (installMethod.plan === "source") {
+    const packageRoot = installMethod.packageRoot ?? cwd;
+    const hasPnpmLock = existsSync(join(packageRoot, "pnpm-lock.yaml"));
     const usePnpm = !!pnpmBin && hasPnpmLock;
     if (usePnpm && pnpmBin) {
       const installOk = runCommand(pnpmBin, ["install"], {
         label: "Refreshing dependencies (pnpm install)",
+        cwd: packageRoot,
       });
       requireSuccess(installOk, "pnpm install");
       runCommand(pnpmBin, ["up", "iii-sdk@0.11.2"], {
         label: "Pinning iii-sdk@0.11.2",
+        cwd: packageRoot,
         optional: true,
       });
+      const buildOk = runCommand(pnpmBin, ["run", "build"], {
+        label: "Building source checkout (pnpm run build)",
+        cwd: packageRoot,
+      });
+      requireSuccess(buildOk, "pnpm run build");
     } else if (npmBin) {
       const installOk = runCommand(npmBin, ["install"], {
         label: "Refreshing dependencies (npm install)",
+        cwd: packageRoot,
       });
       requireSuccess(installOk, "npm install");
       runCommand(npmBin, ["install", "iii-sdk@0.11.2"], {
         label: "Pinning iii-sdk@0.11.2",
+        cwd: packageRoot,
         optional: true,
       });
+      const buildOk = runCommand(npmBin, ["run", "build"], {
+        label: "Building source checkout (npm run build)",
+        cwd: packageRoot,
+      });
+      requireSuccess(buildOk, "npm run build");
     } else {
-      p.log.warn("No package manager found (pnpm/npm). Skipping JS dependency upgrade.");
+      p.log.warn("No package manager found (pnpm/npm). Skipping source checkout upgrade.");
     }
+  } else if (installMethod.plan === "global-npm") {
+    if (!npmBin) {
+      p.note(installMethod.guidance.join("\n"), "Upgrade instructions");
+      p.outro("No upgrade performed.");
+      return;
+    }
+    const installOk = runCommand(npmBin, ["install", "-g", "@agentmemory/agentmemory@latest"], {
+      label: "Upgrading global npm package",
+    });
+    requireSuccess(installOk, "npm install -g @agentmemory/agentmemory@latest");
   } else {
-    p.log.warn("No package.json in current directory. Skipping JS dependency upgrade.");
+    p.note([...installMethod.guidance, "", "No files were changed."].join("\n"), "Upgrade instructions");
+    p.outro("No upgrade performed.");
+    return;
   }
 
   const upgradeEngine = await p.confirm({
@@ -2781,25 +2983,10 @@ async function runImportJsonl(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// `agentmemory remove` — clean uninstall.
+// `agentmemory rollback` and `agentmemory remove` — clean uninstall.
 //
-// Planning logic lives in src/cli/remove-plan.ts so it's testable without
-// touching $HOME. This function loads the manifest, builds the plan,
-// double-confirms, then executes step by step.
-
-function loadConnectManifest(home: string): ConnectManifest | null {
-  const path = join(home, ".agentmemory", "backups", "connect-manifest.json");
-  try {
-    const raw = readFileSync(path, "utf-8");
-    const parsed = JSON.parse(raw) as Partial<ConnectManifest>;
-    if (Array.isArray(parsed?.installed)) {
-      return { installed: parsed.installed };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
+// Rollback/remove planning stays in small helpers so the CLI only loads state,
+// reports the plan, and performs the explicitly requested filesystem changes.
 
 function probeLocalBinIiiVersion(home: string): string | null {
   const path = legacyLocalBinIii(home);
@@ -2825,13 +3012,148 @@ function safeDelete(path: string): { ok: boolean; message: string } {
   }
 }
 
+function rollbackPathKind(path: string): ConnectRollbackPathKind {
+  try {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) return "symlink";
+    if (st.isDirectory()) return "directory";
+    if (st.isFile()) return "file";
+    return "other";
+  } catch (err) {
+    if (
+      err &&
+      typeof err === "object" &&
+      "code" in err &&
+      err.code === "ENOENT"
+    ) {
+      return "missing";
+    }
+    return "other";
+  }
+}
+
+function rollbackRealPath(path: string): string | null {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return null;
+  }
+}
+
+function restoreConnectBackup(
+  backupPath: string,
+  target: string,
+): { ok: boolean; message: string } {
+  try {
+    const backupKind = rollbackPathKind(backupPath);
+    if (backupKind !== "file") {
+      return {
+        ok: false,
+        message: `refusing to restore from ${backupKind} backup ${backupPath}`,
+      };
+    }
+    const targetKind = rollbackPathKind(target);
+    if (targetKind === "symlink" || targetKind === "directory" || targetKind === "other") {
+      return {
+        ok: false,
+        message: `refusing to restore over ${targetKind} target ${target}`,
+      };
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(backupPath, target);
+    return { ok: true, message: `restored ${target} from ${backupPath}` };
+  } catch (err) {
+    return {
+      ok: false,
+      message: `failed to restore ${target}: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+function removeConnectCreatedTarget(target: string): { ok: boolean; message: string } {
+  const targetKind = rollbackPathKind(target);
+  if (targetKind !== "file") {
+    return {
+      ok: false,
+      message: `refusing to remove connect-created ${targetKind} target ${target}`,
+    };
+  }
+  const result = safeDelete(target);
+  if (result.ok) {
+    return { ok: true, message: `removed connect-created target ${target}` };
+  }
+  return result;
+}
+
+async function runRollback(): Promise<void> {
+  p.intro("agentmemory rollback");
+  const tail = args.slice(1);
+  const dryRun = tail.includes("--dry-run");
+  const last = tail.includes("--last");
+  if (tail.includes("--help") || tail.includes("-h")) {
+    p.note("Usage: agentmemory rollback --last [--dry-run]", "rollback");
+    return;
+  }
+  if (!last) {
+    p.log.error("Refusing to infer rollback scope. Re-run with: agentmemory rollback --last");
+    process.exit(1);
+  }
+
+  const home = homedir();
+  const backupRoot = join(home, ".agentmemory", "backups");
+  const manifest = readConnectManifest(home);
+  if (!manifest) {
+    p.outro("No connect manifest found. Nothing to roll back.");
+    return;
+  }
+
+  const plan = buildConnectRollbackPlan(manifest, {
+    home,
+    backupsDir: backupRoot,
+    pathExists: existsSync,
+    pathKind: rollbackPathKind,
+    realPath: rollbackRealPath,
+  });
+  p.note(formatConnectRollbackPlan(plan), dryRun ? "rollback dry-run" : "rollback plan");
+
+  if (dryRun) {
+    p.outro("Dry run only. No files changed.");
+    return;
+  }
+
+  const actionable = plan.filter((item) => item.action !== "skip");
+  if (actionable.length === 0) {
+    p.outro("No rollbackable changes in the latest connect run.");
+    return;
+  }
+
+  const results = applyConnectRollbackPlan(plan, {
+    restoreBackup: restoreConnectBackup,
+    removeTarget: removeConnectCreatedTarget,
+  });
+  for (const result of results) {
+    if (result.status === "restored" || result.status === "removed") {
+      p.log.success(result.message ?? `${result.status} ${result.target}`);
+    } else if (result.status === "failed") {
+      p.log.error(result.message ?? `failed ${result.target}`);
+    }
+  }
+  const updated = markConnectRollbackResults(manifest, results);
+  writeConnectManifest(updated, home);
+
+  const changed = results.filter(
+    (result) => result.status === "restored" || result.status === "removed",
+  ).length;
+  p.outro(`Rollback complete. Changed ${changed} target(s).`);
+}
+
 async function runRemove(): Promise<void> {
   p.intro("agentmemory remove");
   const force = args.includes("--force");
   const keepData = args.includes("--keep-data");
 
   const home = homedir();
-  const connectManifest = loadConnectManifest(home);
+  const connectManifest = readConnectManifest(home);
   const localBinIiiVersion = probeLocalBinIiiVersion(home);
 
   const options: RemoveOptions = { force, keepData };
@@ -2925,7 +3247,11 @@ async function runRemove(): Promise<void> {
 const commands: Record<string, () => Promise<void>> = {
   init: runInit,
   connect: runConnectCmd,
+  rollback: runRollback,
   status: runStatus,
+  diagnose: runDiagnoseCmd,
+  versions: runVersionsCmd,
+  memory: runMemoryCmd,
   doctor: runDoctor,
   demo: runDemo,
   upgrade: runUpgrade,

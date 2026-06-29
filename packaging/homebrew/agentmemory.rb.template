@@ -1,0 +1,19 @@
+class Agentmemory < Formula
+  desc "Persistent memory for AI coding agents"
+  homepage "https://github.com/rohitg00/agentmemory"
+  url "__AGENTMEMORY_TARBALL_URL__"
+  sha256 "__AGENTMEMORY_SHA256__"
+  license "Apache-2.0"
+  version "__AGENTMEMORY_VERSION__"
+
+  depends_on "node"
+
+  def install
+    libexec.install Dir["*"]
+    bin.install_symlink libexec/"dist/cli.mjs" => "agentmemory"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/agentmemory --version")
+  end
+end

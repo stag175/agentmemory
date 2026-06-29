@@ -33,6 +33,27 @@ export class InMemoryKV {
     return data;
   }
 
+  async update<T = unknown>(
+    scope: string,
+    key: string,
+    ops: Array<{ type: string; path: string; value?: unknown }>,
+  ): Promise<T> {
+    const current = (await this.get<Record<string, unknown>>(scope, key)) ?? {};
+    const next = { ...current };
+    for (const op of ops) {
+      if (op.type !== "set") {
+        throw new Error(`Unsupported local state update operation: ${op.type}`);
+      }
+      const field = op.path.replace(/^\//, "");
+      if (!field || field.includes("/")) {
+        throw new Error(`Unsupported local state update path: ${op.path}`);
+      }
+      next[field] = op.value;
+    }
+    await this.set(scope, key, next);
+    return next as T;
+  }
+
   async delete(scope: string, key: string): Promise<void> {
     this.store.get(scope)?.delete(key);
   }

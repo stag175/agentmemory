@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { buildLineage, eventFields } from "./_lineage.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -38,20 +38,20 @@ async function main() {
     typeof rawSessionId === "string" && rawSessionId.length > 0
       ? rawSessionId
       : "unknown";
+  const lineage = buildLineage(data, "notification", { sessionId });
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({
       hookType: "notification",
-      sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
+      ...eventFields(lineage),
       timestamp: new Date().toISOString(),
       data: {
         notification_type: notificationType,
         title: data.title,
         message: data.message,
+        lineage,
       },
     }),
     signal: AbortSignal.timeout(2000),

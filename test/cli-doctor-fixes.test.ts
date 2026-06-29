@@ -7,11 +7,19 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  buildDiagnoseCliPlan,
   buildDiagnostics,
+  buildVersionsReport,
+  DIAGNOSE_CLI_HELP,
   DIAGNOSTIC_IDS,
   dryRunPlan,
+  extractReleaseGateReport,
+  formatDiagnoseJson,
+  formatDiagnoseText,
+  formatVersionsReport,
   parseEnvFile,
   placeholderProviderKeys,
+  releaseGateExitCode,
   realProviderKeys,
   type DoctorContext,
   type DoctorEffects,
@@ -235,5 +243,233 @@ describe("realProviderKeys / placeholderProviderKeys", () => {
     expect(placeholderProviderKeys({ ANTHROPIC_API_KEY: "xxxx-xxxx" })).toEqual([
       "ANTHROPIC_API_KEY",
     ]);
+  });
+});
+
+describe("diagnose CLI release-gate helpers", () => {
+  it("documents and parses the security diagnostics category", () => {
+    expect(DIAGNOSE_CLI_HELP).toContain(
+      "agentmemory diagnose --categories security",
+    );
+    expect(DIAGNOSE_CLI_HELP).toContain("security.encryption");
+
+    const plan = buildDiagnoseCliPlan(["--categories", "security", "--json"]);
+
+    expect(plan.json).toBe(true);
+    expect(plan.releaseGate).toBe(false);
+    expect(plan.payload.categories).toEqual(["security"]);
+  });
+
+  it("builds the diagnostics payload from release-gate flags", () => {
+    const plan = buildDiagnoseCliPlan([
+      "--release-gate",
+      "--json",
+      "--categories",
+      "memories,actions",
+      "--build",
+      "pass",
+      "--build-evidence",
+      "npm run build",
+      "--test",
+      "blocked",
+      "--test-blocker",
+      "CI unavailable",
+    ]);
+
+    expect(plan.releaseGate).toBe(true);
+    expect(plan.json).toBe(true);
+    expect(plan.payload.categories).toEqual(["memories", "actions"]);
+    expect(plan.payload.releaseGateEvidence?.build).toEqual({
+      status: "pass",
+      evidence: ["npm run build"],
+    });
+    expect(plan.payload.releaseGateEvidence?.test).toEqual({
+      status: "blocked",
+      blockers: ["CI unavailable"],
+    });
+  });
+
+  it("rejects partial release-gate evidence without a status", () => {
+    expect(() =>
+      buildDiagnoseCliPlan(["--release-gate", "--build-evidence", "npm run build"]),
+    ).toThrow("--build status is required");
+  });
+
+  it("formats security diagnostics in text and preserves JSON encryption details", () => {
+    const result = {
+      success: true,
+      summary: { pass: 0, warn: 0, fail: 1, fixable: 0 },
+      checks: [
+        {
+          name: "encryption-readiness",
+          category: "security",
+          status: "fail",
+          message:
+            "Encryption readiness is fail; cryptography implemented=true, storage wired=false. Missing: storage.encryptionWired.",
+          fixable: false,
+        },
+      ],
+      releaseGate: {
+        overall: "not_run",
+        summary: { pass: 0, fail: 0, blocked: 0, not_run: 7 },
+        blockingFindings: [],
+      },
+      security: {
+        encryption: {
+          status: "fail",
+          cryptography: { implemented: true, storageWired: false },
+          missingFields: ["storage.encryptionWired"],
+        },
+      },
+    };
+
+    const text = formatDiagnoseText(result, false);
+
+    expect(text).toContain("Diagnostics: pass=0, warn=0, fail=1, fixable=0");
+    expect(text).toContain("Security:");
+    expect(text).toContain("encryption-readiness [fail]");
+    expect(text).toContain("storage wired=false");
+    expect(JSON.parse(formatDiagnoseJson(result, false)).security.encryption.status).toBe(
+      "fail",
+    );
+  });
+
+  it("formats release-gate JSON and returns a failing gate exit code", () => {
+    const result = {
+      success: true,
+      summary: { pass: 4, warn: 0, fail: 0, fixable: 0 },
+      releaseGate: {
+        overall: "blocked",
+        summary: { pass: 1, fail: 0, blocked: 1, not_run: 5 },
+        blockingFindings: [
+          {
+            key: "test",
+            status: "blocked",
+            message: "No test evidence was provided",
+            evidence: [],
+            failures: [],
+            blockers: ["missing npm test evidence"],
+            nextAction: "Run npm test.",
+          },
+        ],
+      },
+    };
+
+    expect(JSON.parse(formatDiagnoseJson(result, true)).overall).toBe("blocked");
+    expect(formatDiagnoseText(result, true)).toContain("Release gate: blocked");
+    expect(formatDiagnoseText(result, true)).toContain("missing npm test evidence");
+    expect(releaseGateExitCode(extractReleaseGateReport(result))).toBe(1);
+  });
+
+  it("keeps diagnostic security failures visible in release-gate text and JSON", () => {
+    const result = {
+      success: true,
+      summary: { pass: 0, warn: 0, fail: 1, fixable: 0 },
+      checks: [
+        {
+          name: "encryption-readiness",
+          category: "security",
+          status: "fail",
+          message: "Encryption readiness is fail; storage wired=false.",
+          fixable: false,
+        },
+      ],
+      releaseGate: {
+        overall: "pass",
+        summary: { pass: 7, fail: 0, blocked: 0, not_run: 0 },
+        checks: {
+          build: {
+            status: "pass",
+            message: "Build evidence accepted",
+          },
+        },
+        blockingFindings: [],
+      },
+    };
+
+    const text = formatDiagnoseText(result, true);
+    const json = JSON.parse(formatDiagnoseJson(result, true));
+
+    expect(text).toContain("Release gate: pass");
+    expect(text).toContain("Blocking findings: none");
+    expect(text).toContain("Security:");
+    expect(text).toContain("encryption-readiness [fail]");
+    expect(json.overall).toBe("pass");
+    expect(json.diagnosticFindings).toEqual([
+      {
+        name: "encryption-readiness",
+        category: "security",
+        status: "fail",
+        message: "Encryption readiness is fail; storage wired=false.",
+        fixable: false,
+      },
+    ]);
+  });
+
+  it("derives release-gate findings from checks when blockingFindings is empty", () => {
+    const result = {
+      success: true,
+      releaseGate: {
+        overall: "fail",
+        summary: { pass: 6, fail: 1, blocked: 0, not_run: 0 },
+        checks: {
+          restMcpParity: {
+            status: "fail",
+            message: "REST/MCP parity evidence failed",
+            failures: ["tool count mismatch"],
+            blockers: [],
+            nextAction: "Run parity tests.",
+          },
+        },
+        blockingFindings: [],
+      },
+    };
+
+    const text = formatDiagnoseText(result, true);
+
+    expect(text).toContain("Blocking findings:");
+    expect(text).toContain("restMcpParity [fail]: REST/MCP parity evidence failed");
+    expect(text).toContain("failures: tool count mismatch");
+  });
+
+  it("returns a passing gate exit code only for pass", () => {
+    const result = { releaseGate: { overall: "pass" } };
+    expect(releaseGateExitCode(extractReleaseGateReport(result))).toBe(0);
+  });
+
+  it("reports release-gate JSON as unavailable when an older daemon omits it", () => {
+    const result = {
+      success: true,
+      summary: { pass: 1, warn: 0, fail: 0, fixable: 0 },
+    };
+
+    expect(JSON.parse(formatDiagnoseJson(result, true))).toEqual({
+      success: false,
+      error: "releaseGate unavailable in diagnostics response",
+    });
+    expect(releaseGateExitCode(extractReleaseGateReport(result))).toBe(1);
+  });
+});
+
+describe("versions CLI helpers", () => {
+  it("builds a safe local report when the REST daemon is unreachable", () => {
+    const report = buildVersionsReport({
+      agentmemoryVersion: "0.9.27",
+      nodeVersion: "v24.0.0",
+      platform: "win32",
+      arch: "x64",
+      baseUrl: "http://localhost:3111",
+      pinnedIiiVersion: "0.11.2",
+      iiiVersionOverridden: false,
+      allToolsCount: 65,
+      coreToolsCount: 8,
+      restError: "fetch failed",
+    });
+
+    expect(report.rest.reachable).toBe(false);
+    expect(formatVersionsReport(report, false)).toContain("unreachable");
+    expect(JSON.parse(formatVersionsReport(report, true)).agentmemoryVersion).toBe(
+      "0.9.27",
+    );
   });
 });

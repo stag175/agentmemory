@@ -12,6 +12,7 @@ import {
   readJsonSafe,
   writeJsonAtomic,
 } from "./util.js";
+import { inspectJsonEntry } from "./inspect.js";
 
 const COPILOT_DIR = process.env["COPILOT_HOME"] || join(homedir(), ".copilot");
 const COPILOT_MCP_JSON = join(COPILOT_DIR, "mcp-config.json");
@@ -37,6 +38,19 @@ export const adapter: ConnectAdapter = {
 
   detect(): boolean {
     return existsSync(COPILOT_DIR);
+  },
+
+  inspect() {
+    return inspectJsonEntry({
+      name: "copilot-cli",
+      displayName: "GitHub Copilot CLI",
+      detectDir: COPILOT_DIR,
+      configPath: COPILOT_MCP_JSON,
+      wrapperKey: "mcpServers",
+      expectedEntry: AGENTMEMORY_COPILOT_MCP_BLOCK,
+      expectedMutation: `add mcpServers.agentmemory to ${COPILOT_MCP_JSON}`,
+      windowsSafe: true,
+    });
   },
 
   async install(opts: ConnectOptions): Promise<ConnectResult> {

@@ -5,6 +5,22 @@ import { join } from "node:path";
 
 const ORIGINAL_HOME = process.env["HOME"];
 const ORIGINAL_USERPROFILE = process.env["USERPROFILE"];
+const CAPTURE_CONTROL_ENV_KEYS = [
+  "AGENTMEMORY_INCOGNITO",
+  "AGENTMEMORY_CAPTURE_INCOGNITO",
+  "AGENTMEMORY_CAPTURE_PAUSED",
+  "AGENTMEMORY_PAUSE_CAPTURE",
+  "AGENTMEMORY_CAPTURE_CONSENT",
+  "AGENTMEMORY_CONSENT_CAPTURE",
+  "AGENTMEMORY_CAPTURE",
+  "AGENTMEMORY_AUTO_CAPTURE",
+  "AGENTMEMORY_ENABLE_CAPTURE",
+  "AGENTMEMORY_CAPTURE_ENABLED",
+  "AGENTMEMORY_REQUIRE_CAPTURE_CONSENT",
+] as const;
+const ORIGINAL_CAPTURE_CONTROL_ENV = Object.fromEntries(
+  CAPTURE_CONTROL_ENV_KEYS.map((key) => [key, process.env[key]]),
+) as Record<(typeof CAPTURE_CONTROL_ENV_KEYS)[number], string | undefined>;
 
 let sandboxHome: string;
 
@@ -25,6 +41,9 @@ describe("loadEnvFile", () => {
     process.env["HOME"] = sandboxHome;
     process.env["USERPROFILE"] = sandboxHome;
     delete process.env["AGENTMEMORY_AUTO_COMPRESS"];
+    for (const key of CAPTURE_CONTROL_ENV_KEYS) {
+      delete process.env[key];
+    }
     delete process.env["AGENTMEMORY_DROP_STALE_INDEX"];
     delete process.env["CONSOLIDATION_ENABLED"];
     delete process.env["GRAPH_EXTRACTION_ENABLED"];
@@ -37,6 +56,14 @@ describe("loadEnvFile", () => {
     else process.env["HOME"] = ORIGINAL_HOME;
     if (ORIGINAL_USERPROFILE === undefined) delete process.env["USERPROFILE"];
     else process.env["USERPROFILE"] = ORIGINAL_USERPROFILE;
+    for (const key of CAPTURE_CONTROL_ENV_KEYS) {
+      const value = ORIGINAL_CAPTURE_CONTROL_ENV[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
     rmSync(sandboxHome, { recursive: true, force: true });
   });
 
@@ -88,5 +115,19 @@ describe("loadEnvFile", () => {
     writeEnv("AGENTMEMORY_DROP_STALE_INDEX=true");
     const cfg = await freshConfig();
     expect(cfg.isDropStaleIndexEnabled()).toBe(true);
+  });
+
+  it("can fail closed on automatic capture until consent is explicit", async () => {
+    writeEnv("AGENTMEMORY_REQUIRE_CAPTURE_CONSENT=true");
+    const cfg = await freshConfig();
+
+    expect(cfg.getAutomaticCaptureControl()).toEqual({
+      enabled: false,
+      reason: "consent_required",
+      source: "AGENTMEMORY_REQUIRE_CAPTURE_CONSENT",
+    });
+
+    process.env["AGENTMEMORY_CAPTURE_CONSENT"] = "true";
+    expect(cfg.isAutomaticCaptureEnabled()).toBe(true);
   });
 });

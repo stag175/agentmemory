@@ -7,10 +7,13 @@ import type {
   Session,
   GraphNode,
   GraphEdge,
+  RetrievalMode,
 } from "../types.js";
 import { getVisibleTools } from "./tools-registry.js";
 import { timingSafeCompare } from "../auth.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
+import { registerRulesResolverFunction } from "../functions/rules-resolver.js";
+import { evaluateEncryptionReadinessFromEnv } from "../security/encryption-policy.js";
 
 type McpResponse = {
   status_code: number;
@@ -28,6 +31,56 @@ function asNumber(value: unknown, fallback?: number): number | undefined {
   return fallback;
 }
 
+type SearchMode = "fast" | "balanced" | "deep";
+
+const SEARCH_MODES = new Set<SearchMode>(["fast", "balanced", "deep"]);
+const RETRIEVAL_MODES = new Set<RetrievalMode>([
+  "basic",
+  "local_graph",
+  "global_community",
+  "drift",
+  "as_of",
+]);
+
+function asSearchMode(value: unknown): SearchMode | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return SEARCH_MODES.has(normalized as SearchMode)
+    ? (normalized as SearchMode)
+    : null;
+}
+
+function asRetrievalMode(value: unknown): RetrievalMode | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return RETRIEVAL_MODES.has(normalized as RetrievalMode)
+    ? (normalized as RetrievalMode)
+    : null;
+}
+
+function asBoolean(value: unknown): boolean | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return undefined;
+    if (normalized === "true" || normalized === "1" || normalized === "yes") return true;
+    if (normalized === "false" || normalized === "0" || normalized === "no") return false;
+  }
+  return null;
+}
+
+function asPositiveInt(value: unknown): number | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return null;
+  return n;
+}
+
 function parseCsvList(value: unknown): string[] {
   if (typeof value === "string") {
     return value.split(",").map((v) => v.trim()).filter(Boolean);
@@ -40,11 +93,45 @@ function parseCsvList(value: unknown): string[] {
   return [];
 }
 
+const RULES_RESOLVE_FIELDS = [
+  "workspaceRoot",
+  "root",
+  "cwd",
+  "instructionGlobs",
+  "ignoreDirectories",
+  "maxDepth",
+  "maxBytes",
+  "maxFileBytes",
+  "includeContent",
+] as const;
+
+function pickRulesResolveArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const field of RULES_RESOLVE_FIELDS) {
+    if (args[field] !== undefined) payload[field] = args[field];
+  }
+  return payload;
+}
+
+function isRulesResolveInvalidInput(
+  result: unknown,
+): result is { success: false; code: "invalid_input"; error: string } {
+  return (
+    Boolean(result) &&
+    typeof result === "object" &&
+    (result as Record<string, unknown>)["success"] === false &&
+    (result as Record<string, unknown>)["code"] === "invalid_input" &&
+    typeof (result as Record<string, unknown>)["error"] === "string"
+  );
+}
+
 export function registerMcpEndpoints(
   sdk: ISdk,
   kv: StateKV,
   secret?: string,
 ): void {
+  registerRulesResolverFunction(sdk);
+
   function checkAuth(
     req: ApiRequest,
     sec: string | undefined,
@@ -273,12 +360,69 @@ export function registerMcpEndpoints(
             }
             const expandIds = parseCsvList(args.expandIds).slice(0, 20);
             const limit = Math.max(1, Math.min(100, asNumber(args.limit, 10) ?? 10));
+            const searchMode = asSearchMode(args.searchMode);
+            if (searchMode === null) {
+              return {
+                status_code: 400,
+                body: { error: "searchMode must be one of: fast, balanced, deep" },
+              };
+            }
+            const retrievalMode = asRetrievalMode(args.retrievalMode);
+            if (retrievalMode === null) {
+              return {
+                status_code: 400,
+                body: {
+                  error: "retrievalMode must be one of: basic, local_graph, global_community, drift, as_of",
+                },
+              };
+            }
+            const explain = asBoolean(args.explain);
+            if (explain === null) {
+              return { status_code: 400, body: { error: "explain must be a boolean" } };
+            }
+            const includeReport = asBoolean(args.includeReport);
+            if (includeReport === null) {
+              return { status_code: 400, body: { error: "includeReport must be a boolean" } };
+            }
+            const tokenBudget = asPositiveInt(args.tokenBudget);
+            if (tokenBudget === null) {
+              return { status_code: 400, body: { error: "tokenBudget must be a positive integer" } };
+            }
+            const tokenBudgetSnake = asPositiveInt(args.token_budget);
+            if (tokenBudgetSnake === null) {
+              return { status_code: 400, body: { error: "token_budget must be a positive integer" } };
+            }
+            const budget = asPositiveInt(args.budget);
+            if (budget === null) {
+              return { status_code: 400, body: { error: "budget must be a positive integer" } };
+            }
+            const files = [
+              ...parseCsvList(args.files),
+              ...parseCsvList(args.file),
+              ...parseCsvList(args.filePath),
+            ];
             const result = await sdk.trigger({
               function_id: "mem::smart-search",
               payload: {
                 query: args.query,
                 expandIds,
                 limit,
+                searchMode,
+                retrievalMode,
+                explain,
+                includeReport,
+                tokenBudget: tokenBudget ?? tokenBudgetSnake ?? budget,
+                project: asNonEmptyString(args.project),
+                cwd: asNonEmptyString(args.cwd),
+                files: files.length > 0 ? files : undefined,
+                branch: asNonEmptyString(args.branch),
+                commit: asNonEmptyString(args.commit),
+                memoryTier: asNonEmptyString(args.memoryTier),
+                privacyScope: asNonEmptyString(args.privacyScope),
+                asOf: asNonEmptyString(args.asOf),
+                validAt: asNonEmptyString(args.validAt),
+                agentId: asNonEmptyString(args.agentId),
+                sessionId: asNonEmptyString(args.sessionId),
               },
             });
             return {
@@ -628,6 +772,317 @@ export function registerMcpEndpoints(
                 },
               };
             }
+          }
+
+          case "memory_create": {
+            const content = asNonEmptyString(args.content);
+            if (!content) {
+              return { status_code: 400, body: { error: "content is required" } };
+            }
+            const requireGatePass = asBoolean(args.requireGatePass);
+            if (requireGatePass === null) {
+              return { status_code: 400, body: { error: "requireGatePass must be a boolean" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::memory-create",
+              payload: {
+                content,
+                type: asNonEmptyString(args.type),
+                concepts: args.concepts !== undefined ? parseCsvList(args.concepts) : undefined,
+                files: args.files !== undefined ? parseCsvList(args.files) : undefined,
+                ttlDays: asNumber(args.ttlDays),
+                sourceObservationIds: args.sourceObservationIds !== undefined
+                  ? parseCsvList(args.sourceObservationIds)
+                  : undefined,
+                agentId: asNonEmptyString(args.agentId),
+                project: asNonEmptyString(args.project),
+                lane: asNonEmptyString(args.lane),
+                confidence: asNumber(args.confidence),
+                privacyScope: asNonEmptyString(args.privacyScope),
+                ownerId: asNonEmptyString(args.ownerId),
+                branch: asNonEmptyString(args.branch),
+                commit: asNonEmptyString(args.commit),
+                sourceHash: asNonEmptyString(args.sourceHash),
+                sourceType: asNonEmptyString(args.sourceType),
+                sourceUri: asNonEmptyString(args.sourceUri),
+                reviewState: asNonEmptyString(args.reviewState),
+                requireGatePass,
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_inspect": {
+            const memoryId = asNonEmptyString(args.memoryId);
+            if (!memoryId) {
+              return { status_code: 400, body: { error: "memoryId is required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::memory-inspect",
+              payload: { memoryId },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_history": {
+            const memoryId = asNonEmptyString(args.memoryId);
+            if (!memoryId) {
+              return { status_code: 400, body: { error: "memoryId is required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::memory-history",
+              payload: { memoryId },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_update": {
+            const memoryId = asNonEmptyString(args.memoryId);
+            if (!memoryId) {
+              return { status_code: 400, body: { error: "memoryId is required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::memory-update",
+              payload: {
+                memoryId,
+                content: typeof args.content === "string" ? args.content : undefined,
+                title: typeof args.title === "string" ? args.title : undefined,
+                concepts: args.concepts !== undefined ? parseCsvList(args.concepts) : undefined,
+                files: args.files !== undefined ? parseCsvList(args.files) : undefined,
+                confidence: asNumber(args.confidence),
+                strength: asNumber(args.strength),
+                lane: asNonEmptyString(args.lane),
+                reviewState: asNonEmptyString(args.reviewState),
+                privacyScope: asNonEmptyString(args.privacyScope),
+                reason: asNonEmptyString(args.reason),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_expire": {
+            const memoryId = asNonEmptyString(args.memoryId);
+            if (!memoryId) {
+              return { status_code: 400, body: { error: "memoryId is required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::memory-expire",
+              payload: {
+                memoryId,
+                expiresAt: asNonEmptyString(args.expiresAt),
+                reason: asNonEmptyString(args.reason),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_archive": {
+            const memoryId = asNonEmptyString(args.memoryId);
+            if (!memoryId) {
+              return { status_code: 400, body: { error: "memoryId is required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::memory-archive",
+              payload: {
+                memoryId,
+                reason: asNonEmptyString(args.reason),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_restore": {
+            const memoryId = asNonEmptyString(args.memoryId);
+            if (!memoryId) {
+              return { status_code: 400, body: { error: "memoryId is required" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::memory-restore",
+              payload: {
+                memoryId,
+                reason: asNonEmptyString(args.reason),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_delete": {
+            const memoryId = asNonEmptyString(args.memoryId);
+            const sourceObservationId = asNonEmptyString(args.sourceObservationId);
+            const sourceHash = asNonEmptyString(args.sourceHash);
+            const sourceUri = asNonEmptyString(args.sourceUri);
+            if (!memoryId && !sourceObservationId && !sourceHash && !sourceUri) {
+              return {
+                status_code: 400,
+                body: { error: "memoryId or source selector is required" },
+              };
+            }
+            const dryRun = asBoolean(args.dryRun);
+            if (dryRun === null) {
+              return { status_code: 400, body: { error: "dryRun must be a boolean" } };
+            }
+            const mode = asNonEmptyString(args.mode);
+            const result = await sdk.trigger({
+              function_id: "mem::memory-delete",
+              payload: {
+                memoryId,
+                sourceObservationId,
+                sourceHash,
+                sourceUri,
+                project: asNonEmptyString(args.project),
+                agentId: asNonEmptyString(args.agentId),
+                mode: mode === "hard" ? "hard" : "tombstone",
+                dryRun,
+                reason: asNonEmptyString(args.reason),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_search_explain": {
+            const query = asNonEmptyString(args.query);
+            if (!query) {
+              return { status_code: 400, body: { error: "query is required" } };
+            }
+            const searchMode = asSearchMode(args.searchMode);
+            if (searchMode === null) {
+              return {
+                status_code: 400,
+                body: { error: "searchMode must be one of: fast, balanced, deep" },
+              };
+            }
+            const retrievalMode = asRetrievalMode(args.retrievalMode);
+            if (retrievalMode === null) {
+              return {
+                status_code: 400,
+                body: {
+                  error: "retrievalMode must be one of: basic, local_graph, global_community, drift, as_of",
+                },
+              };
+            }
+            const includeReport = asBoolean(args.includeReport);
+            if (includeReport === null) {
+              return { status_code: 400, body: { error: "includeReport must be a boolean" } };
+            }
+            const tokenBudget = asPositiveInt(args.tokenBudget);
+            if (tokenBudget === null) {
+              return { status_code: 400, body: { error: "tokenBudget must be a positive integer" } };
+            }
+            const tokenBudgetSnake = asPositiveInt(args.token_budget);
+            if (tokenBudgetSnake === null) {
+              return { status_code: 400, body: { error: "token_budget must be a positive integer" } };
+            }
+            const budget = asPositiveInt(args.budget);
+            if (budget === null) {
+              return { status_code: 400, body: { error: "budget must be a positive integer" } };
+            }
+            const files = [
+              ...parseCsvList(args.files),
+              ...parseCsvList(args.file),
+              ...parseCsvList(args.filePath),
+            ];
+            const result = await sdk.trigger({
+              function_id: "mem::smart-search",
+              payload: {
+                query,
+                limit: asNumber(args.limit, 10),
+                project: asNonEmptyString(args.project),
+                cwd: asNonEmptyString(args.cwd),
+                searchMode,
+                retrievalMode,
+                includeReport,
+                tokenBudget: tokenBudget ?? tokenBudgetSnake ?? budget,
+                files: files.length > 0 ? files : undefined,
+                branch: asNonEmptyString(args.branch),
+                commit: asNonEmptyString(args.commit),
+                memoryTier: asNonEmptyString(args.memoryTier),
+                privacyScope: asNonEmptyString(args.privacyScope),
+                asOf: asNonEmptyString(args.asOf),
+                validAt: asNonEmptyString(args.validAt),
+                agentId: asNonEmptyString(args.agentId),
+                sessionId: asNonEmptyString(args.sessionId),
+                explain: true,
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_rules_resolve": {
+            const result = await sdk.trigger({
+              function_id: "mem::rules-resolve",
+              payload: pickRulesResolveArgs(args),
+            });
+            if (isRulesResolveInvalidInput(result)) {
+              return {
+                status_code: 400,
+                body: { error: result.error },
+              };
+            }
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_ledger": {
+            const result = await sdk.trigger({
+              function_id: "mem::memory-ledger",
+              payload: {
+                project: asNonEmptyString(args.project),
+                state: asNonEmptyString(args.state),
+                type: asNonEmptyString(args.type),
+                lane: asNonEmptyString(args.lane),
+                reviewState: asNonEmptyString(args.reviewState),
+                includeSourceCards: args.includeSourceCards === true || args.includeSourceCards === "true",
+                limit: asNumber(args.limit, 100),
+                offset: asNumber(args.offset, 0),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_review_queue": {
+            const result = await sdk.trigger({
+              function_id: "mem::memory-review-queue",
+              payload: {
+                project: asNonEmptyString(args.project),
+                limit: asNumber(args.limit, 50),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
           }
 
           case "memory_snapshot_create": {
@@ -1347,6 +1802,7 @@ export function registerMcpEndpoints(
           const sessions = await kv.list<Session>(KV.sessions);
           const memories = await kv.list<Memory>(KV.memories);
           const healthData = await kv.list(KV.health).catch(() => []);
+          const encryptionReadiness = evaluateEncryptionReadinessFromEnv();
           return {
             status_code: 200,
             body: {
@@ -1359,6 +1815,12 @@ export function registerMcpEndpoints(
                     memoryCount: memories.length,
                     healthStatus:
                       healthData.length > 0 ? "available" : "no-data",
+                    encryption: {
+                      status: encryptionReadiness.status,
+                      storageWired: encryptionReadiness.cryptography.storageWired,
+                      remoteMode: encryptionReadiness.remoteMode.enabled,
+                      missingFields: encryptionReadiness.missingFields,
+                    },
                   }),
                 },
               ],

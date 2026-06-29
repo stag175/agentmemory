@@ -122,6 +122,21 @@ describe("mem::forget audit coverage (issue #125)", () => {
     const auditRows = await kv.list("mem:audit");
     expect(auditRows).toHaveLength(0);
   });
+
+  it("does not emit delete audit or event rows for a missing memoryId", async () => {
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerRememberFunction(sdk as never, kv as never);
+
+    const result = await sdk.trigger({
+      function_id: "mem::forget",
+      payload: { memoryId: "mem_missing" },
+    });
+
+    expect((result as { deleted: number }).deleted).toBe(0);
+    expect(await kv.list("mem:audit")).toHaveLength(0);
+    expect(await kv.list("mem:agent-events")).toHaveLength(0);
+  });
 });
 
 // Delete paths must tear down the BM25 index entry and synchronously

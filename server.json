@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.rohitg00/agentmemory",
+  "title": "AgentMemory",
+  "description": "Persistent memory for AI coding agents.",
+  "websiteUrl": "https://github.com/rohitg00/agentmemory",
+  "repository": {
+    "url": "https://github.com/rohitg00/agentmemory",
+    "source": "github"
+  },
+  "version": "0.9.27",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@agentmemory/mcp",
+      "version": "0.9.27",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "AGENTMEMORY_URL",
+          "description": "AgentMemory REST base URL.",
+          "default": "http://localhost:3111",
+          "isRequired": false
+        },
+        {
+          "name": "AGENTMEMORY_SECRET",
+          "description": "Optional bearer secret for protected deployments.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

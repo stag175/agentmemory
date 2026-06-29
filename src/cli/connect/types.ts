@@ -10,6 +10,32 @@ export type ConnectOptions = {
   withHooks?: boolean;
 };
 
+export type ConnectInspectionStatus =
+  | "not-detected"
+  | "missing"
+  | "healthy"
+  | "stale"
+  | "invalid-config"
+  | "manual-only";
+
+export type ConnectInspection = {
+  agent: string;
+  displayName: string;
+  status: ConnectInspectionStatus;
+  configPath?: string;
+  expectedMutation: string;
+  windowsSafe: boolean;
+  repairSafe: boolean;
+  reason: string;
+};
+
+export type ConnectTargetMutation = {
+  target: string;
+  backupPath?: string;
+  label?: string;
+  previousExists?: boolean;
+};
+
 export type ConnectAdapter = {
   name: string;
   displayName: string;
@@ -29,11 +55,48 @@ export type ConnectAdapter = {
    */
   category?: "native" | "mcp";
   detect(): boolean;
+  inspect?(): ConnectInspection;
   install(opts: ConnectOptions): Promise<ConnectResult>;
 };
 
+export type ConnectManifestAction = "created" | "updated" | "already-wired";
+export type ConnectRollbackAction = "restore-backup" | "remove-created-target" | "none";
+
+export type ConnectManifestEntry = {
+  agent?: string;
+  displayName?: string;
+  target: string;
+  backupPath?: string;
+  timestamp?: string;
+  runId?: string;
+  action?: ConnectManifestAction;
+  rollback?: ConnectRollbackAction;
+  label?: string;
+  symlink?: boolean;
+  metadata?: {
+    force?: boolean;
+    withHooks?: boolean;
+    previousExists?: boolean;
+    resultKind?: ConnectResult["kind"];
+  } & Record<string, unknown>;
+  rolledBackAt?: string;
+  rollbackStatus?: "restored" | "removed" | "skipped" | "failed";
+};
+
+export type ConnectManifest = {
+  version?: number;
+  updatedAt?: string;
+  installed: ConnectManifestEntry[];
+  history?: ConnectManifestEntry[];
+};
+
 export type ConnectResult =
-  | { kind: "installed"; mutatedPath?: string; backupPath?: string }
+  | {
+      kind: "installed";
+      mutatedPath?: string;
+      backupPath?: string;
+      targets?: ConnectTargetMutation[];
+    }
   | { kind: "already-wired"; mutatedPath?: string }
   | { kind: "stub"; reason: string }
   | { kind: "skipped"; reason: string };

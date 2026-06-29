@@ -1,5 +1,6 @@
 import { TriggerAction, type ISdk, type ApiRequest } from "iii-sdk";
-import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary } from "../types.js";
+import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary, SearchMode, RetrievalMode, ComplianceEvidenceInput } from "../types.js";
+import type { AgentEventInput, AgentEventListFilter } from "../functions/agent-events.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
@@ -13,6 +14,8 @@ import { renderViewerDocument } from "../viewer/document.js";
 import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
+import { safeRecordAgentEvent } from "../functions/agent-events.js";
+import { registerRulesResolverFunction } from "../functions/rules-resolver.js";
 import {
   isGraphExtractionEnabled,
   isConsolidationEnabled,
@@ -21,6 +24,7 @@ import {
   detectEmbeddingProvider,
   detectLlmProviderKind,
   getAgentId,
+  getAutomaticCaptureControl,
   isAgentScopeIsolated,
 } from "../config.js";
 
@@ -135,6 +139,425 @@ function parseOptionalPositiveInt(value: unknown): number | undefined | null {
   return parsed;
 }
 
+function parseOptionalBoolean(value: unknown): boolean | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return undefined;
+    if (normalized === "true" || normalized === "1" || normalized === "yes") return true;
+    if (normalized === "false" || normalized === "0" || normalized === "no") return false;
+  }
+  return null;
+}
+
+function isAutomaticHookRequest(body: Record<string, unknown>): boolean {
+  const marker =
+    asNonEmptyString(body.captureSource) ??
+    asNonEmptyString(body.origin) ??
+    asNonEmptyString(body.source);
+  return marker === "automatic_hook" || marker === "hook";
+}
+
+function automaticCaptureSkipResponse(
+  body: Record<string, unknown>,
+): Response | undefined {
+  if (!isAutomaticHookRequest(body)) return undefined;
+  const control = getAutomaticCaptureControl();
+  if (control.enabled) return undefined;
+  return {
+    status_code: 200,
+    body: {
+      success: true,
+      skipped: true,
+      reason: control.reason,
+      source: control.source,
+    },
+  };
+}
+
+const SEARCH_MODES = new Set<SearchMode>(["fast", "balanced", "deep"]);
+const RETRIEVAL_MODES = new Set<RetrievalMode>([
+  "basic",
+  "local_graph",
+  "global_community",
+  "drift",
+  "as_of",
+]);
+
+function parseOptionalSearchMode(value: unknown): SearchMode | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return SEARCH_MODES.has(normalized as SearchMode)
+    ? (normalized as SearchMode)
+    : null;
+}
+
+function parseOptionalRetrievalMode(value: unknown): RetrievalMode | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return RETRIEVAL_MODES.has(normalized as RetrievalMode)
+    ? (normalized as RetrievalMode)
+    : null;
+}
+
+const AGENT_EVENT_STRING_FIELDS = [
+  "timestamp",
+  "sessionId",
+  "project",
+  "cwd",
+  "agentId",
+  "framework",
+  "nativeId",
+  "traceId",
+  "runId",
+  "teamId",
+  "taskId",
+  "toolCallId",
+  "functionId",
+  "fromAgentId",
+  "toAgentId",
+  "handoffFrom",
+  "handoffTo",
+  "parentEventId",
+  "correlationId",
+  "evalId",
+  "checkpointId",
+] as const;
+
+const AGENT_EVENT_ARRAY_FIELDS = [
+  "targetIds",
+  "observationIds",
+  "memoryIds",
+  "signalIds",
+  "actionIds",
+  "artifactIds",
+  "commitShas",
+] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function pickOptionalString(
+  body: Record<string, unknown>,
+  field: string,
+): { value?: string; error?: string } {
+  if (body[field] === undefined) return {};
+  const value = asNonEmptyString(body[field]);
+  if (!value) return { error: `${String(field)} must be a non-empty string` };
+  return { value };
+}
+
+function pickStringArray(
+  body: Record<string, unknown>,
+  field: keyof AgentEventInput,
+): { value?: string[]; error?: string } {
+  const raw = body[field];
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string")) {
+    return { error: `${String(field)} must be an array of strings` };
+  }
+  return { value: raw };
+}
+
+function pickFiniteNumber(
+  body: Record<string, unknown>,
+  field: string,
+): { value?: number; error?: string } {
+  const raw = body[field];
+  if (raw === undefined) return {};
+  const value = parseOptionalFiniteNumber(raw);
+  if (value === undefined || value === null) {
+    return { error: `${field} must be a finite number` };
+  }
+  return { value };
+}
+
+function pickAgentEventUsage(
+  value: unknown,
+): { value?: AgentEventInput["usage"]; error?: string } {
+  if (value === undefined) return {};
+  if (!isRecord(value)) return { error: "usage must be an object" };
+  const inputTokens = pickFiniteNumber(value, "inputTokens");
+  if (inputTokens.error) return { error: `usage.${inputTokens.error}` };
+  const outputTokens = pickFiniteNumber(value, "outputTokens");
+  if (outputTokens.error) return { error: `usage.${outputTokens.error}` };
+  const totalTokens = pickFiniteNumber(value, "totalTokens");
+  if (totalTokens.error) return { error: `usage.${totalTokens.error}` };
+  const usage: NonNullable<AgentEventInput["usage"]> = {};
+  if (inputTokens.value !== undefined) usage.inputTokens = inputTokens.value;
+  if (outputTokens.value !== undefined) usage.outputTokens = outputTokens.value;
+  if (totalTokens.value !== undefined) usage.totalTokens = totalTokens.value;
+  return Object.keys(usage).length > 0 ? { value: usage } : {};
+}
+
+function pickAgentEventCost(
+  value: unknown,
+): { value?: AgentEventInput["cost"]; error?: string } {
+  if (value === undefined) return {};
+  if (!isRecord(value)) return { error: "cost must be an object" };
+  const amount = pickFiniteNumber(value, "amount");
+  if (amount.error) return { error: `cost.${amount.error}` };
+  const currency = pickOptionalString(value, "currency");
+  if (currency.error) return { error: `cost.${currency.error}` };
+  const cost: NonNullable<AgentEventInput["cost"]> = {};
+  if (amount.value !== undefined) cost.amount = amount.value;
+  if (currency.value !== undefined) cost.currency = currency.value;
+  return Object.keys(cost).length > 0 ? { value: cost } : {};
+}
+
+function buildAgentEventInput(
+  body: Record<string, unknown>,
+): { input?: AgentEventInput; error?: string } {
+  const type = asNonEmptyString(body.type);
+  if (!type) return { error: "type is required" };
+
+  const input: AgentEventInput = { type: type as AgentEventInput["type"] };
+  for (const field of AGENT_EVENT_STRING_FIELDS) {
+    const picked = pickOptionalString(body, field);
+    if (picked.error) return { error: picked.error };
+    if (picked.value !== undefined) {
+      (input as Record<string, unknown>)[field] = picked.value;
+    }
+  }
+
+  const status = pickOptionalString(body, "status");
+  if (status.error) return { error: status.error };
+  if (status.value !== undefined) {
+    if (!["ok", "error", "pending"].includes(status.value)) {
+      return { error: "status must be one of: ok, error, pending" };
+    }
+    input.status = status.value as AgentEventInput["status"];
+  }
+
+  for (const field of AGENT_EVENT_ARRAY_FIELDS) {
+    const picked = pickStringArray(body, field);
+    if (picked.error) return { error: picked.error };
+    if (picked.value !== undefined) {
+      (input as Record<string, unknown>)[field] = picked.value;
+    }
+  }
+
+  const usage = pickAgentEventUsage(body.usage);
+  if (usage.error) return { error: usage.error };
+  if (usage.value !== undefined) input.usage = usage.value;
+
+  const cost = pickAgentEventCost(body.cost);
+  if (cost.error) return { error: cost.error };
+  if (cost.value !== undefined) input.cost = cost.value;
+
+  if (body.metadata !== undefined) {
+    if (!isRecord(body.metadata)) return { error: "metadata must be an object" };
+    input.metadata = body.metadata;
+  }
+
+  return { input };
+}
+
+const RULES_RESOLVE_FIELDS = [
+  "workspaceRoot",
+  "root",
+  "cwd",
+  "instructionGlobs",
+  "ignoreDirectories",
+  "maxDepth",
+  "maxBytes",
+  "maxFileBytes",
+  "includeContent",
+] as const;
+const MEMORY_PROPOSAL_FIELDS = [
+  "teamId",
+  "proposalId",
+  "project",
+  "action",
+  "status",
+  "title",
+  "reason",
+  "change",
+  "provenance",
+  "targetMemoryId",
+  "limit",
+  "offset",
+  "actorId",
+  "requestedBy",
+  "permissions",
+  "roles",
+  "roleGrants",
+  "teamPolicy",
+  "auth",
+  "access",
+  "actor",
+  "requestContext",
+  "request",
+] as const;
+const SYNC_CONTROL_PLANE_FIELDS = [
+  "peerId",
+  "workspaceId",
+  "name",
+  "mode",
+  "endpoint",
+  "enabled",
+  "authPolicy",
+  "scopePolicy",
+  "workspaceRoot",
+  "localOnly",
+  "allowedScopes",
+  "labels",
+  "direction",
+  "scopes",
+  "dryRun",
+  "planId",
+  "status",
+  "startedAt",
+  "endedAt",
+  "itemCounts",
+  "errors",
+  "evidence",
+  "approved",
+  "conflictPolicy",
+  "exportData",
+  "snapshot",
+  "source",
+  "limit",
+  "offset",
+] as const;
+const OTEL_LINEAGE_EXPORT_FIELDS = [
+  "events",
+  "eventIds",
+  "project",
+  "sessionId",
+  "limit",
+] as const;
+const OTEL_LINEAGE_IMPORT_FIELDS = ["spans", "source"] as const;
+const DELETION_PROPAGATION_FIELDS = [
+  "targetId",
+  "memoryId",
+  "sourceObservationId",
+  "sourceHash",
+  "sourceUri",
+  "project",
+  "agentId",
+  "dryRun",
+  "apply",
+  "mode",
+  "actor",
+  "reason",
+] as const;
+const IMPORT_STRATEGIES = new Set(["merge", "replace", "skip"]);
+
+function pickRulesResolvePayload(
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const field of RULES_RESOLVE_FIELDS) {
+    if (source[field] !== undefined) payload[field] = source[field];
+  }
+  return payload;
+}
+
+function pickFields(
+  source: Record<string, unknown>,
+  allowedFields: readonly string[],
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const field of allowedFields) {
+    if (source[field] !== undefined) payload[field] = source[field];
+  }
+  return payload;
+}
+
+function validateWhitelistedField(field: string, value: unknown): string | undefined {
+  const stringFields = new Set([
+    "action",
+    "actor",
+    "agentId",
+    "conflictPolicy",
+    "direction",
+    "memoryId",
+    "mode",
+    "peerId",
+    "project",
+    "proposalId",
+    "reason",
+    "reviewer",
+    "source",
+    "sourceHash",
+    "sourceObservationId",
+    "sourceUri",
+    "targetId",
+    "workspaceId",
+  ]);
+  const stringArrayFields = new Set(["eventIds", "permissions", "scopes"]);
+  const booleanFields = new Set(["apply", "approved", "dryRun"]);
+  const objectFields = new Set(["change", "exportData", "snapshot"]);
+  if (stringFields.has(field) && typeof value !== "string") {
+    return `${field} must be a string`;
+  }
+  if (
+    stringArrayFields.has(field) &&
+    (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+  ) {
+    return `${field} must be an array of strings`;
+  }
+  if (booleanFields.has(field) && typeof value !== "boolean") {
+    return `${field} must be a boolean`;
+  }
+  if (objectFields.has(field) && !isRecord(value)) {
+    return `${field} must be an object`;
+  }
+  if (field === "limit" && !Number.isInteger(value)) {
+    return "limit must be an integer";
+  }
+  if (field === "spans" && !Array.isArray(value)) {
+    return "spans must be an array";
+  }
+  return undefined;
+}
+
+function validateWhitelistedPayload(
+  payload: Record<string, unknown>,
+): string | undefined {
+  for (const [field, value] of Object.entries(payload)) {
+    const error = validateWhitelistedField(field, value);
+    if (error) return error;
+  }
+  return undefined;
+}
+
+async function callWhitelistedFunction(
+  sdk: ISdk,
+  req: ApiRequest,
+  functionId: string,
+  allowedFields: readonly string[],
+): Promise<Response> {
+  if (req.body !== undefined && !isRecord(req.body)) {
+    return { status_code: 400, body: { error: "body must be an object" } };
+  }
+  const payload = pickFields((req.body ?? {}) as Record<string, unknown>, allowedFields);
+  const validationError = validateWhitelistedPayload(payload);
+  if (validationError) {
+    return { status_code: 400, body: { error: validationError } };
+  }
+  const result = await sdk.trigger({ function_id: functionId, payload });
+  return { status_code: 200, body: result };
+}
+
+function isRulesResolveInvalidInput(
+  result: unknown,
+): result is { success: false; code: "invalid_input"; error: string } {
+  return (
+    isRecord(result) &&
+    result.success === false &&
+    result.code === "invalid_input" &&
+    typeof result.error === "string"
+  );
+}
+
 export function registerApiTriggers(
   sdk: ISdk,
   kv: StateKV,
@@ -162,6 +585,8 @@ export function registerApiTriggers(
       return { action: "continue" };
     },
   );
+
+  registerRulesResolverFunction(sdk);
 
   sdk.registerFunction("api::liveness",
     async (): Promise<Response> => ({
@@ -249,7 +674,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::health", 
-    async (req: ApiRequest): Promise<Response> => {
+    async (): Promise<Response> => {
       const health = await getLatestHealth(kv);
       const functionMetrics = metricsStore ? await metricsStore.getAll() : [];
       const circuitBreaker =
@@ -285,7 +710,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::observe",
     async (req: ApiRequest<HookPayload>): Promise<Response> => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
+      const body = (req.body ?? {}) as unknown as Record<string, unknown>;
       const hookType = asNonEmptyString(body.hookType);
       const sessionId = asNonEmptyString(body.sessionId);
       const project = asNonEmptyString(body.project);
@@ -324,7 +749,14 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::context",
     async (
-      req: ApiRequest<{ sessionId: string; project: string; budget?: number }>,
+      req: ApiRequest<{
+        sessionId: string;
+        project: string;
+        budget?: number;
+        tokenBudget?: number;
+        explain?: boolean;
+        includeReport?: boolean;
+      }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const sessionId = asNonEmptyString(body.sessionId);
@@ -342,15 +774,47 @@ export function registerApiTriggers(
           body: { error: "budget must be a positive integer" },
         };
       }
-      const payload: { sessionId: string; project: string; budget?: number } = {
+      const tokenBudget = parseOptionalPositiveInt(body.tokenBudget);
+      if (tokenBudget === null) {
+        return {
+          status_code: 400,
+          body: { error: "tokenBudget must be a positive integer" },
+        };
+      }
+      const explain = parseOptionalBoolean(body.explain);
+      if (explain === null) {
+        return { status_code: 400, body: { error: "explain must be a boolean" } };
+      }
+      const includeReport = parseOptionalBoolean(body.includeReport);
+      if (includeReport === null) {
+        return { status_code: 400, body: { error: "includeReport must be a boolean" } };
+      }
+      const payload: {
+        sessionId: string;
+        project: string;
+        budget?: number;
+        tokenBudget?: number;
+        explain?: boolean;
+        includeReport?: boolean;
+      } = {
         sessionId,
         project,
       };
-      if (budget !== undefined) payload.budget = budget;
+      if (budget !== undefined) {
+        payload.budget = budget;
+        if (tokenBudget === undefined) payload.tokenBudget = budget;
+      }
+      if (tokenBudget !== undefined) {
+        payload.tokenBudget = tokenBudget;
+        if (budget === undefined) payload.budget = tokenBudget;
+      }
+      if (explain !== undefined) payload.explain = explain;
+      if (includeReport !== undefined) payload.includeReport = includeReport;
       const result = await sdk.trigger({ function_id: "mem::context", payload });
       return { status_code: 200, body: result };
     },
   );
+
   sdk.registerTrigger({
     type: "http",
     function_id: "api::context",
@@ -562,6 +1026,8 @@ export function registerApiTriggers(
       req: ApiRequest<{ sessionId: string; project: string; cwd: string }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
+      const automaticSkip = automaticCaptureSkipResponse(body);
+      if (automaticSkip) return automaticSkip;
       const sessionId = asNonEmptyString(body.sessionId);
       const project = asNonEmptyString(body.project);
       const cwd = asNonEmptyString(body.cwd);
@@ -594,6 +1060,17 @@ export function registerApiTriggers(
         ...(agentId ? { agentId } : {}),
       };
       await kv.set(KV.sessions, sessionId, session);
+      await safeRecordAgentEvent(kv, {
+        type: "session_started",
+        timestamp: session.startedAt,
+        sessionId,
+        project,
+        cwd,
+        agentId,
+        functionId: "api::session::start",
+        targetIds: [sessionId],
+        metadata: { title },
+      });
       const contextResult = await sdk.trigger<
         { sessionId: string; project: string },
         { context: string }
@@ -616,17 +1093,34 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::session::end",
     async (req: ApiRequest<{ sessionId: string }>): Promise<Response> => {
-      const sessionId = asNonEmptyString((req.body as Record<string, unknown>)?.sessionId);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const automaticSkip = automaticCaptureSkipResponse(body);
+      if (automaticSkip) return automaticSkip;
+      const sessionId = asNonEmptyString(body.sessionId);
       if (!sessionId) {
         return {
           status_code: 400,
           body: { error: "sessionId is required and must be a non-empty string" },
         };
       }
+      const existingSession = await kv.get<Session>(KV.sessions, sessionId).catch(() => null);
+      const endedAt = new Date().toISOString();
       await kv.update(KV.sessions, sessionId, [
-        { type: "set", path: "endedAt", value: new Date().toISOString() },
+        { type: "set", path: "endedAt", value: endedAt },
         { type: "set", path: "status", value: "completed" },
       ]);
+      await safeRecordAgentEvent(kv, {
+        type: "session_ended",
+        timestamp: endedAt,
+        sessionId,
+        project: existingSession?.project,
+        cwd: existingSession?.cwd,
+        agentId: existingSession?.agentId,
+        functionId: "api::session::end",
+        targetIds: [sessionId],
+        commitShas: existingSession?.commitShas,
+        metadata: { observationCount: existingSession?.observationCount ?? 0 },
+      });
       // Fan out session-stopped lifecycle (non-blocking).
       try {
         sdk.trigger({
@@ -963,6 +1457,16 @@ export function registerApiTriggers(
         ttlDays?: number;
         sourceObservationIds?: string[];
         project?: string;
+        lane?: string;
+        confidence?: number;
+        privacyScope?: string;
+        ownerId?: string;
+        branch?: string;
+        commit?: string;
+        sourceHash?: string;
+        sourceType?: string;
+        sourceUri?: string;
+        reviewState?: string;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -990,6 +1494,16 @@ export function registerApiTriggers(
           ...(req.body.ttlDays !== undefined && { ttlDays: req.body.ttlDays }),
           ...(req.body.sourceObservationIds !== undefined && { sourceObservationIds: req.body.sourceObservationIds }),
           ...(req.body.project !== undefined && { project: req.body.project }),
+          ...(req.body.lane !== undefined && { lane: req.body.lane }),
+          ...(req.body.confidence !== undefined && { confidence: req.body.confidence }),
+          ...(req.body.privacyScope !== undefined && { privacyScope: req.body.privacyScope }),
+          ...(req.body.ownerId !== undefined && { ownerId: req.body.ownerId }),
+          ...(req.body.branch !== undefined && { branch: req.body.branch }),
+          ...(req.body.commit !== undefined && { commit: req.body.commit }),
+          ...(req.body.sourceHash !== undefined && { sourceHash: req.body.sourceHash }),
+          ...(req.body.sourceType !== undefined && { sourceType: req.body.sourceType }),
+          ...(req.body.sourceUri !== undefined && { sourceUri: req.body.sourceUri }),
+          ...(req.body.reviewState !== undefined && { reviewState: req.body.reviewState }),
         },
       });
       return { status_code: 201, body: result };
@@ -1025,6 +1539,483 @@ export function registerApiTriggers(
     type: "http",
     function_id: "api::forget",
     config: { api_path: "/agentmemory/forget", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::memory-create",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (
+        !body.content ||
+        typeof body.content !== "string" ||
+        !body.content.trim()
+      ) {
+        return { status_code: 400, body: { error: "content is required" } };
+      }
+      if (
+        body.project !== undefined &&
+        (typeof body.project !== "string" || !body.project.trim())
+      ) {
+        return { status_code: 400, body: { error: "project must be a non-empty string" } };
+      }
+      if (
+        body.requireGatePass !== undefined &&
+        typeof body.requireGatePass !== "boolean"
+      ) {
+        return { status_code: 400, body: { error: "requireGatePass must be a boolean" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::memory-create",
+        payload: {
+          content: body.content,
+          ...(body.type !== undefined && { type: body.type }),
+          ...(body.concepts !== undefined && { concepts: body.concepts }),
+          ...(body.files !== undefined && { files: body.files }),
+          ...(body.ttlDays !== undefined && { ttlDays: body.ttlDays }),
+          ...(body.sourceObservationIds !== undefined && { sourceObservationIds: body.sourceObservationIds }),
+          ...(body.agentId !== undefined && { agentId: body.agentId }),
+          ...(body.project !== undefined && { project: body.project }),
+          ...(body.lane !== undefined && { lane: body.lane }),
+          ...(body.confidence !== undefined && { confidence: body.confidence }),
+          ...(body.privacyScope !== undefined && { privacyScope: body.privacyScope }),
+          ...(body.ownerId !== undefined && { ownerId: body.ownerId }),
+          ...(body.branch !== undefined && { branch: body.branch }),
+          ...(body.commit !== undefined && { commit: body.commit }),
+          ...(body.sourceHash !== undefined && { sourceHash: body.sourceHash }),
+          ...(body.sourceType !== undefined && { sourceType: body.sourceType }),
+          ...(body.sourceUri !== undefined && { sourceUri: body.sourceUri }),
+          ...(body.reviewState !== undefined && { reviewState: body.reviewState }),
+          ...(body.requireGatePass !== undefined && { requireGatePass: body.requireGatePass }),
+          ...(body.writeGate !== undefined && { writeGate: body.writeGate }),
+        },
+      });
+      const statusCode =
+        isRecord(result) && result.success === false ? 400 : 201;
+      return { status_code: statusCode, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-create",
+    config: { api_path: "/agentmemory/memory/create", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::memory-inspect",
+    async (req: ApiRequest<{ memoryId?: string }>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const memoryId =
+        asNonEmptyString(req.body?.memoryId) ??
+        asNonEmptyString(req.query_params?.["memoryId"]);
+      if (!memoryId) return { status_code: 400, body: { error: "memoryId is required" } };
+      const result = await sdk.trigger({
+        function_id: "mem::memory-inspect",
+        payload: { memoryId },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-inspect",
+    config: { api_path: "/agentmemory/memory/inspect", http_method: "POST" },
+  });
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-inspect",
+    config: { api_path: "/agentmemory/memory/inspect", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::memory-history",
+    async (req: ApiRequest<{ memoryId?: string }>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const memoryId =
+        asNonEmptyString(req.body?.memoryId) ??
+        asNonEmptyString(req.query_params?.["memoryId"]);
+      if (!memoryId) return { status_code: 400, body: { error: "memoryId is required" } };
+      const result = await sdk.trigger({
+        function_id: "mem::memory-history",
+        payload: { memoryId },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-history",
+    config: { api_path: "/agentmemory/memory/history", http_method: "GET" },
+  });
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-history",
+    config: { api_path: "/agentmemory/memory/history", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::memory-update",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!asNonEmptyString(body.memoryId)) {
+        return { status_code: 400, body: { error: "memoryId is required" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::memory-update",
+        payload: {
+          memoryId: body.memoryId,
+          content: body.content,
+          title: body.title,
+          concepts: body.concepts,
+          files: body.files,
+          strength: body.strength,
+          confidence: body.confidence,
+          lane: body.lane,
+          reviewState: body.reviewState,
+          privacyScope: body.privacyScope,
+          validFrom: body.validFrom,
+          validUntil: body.validUntil,
+          reason: body.reason,
+          actor: body.actor,
+        },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-update",
+    config: { api_path: "/agentmemory/memory/update", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::memory-expire",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!asNonEmptyString(body.memoryId)) {
+        return { status_code: 400, body: { error: "memoryId is required" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::memory-expire",
+        payload: {
+          memoryId: body.memoryId,
+          expiresAt: body.expiresAt,
+          reason: body.reason,
+          actor: body.actor,
+        },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-expire",
+    config: { api_path: "/agentmemory/memory/expire", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::memory-archive",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!asNonEmptyString(body.memoryId)) {
+        return { status_code: 400, body: { error: "memoryId is required" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::memory-archive",
+        payload: {
+          memoryId: body.memoryId,
+          reason: body.reason,
+          actor: body.actor,
+        },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-archive",
+    config: { api_path: "/agentmemory/memory/archive", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::memory-restore",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!asNonEmptyString(body.memoryId)) {
+        return { status_code: 400, body: { error: "memoryId is required" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::memory-restore",
+        payload: {
+          memoryId: body.memoryId,
+          reason: body.reason,
+          actor: body.actor,
+        },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-restore",
+    config: { api_path: "/agentmemory/memory/restore", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::memory-delete",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const optionalString = (field: string): string | Response | undefined => {
+        if (body[field] === undefined || body[field] === null) return undefined;
+        const value = asNonEmptyString(body[field]);
+        if (!value) {
+          return {
+            status_code: 400,
+            body: { error: `${field} must be a non-empty string` },
+          };
+        }
+        return value;
+      };
+      const memoryId = optionalString("memoryId");
+      if (typeof memoryId === "object") return memoryId;
+      const sourceObservationId = optionalString("sourceObservationId");
+      if (typeof sourceObservationId === "object") return sourceObservationId;
+      const sourceHash = optionalString("sourceHash");
+      if (typeof sourceHash === "object") return sourceHash;
+      const sourceUri = optionalString("sourceUri");
+      if (typeof sourceUri === "object") return sourceUri;
+      const project = optionalString("project");
+      if (typeof project === "object") return project;
+      const agentId = optionalString("agentId");
+      if (typeof agentId === "object") return agentId;
+      if (!memoryId && !sourceObservationId && !sourceHash && !sourceUri) {
+        return {
+          status_code: 400,
+          body: { error: "memoryId or source selector is required" },
+        };
+      }
+      if (
+        body.dryRun !== undefined &&
+        body.dryRun !== null &&
+        typeof body.dryRun !== "boolean"
+      ) {
+        return { status_code: 400, body: { error: "dryRun must be a boolean" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::memory-delete",
+        payload: {
+          memoryId,
+          sourceObservationId,
+          sourceHash,
+          sourceUri,
+          project,
+          agentId,
+          mode: body.mode,
+          reason: body.reason,
+          actor: body.actor,
+          dryRun: body.dryRun,
+        },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-delete",
+    config: { api_path: "/agentmemory/memory/delete", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::memory-ledger",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const params = req.query_params ?? {};
+      const limit = parseOptionalPositiveInt(params.limit);
+      if (limit === null) return { status_code: 400, body: { error: "invalid numeric parameter: limit" } };
+      const offset = parseOptionalInt(params.offset);
+      if (offset !== undefined && (!Number.isInteger(offset) || offset < 0)) {
+        return { status_code: 400, body: { error: "invalid numeric parameter: offset" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::memory-ledger",
+        payload: {
+          project: params.project,
+          state: params.state,
+          type: params.type,
+          lane: params.lane,
+          reviewState: params.reviewState,
+          includeSourceCards: params.includeSourceCards === "true",
+          limit,
+          offset,
+        },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-ledger",
+    config: { api_path: "/agentmemory/memory-ledger", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::memory-review-queue",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const params = req.query_params ?? {};
+      const limit = parseOptionalPositiveInt(params.limit);
+      if (limit === null) return { status_code: 400, body: { error: "invalid numeric parameter: limit" } };
+      const result = await sdk.trigger({
+        function_id: "mem::memory-review-queue",
+        payload: { project: params.project, limit },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-review-queue",
+    config: { api_path: "/agentmemory/memory-review-queue", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::today-in-memory",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const params = req.query_params ?? {};
+      const limit = parseOptionalPositiveInt(params.limit);
+      if (limit === null) return { status_code: 400, body: { error: "invalid numeric parameter: limit" } };
+      const result = await sdk.trigger({
+        function_id: "mem::today-in-memory",
+        payload: {
+          project: params.project,
+          agentId: params.agentId,
+          sessionId: params.sessionId,
+          date: params.date,
+          since: params.since,
+          until: params.until,
+          limit,
+        },
+      });
+      const statusCode =
+        isRecord(result) && result.success === false ? 400 : 200;
+      return { status_code: statusCode, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::today-in-memory",
+    config: { api_path: "/agentmemory/memory/today", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::memory-unlinked-mentions",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const params = req.query_params ?? {};
+      const limit = parseOptionalPositiveInt(params.limit);
+      if (limit === null) return { status_code: 400, body: { error: "invalid numeric parameter: limit" } };
+      const minMentions = parseOptionalPositiveInt(params.minMentions);
+      if (minMentions === null) return { status_code: 400, body: { error: "invalid numeric parameter: minMentions" } };
+      const result = await sdk.trigger({
+        function_id: "mem::memory-unlinked-mentions",
+        payload: {
+          project: params.project,
+          agentId: params.agentId,
+          sessionId: params.sessionId,
+          date: params.date,
+          since: params.since,
+          until: params.until,
+          limit,
+          minMentions,
+        },
+      });
+      const statusCode =
+        isRecord(result) && result.success === false ? 400 : 200;
+      return { status_code: statusCode, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-unlinked-mentions",
+    config: { api_path: "/agentmemory/memory/unlinked-mentions", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::agent-event-list",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const params = req.query_params ?? {};
+      const limit = parseOptionalPositiveInt(params.limit);
+      if (limit === null) return { status_code: 400, body: { error: "invalid numeric parameter: limit" } };
+      const offset = parseOptionalInt(params.offset);
+      if (offset !== undefined && (!Number.isInteger(offset) || offset < 0)) {
+        return { status_code: 400, body: { error: "invalid numeric parameter: offset" } };
+      }
+      const qp = (key: string): string | undefined =>
+        asNonEmptyString(params[key]) ?? undefined;
+      const format = qp("format")?.toLowerCase();
+      if (format !== undefined && format !== "otel") {
+        return { status_code: 400, body: { error: "format must be one of: otel" } };
+      }
+      const payload: AgentEventListFilter = {
+        format: format as AgentEventListFilter["format"],
+        type: qp("type") as AgentEventListFilter["type"],
+        sessionId: qp("sessionId"),
+        project: qp("project"),
+        agentId: qp("agentId"),
+        fromAgentId: qp("fromAgentId"),
+        toAgentId: qp("toAgentId"),
+        functionId: qp("functionId"),
+        targetId: qp("targetId"),
+        observationId: qp("observationId"),
+        memoryId: qp("memoryId"),
+        signalId: qp("signalId"),
+        correlationId: qp("correlationId"),
+        parentEventId: qp("parentEventId"),
+        dateFrom: qp("dateFrom"),
+        dateTo: qp("dateTo"),
+        limit,
+        offset,
+      };
+      const result = await sdk.trigger({ function_id: "mem::agent-event-list", payload });
+      const success = (result as { success?: boolean }).success !== false;
+      return { status_code: success ? 200 : 400, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::agent-event-list",
+    config: { api_path: "/agentmemory/agent-events", http_method: "GET" },
+  });
+
+  sdk.registerFunction("api::agent-event-record",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const built = buildAgentEventInput(body);
+      if (built.error || !built.input) {
+        return { status_code: 400, body: { error: built.error ?? "invalid agent event payload" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::agent-event-record",
+        payload: built.input,
+      });
+      const success = (result as { success?: boolean }).success !== false;
+      const skipped = (result as { skipped?: boolean }).skipped === true;
+      return { status_code: success ? (skipped ? 200 : 201) : 400, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::agent-event-record",
+    config: { api_path: "/agentmemory/agent-events", http_method: "POST" },
   });
 
   sdk.registerFunction("api::consolidate", 
@@ -1070,6 +2061,219 @@ export function registerApiTriggers(
     function_id: "api::generate-rules",
     config: { api_path: "/agentmemory/generate-rules", http_method: "POST" },
   });
+
+  sdk.registerFunction("api::rules-resolve",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      if (req.body !== undefined && !isRecord(req.body)) {
+        return { status_code: 400, body: { error: "body must be an object" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::rules-resolve",
+        payload: pickRulesResolvePayload((req.body ?? {}) as Record<string, unknown>),
+      });
+      if (isRulesResolveInvalidInput(result)) {
+        return { status_code: 400, body: result };
+      }
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::rules-resolve",
+    config: {
+      api_path: "/agentmemory/rules/resolve",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction("api::rules-resolve-get",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const result = await sdk.trigger({
+        function_id: "mem::rules-resolve",
+        payload: pickRulesResolvePayload(req.query_params ?? {}),
+      });
+      if (isRulesResolveInvalidInput(result)) {
+        return { status_code: 400, body: result };
+      }
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::rules-resolve-get",
+    config: {
+      api_path: "/agentmemory/rules/resolve",
+      http_method: "GET",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction("api::compliance-soc2-evidence",
+    async (req: ApiRequest<ComplianceEvidenceInput>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = req.body ?? {};
+      if (
+        body.includeRuleContent !== undefined &&
+        typeof body.includeRuleContent !== "boolean"
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "includeRuleContent must be a boolean" },
+        };
+      }
+      const payload: ComplianceEvidenceInput = {};
+      if (typeof body.project === "string") payload.project = body.project;
+      if (typeof body.workspaceRoot === "string") {
+        payload.workspaceRoot = body.workspaceRoot;
+      }
+      if (body.teamPolicy !== undefined) payload.teamPolicy = body.teamPolicy;
+      if (body.releaseGateEvidence !== undefined) {
+        payload.releaseGateEvidence = body.releaseGateEvidence;
+      }
+      if (body.includeRuleContent !== undefined) {
+        payload.includeRuleContent = body.includeRuleContent;
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::compliance-evidence",
+        payload,
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::compliance-soc2-evidence",
+    config: {
+      api_path: "/agentmemory/compliance/soc2-evidence",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  const whitelistedPost = (
+    apiFunctionId: string,
+    path: string,
+    memoryFunctionId: string,
+    allowedFields: readonly string[],
+  ) => {
+    sdk.registerFunction(apiFunctionId,
+      async (req: ApiRequest): Promise<Response> => {
+        const authErr = checkAuth(req, secret);
+        if (authErr) return authErr;
+        return callWhitelistedFunction(sdk, req, memoryFunctionId, allowedFields);
+      },
+    );
+    sdk.registerTrigger({
+      type: "http",
+      function_id: apiFunctionId,
+      config: {
+        api_path: path,
+        http_method: "POST",
+        middleware_function_ids: ["middleware::api-auth"],
+      },
+    });
+  };
+
+  const roadmapRoutes = [
+    {
+      apiFunctionId: "api::memory-proposal-create",
+      api_path: "/agentmemory/memory-proposals/create",
+      memoryFunctionId: "mem::memory-proposal-create",
+      allowedFields: MEMORY_PROPOSAL_FIELDS,
+    },
+    {
+      apiFunctionId: "api::memory-proposal-list",
+      api_path: "/agentmemory/memory-proposals/list",
+      memoryFunctionId: "mem::memory-proposal-list",
+      allowedFields: MEMORY_PROPOSAL_FIELDS,
+    },
+    {
+      apiFunctionId: "api::memory-proposal-approve",
+      api_path: "/agentmemory/memory-proposals/approve",
+      memoryFunctionId: "mem::memory-proposal-approve",
+      allowedFields: MEMORY_PROPOSAL_FIELDS,
+    },
+    {
+      apiFunctionId: "api::memory-proposal-reject",
+      api_path: "/agentmemory/memory-proposals/reject",
+      memoryFunctionId: "mem::memory-proposal-reject",
+      allowedFields: MEMORY_PROPOSAL_FIELDS,
+    },
+    {
+      apiFunctionId: "api::memory-proposal-apply",
+      api_path: "/agentmemory/memory-proposals/apply",
+      memoryFunctionId: "mem::memory-proposal-apply",
+      allowedFields: MEMORY_PROPOSAL_FIELDS,
+    },
+    {
+      apiFunctionId: "api::sync-peer-register",
+      api_path: "/agentmemory/sync/peers/register",
+      memoryFunctionId: "mem::sync-peer-register",
+      allowedFields: SYNC_CONTROL_PLANE_FIELDS,
+    },
+    {
+      apiFunctionId: "api::sync-workspace-register",
+      api_path: "/agentmemory/sync/workspaces/register",
+      memoryFunctionId: "mem::sync-workspace-register",
+      allowedFields: SYNC_CONTROL_PLANE_FIELDS,
+    },
+    {
+      apiFunctionId: "api::sync-plan",
+      api_path: "/agentmemory/sync/plan",
+      memoryFunctionId: "mem::sync-plan",
+      allowedFields: SYNC_CONTROL_PLANE_FIELDS,
+    },
+    {
+      apiFunctionId: "api::sync-run-record",
+      api_path: "/agentmemory/sync/runs/record",
+      memoryFunctionId: "mem::sync-run-record",
+      allowedFields: SYNC_CONTROL_PLANE_FIELDS,
+    },
+    {
+      apiFunctionId: "api::sync-local-apply",
+      api_path: "/agentmemory/sync/local/apply",
+      memoryFunctionId: "mem::sync-local-apply",
+      allowedFields: SYNC_CONTROL_PLANE_FIELDS,
+    },
+    {
+      apiFunctionId: "api::sync-status",
+      api_path: "/agentmemory/sync/status",
+      memoryFunctionId: "mem::sync-status",
+      allowedFields: SYNC_CONTROL_PLANE_FIELDS,
+    },
+    {
+      apiFunctionId: "api::otel-lineage-export",
+      api_path: "/agentmemory/lineage/otel/export",
+      memoryFunctionId: "mem::otel-lineage-export",
+      allowedFields: OTEL_LINEAGE_EXPORT_FIELDS,
+    },
+    {
+      apiFunctionId: "api::otel-lineage-import",
+      api_path: "/agentmemory/lineage/otel/import",
+      memoryFunctionId: "mem::otel-lineage-import",
+      allowedFields: OTEL_LINEAGE_IMPORT_FIELDS,
+    },
+    {
+      apiFunctionId: "api::deletion-propagation-report",
+      api_path: "/agentmemory/governance/deletion-propagation",
+      memoryFunctionId: "mem::deletion-propagation-report",
+      allowedFields: DELETION_PROPAGATION_FIELDS,
+    },
+  ] as const;
+  for (const route of roadmapRoutes) {
+    whitelistedPost(
+      route.apiFunctionId,
+      route.api_path,
+      route.memoryFunctionId,
+      route.allowedFields,
+    );
+  }
 
   sdk.registerFunction("api::migrate",
     async (
@@ -1128,6 +2332,23 @@ export function registerApiTriggers(
         limit?: number;
         project?: string;
         includeLessons?: boolean;
+        explain?: boolean;
+        searchMode?: string;
+        retrievalMode?: string;
+        includeReport?: boolean;
+        tokenBudget?: number;
+        token_budget?: number;
+        budget?: number;
+        files?: string[] | string;
+        file?: string;
+        filePath?: string;
+        cwd?: string;
+        branch?: string;
+        commit?: string;
+        memoryTier?: string;
+        privacyScope?: string;
+        asOf?: string;
+        validAt?: string;
         agentId?: string;
         sessionId?: string;
         source?: string;
@@ -1150,6 +2371,52 @@ export function registerApiTriggers(
       const headers = (req.headers || {}) as Record<string, string | string[] | undefined>;
       const sourceHeader = headers["x-agentmemory-source"] ?? headers["X-Agentmemory-Source"];
       const sourceFromHeader = Array.isArray(sourceHeader) ? sourceHeader[0] : sourceHeader;
+      const searchMode = parseOptionalSearchMode(req.body?.searchMode);
+      if (searchMode === null) {
+        return {
+          status_code: 400,
+          body: { error: "searchMode must be one of: fast, balanced, deep" },
+        };
+      }
+      const retrievalMode = parseOptionalRetrievalMode(req.body?.retrievalMode);
+      if (retrievalMode === null) {
+        return {
+          status_code: 400,
+          body: {
+            error: "retrievalMode must be one of: basic, local_graph, global_community, drift, as_of",
+          },
+        };
+      }
+      const explain = parseOptionalBoolean(req.body?.explain);
+      if (explain === null) {
+        return { status_code: 400, body: { error: "explain must be a boolean" } };
+      }
+      const includeReport = parseOptionalBoolean(req.body?.includeReport);
+      if (includeReport === null) {
+        return { status_code: 400, body: { error: "includeReport must be a boolean" } };
+      }
+      const tokenBudget = parseOptionalPositiveInt(req.body?.tokenBudget);
+      if (tokenBudget === null) {
+        return {
+          status_code: 400,
+          body: { error: "tokenBudget must be a positive integer" },
+        };
+      }
+      const tokenBudgetSnake = parseOptionalPositiveInt(req.body?.token_budget);
+      if (tokenBudgetSnake === null) {
+        return {
+          status_code: 400,
+          body: { error: "token_budget must be a positive integer" },
+        };
+      }
+      const budget = parseOptionalPositiveInt(req.body?.budget);
+      if (budget === null) {
+        return {
+          status_code: 400,
+          body: { error: "budget must be a positive integer" },
+        };
+      }
+      const effectiveTokenBudget = tokenBudget ?? tokenBudgetSnake ?? budget;
       // Whitelist payload fields explicitly — REST endpoints never pass
       // the raw request body through to sdk.trigger (AGENTS.md security
       // section). Drops unknown fields so a misbehaving client can't
@@ -1160,6 +2427,21 @@ export function registerApiTriggers(
         limit: req.body?.limit,
         project: req.body?.project,
         includeLessons: req.body?.includeLessons,
+        explain,
+        searchMode,
+        retrievalMode,
+        includeReport,
+        tokenBudget: effectiveTokenBudget,
+        files: req.body?.files,
+        file: req.body?.file,
+        filePath: req.body?.filePath,
+        cwd: req.body?.cwd,
+        branch: req.body?.branch,
+        commit: req.body?.commit,
+        memoryTier: req.body?.memoryTier,
+        privacyScope: req.body?.privacyScope,
+        asOf: req.body?.asOf,
+        validAt: req.body?.validAt,
         agentId: req.body?.agentId,
         sessionId: req.body?.sessionId,
         source: req.body?.source ?? sourceFromHeader,
@@ -1172,6 +2454,123 @@ export function registerApiTriggers(
     type: "http",
     function_id: "api::smart-search",
     config: { api_path: "/agentmemory/smart-search", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::search-explain",
+    async (
+      req: ApiRequest<{
+        query?: string;
+        limit?: number;
+        project?: string;
+        cwd?: string;
+        includeLessons?: boolean;
+        explain?: boolean;
+        searchMode?: string;
+        retrievalMode?: string;
+        includeReport?: boolean;
+        tokenBudget?: number;
+        token_budget?: number;
+        budget?: number;
+        files?: string[] | string;
+        file?: string;
+        filePath?: string;
+        branch?: string;
+        commit?: string;
+        memoryTier?: string;
+        privacyScope?: string;
+        asOf?: string;
+        validAt?: string;
+        agentId?: string;
+        sessionId?: string;
+      }>,
+    ): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      if (!req.body?.query || typeof req.body.query !== "string") {
+        return {
+          status_code: 400,
+          body: { error: "query is required" },
+        };
+      }
+      const searchMode = parseOptionalSearchMode(req.body.searchMode);
+      if (searchMode === null) {
+        return {
+          status_code: 400,
+          body: { error: "searchMode must be one of: fast, balanced, deep" },
+        };
+      }
+      const retrievalMode = parseOptionalRetrievalMode(req.body.retrievalMode);
+      if (retrievalMode === null) {
+        return {
+          status_code: 400,
+          body: {
+            error: "retrievalMode must be one of: basic, local_graph, global_community, drift, as_of",
+          },
+        };
+      }
+      const explain = parseOptionalBoolean(req.body.explain);
+      if (explain === null) {
+        return { status_code: 400, body: { error: "explain must be a boolean" } };
+      }
+      const includeReport = parseOptionalBoolean(req.body.includeReport);
+      if (includeReport === null) {
+        return { status_code: 400, body: { error: "includeReport must be a boolean" } };
+      }
+      const tokenBudget = parseOptionalPositiveInt(req.body.tokenBudget);
+      if (tokenBudget === null) {
+        return {
+          status_code: 400,
+          body: { error: "tokenBudget must be a positive integer" },
+        };
+      }
+      const tokenBudgetSnake = parseOptionalPositiveInt(req.body.token_budget);
+      if (tokenBudgetSnake === null) {
+        return {
+          status_code: 400,
+          body: { error: "token_budget must be a positive integer" },
+        };
+      }
+      const budget = parseOptionalPositiveInt(req.body.budget);
+      if (budget === null) {
+        return {
+          status_code: 400,
+          body: { error: "budget must be a positive integer" },
+        };
+      }
+      const effectiveTokenBudget = tokenBudget ?? tokenBudgetSnake ?? budget;
+      const result = await sdk.trigger({
+        function_id: "mem::smart-search",
+        payload: {
+          query: req.body.query,
+          limit: req.body.limit,
+          project: req.body.project,
+          includeLessons: req.body.includeLessons,
+          searchMode,
+          retrievalMode,
+          includeReport,
+          tokenBudget: effectiveTokenBudget,
+          files: req.body.files,
+          file: req.body.file,
+          filePath: req.body.filePath,
+          cwd: req.body.cwd,
+          branch: req.body.branch,
+          commit: req.body.commit,
+          memoryTier: req.body.memoryTier,
+          privacyScope: req.body.privacyScope,
+          asOf: req.body.asOf,
+          validAt: req.body.validAt,
+          agentId: req.body.agentId,
+          sessionId: req.body.sessionId,
+          explain: true,
+        },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::search-explain",
+    config: { api_path: "/agentmemory/search/explain", http_method: "POST" },
   });
 
   // #771: read-back endpoint for the followup-rate diagnostic. Returns
@@ -1289,14 +2688,41 @@ export function registerApiTriggers(
       req: ApiRequest<{
         exportData: unknown;
         strategy?: "merge" | "replace" | "skip";
+        dryRun?: boolean;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      if (!req.body?.exportData) {
+      const body: Record<string, unknown> = isRecord(req.body) ? req.body : {};
+      if (!body.exportData) {
         return { status_code: 400, body: { error: "exportData is required" } };
       }
-      const result = await sdk.trigger({ function_id: "mem::import", payload: req.body });
+      if (
+        body.strategy !== undefined &&
+        (typeof body.strategy !== "string" || !IMPORT_STRATEGIES.has(body.strategy))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "strategy must be one of: merge, replace, skip" },
+        };
+      }
+      if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
+        return { status_code: 400, body: { error: "dryRun must be a boolean" } };
+      }
+      const payload: {
+        exportData: unknown;
+        strategy?: "merge" | "replace" | "skip";
+        dryRun?: boolean;
+      } = {
+        exportData: body.exportData,
+      };
+      if (body.strategy !== undefined) {
+        payload.strategy = body.strategy as "merge" | "replace" | "skip";
+      }
+      if (body.dryRun !== undefined) {
+        payload.dryRun = body.dryRun;
+      }
+      const result = await sdk.trigger({ function_id: "mem::import", payload });
       return { status_code: 200, body: result };
     },
   );
@@ -2419,7 +3845,8 @@ export function registerApiTriggers(
     async (req: ApiRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      if (!req.body?.name || !req.body?.steps) {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!asNonEmptyString(body.name) || !Array.isArray(body.steps)) {
         return {
           status_code: 400,
           body: { error: "name and steps are required" },

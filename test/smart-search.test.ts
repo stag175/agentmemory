@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -9,8 +9,15 @@ import type {
   CompressedObservation,
   HybridSearchResult,
   CompactSearchResult,
+  SearchBackendOptions,
   Session,
+  Memory,
+  QueryPlan,
+  RankedEvidence,
 } from "../src/types.js";
+
+const ORIGINAL_AGENT_ID = process.env["AGENT_ID"];
+const ORIGINAL_AGENT_SCOPE = process.env["AGENTMEMORY_AGENT_SCOPE"];
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -73,10 +80,14 @@ describe("Smart Search Function", () => {
   let sdk: ReturnType<typeof mockSdk>;
   let kv: ReturnType<typeof mockKV>;
   let searchResults: HybridSearchResult[];
+  let searchOptions: SearchBackendOptions[];
 
   beforeEach(async () => {
+    delete process.env["AGENT_ID"];
+    delete process.env["AGENTMEMORY_AGENT_SCOPE"];
     sdk = mockSdk();
     kv = mockKV();
+    searchOptions = [];
 
     const obs1 = makeObs({ id: "obs_1", sessionId: "ses_1", title: "Auth handler" });
     const obs2 = makeObs({ id: "obs_2", sessionId: "ses_1", title: "Database setup" });
@@ -86,6 +97,7 @@ describe("Smart Search Function", () => {
         observation: obs1,
         bm25Score: 0.8,
         vectorScore: 0,
+        graphScore: 0,
         combinedScore: 0.8,
         sessionId: "ses_1",
       },
@@ -93,6 +105,7 @@ describe("Smart Search Function", () => {
         observation: obs2,
         bm25Score: 0.3,
         vectorScore: 0,
+        graphScore: 0,
         combinedScore: 0.3,
         sessionId: "ses_1",
       },
@@ -110,8 +123,25 @@ describe("Smart Search Function", () => {
     await kv.set("mem:obs:ses_1", "obs_1", obs1);
     await kv.set("mem:obs:ses_1", "obs_2", obs2);
 
-    const searchFn = async (_query: string, _limit: number) => searchResults;
+    const searchFn = async (
+      _query: string,
+      _limit: number,
+      options?: SearchBackendOptions,
+    ) => {
+      searchOptions.push(options ?? {});
+      return searchResults;
+    };
     registerSmartSearchFunction(sdk as never, kv as never, searchFn);
+  });
+
+  afterEach(() => {
+    if (ORIGINAL_AGENT_ID === undefined) delete process.env["AGENT_ID"];
+    else process.env["AGENT_ID"] = ORIGINAL_AGENT_ID;
+    if (ORIGINAL_AGENT_SCOPE === undefined) {
+      delete process.env["AGENTMEMORY_AGENT_SCOPE"];
+    } else {
+      process.env["AGENTMEMORY_AGENT_SCOPE"] = ORIGINAL_AGENT_SCOPE;
+    }
   });
 
   it("compact mode returns CompactSearchResult array", async () => {
@@ -157,6 +187,613 @@ describe("Smart Search Function", () => {
     })) as { mode: string; results: CompactSearchResult[] };
 
     expect(result.results.length).toBeLessThanOrEqual(2);
+  });
+
+  it("filters compact results by session project before returning them", async () => {
+    const otherObs = makeObs({
+      id: "obs_other",
+      sessionId: "ses_other",
+      title: "Other project auth",
+    });
+    await kv.set("mem:sessions", "ses_other", {
+      id: "ses_other",
+      project: "other-project",
+      cwd: "/other",
+      startedAt: "2026-02-01T00:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await kv.set("mem:obs:ses_other", "obs_other", otherObs);
+    searchResults = [
+      ...searchResults,
+      {
+        observation: otherObs,
+        bm25Score: 1,
+        vectorScore: 0,
+        graphScore: 0,
+        combinedScore: 1,
+        sessionId: "ses_other",
+      },
+    ];
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      project: "my-project",
+      limit: 10,
+    })) as { results: CompactSearchResult[]; explain?: any };
+
+    expect(result.results.map((r) => r.obsId)).toContain("obs_1");
+    expect(result.results.map((r) => r.obsId)).not.toContain("obs_other");
+  });
+
+  it("uses observation sessionId as the authority when project-filtering stale search hits", async () => {
+    const otherObs = makeObs({
+      id: "obs_other",
+      sessionId: "ses_other",
+      title: "Other project auth",
+    });
+    await kv.set("mem:sessions", "ses_other", {
+      id: "ses_other",
+      project: "other-project",
+      cwd: "/other",
+      startedAt: "2026-02-01T00:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await kv.set("mem:obs:ses_other", "obs_other", otherObs);
+    searchResults = [
+      {
+        observation: otherObs,
+        bm25Score: 1,
+        vectorScore: 0,
+        graphScore: 0,
+        combinedScore: 1,
+        sessionId: "ses_1",
+      },
+      searchResults[0],
+    ];
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      project: "my-project",
+      explain: true,
+    })) as { results: CompactSearchResult[]; explain: any };
+
+    expect(result.results.map((r) => r.obsId)).toEqual(["obs_1"]);
+    expect(result.results[0].sessionId).toBe("ses_1");
+    expect(result.explain.candidates.filteredOut).toBe(1);
+  });
+
+  it("passes hard-filter candidate allowlist to the search backend", async () => {
+    const otherObs = makeObs({
+      id: "obs_other",
+      sessionId: "ses_other",
+      title: "Other project auth",
+    });
+    await kv.set("mem:sessions", "ses_other", {
+      id: "ses_other",
+      project: "other-project",
+      cwd: "/other",
+      startedAt: "2026-02-01T00:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await kv.set("mem:obs:ses_other", "obs_other", otherObs);
+
+    const backendSeen: string[] = [];
+    registerSmartSearchFunction(
+      sdk as never,
+      kv as never,
+      async (_query, _limit, options) =>
+        [
+          {
+            observation: otherObs,
+            bm25Score: 1,
+            vectorScore: 0,
+            graphScore: 0,
+            combinedScore: 1,
+            sessionId: "ses_other",
+          },
+          searchResults[0],
+        ].filter((result) => {
+          const keep =
+            options?.candidateFilter?.(
+              result.observation.id,
+              result.sessionId,
+            ) ?? true;
+          if (keep) backendSeen.push(result.observation.id);
+          return keep;
+        }),
+    );
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      project: "my-project",
+      explain: true,
+    })) as { results: CompactSearchResult[]; explain: any };
+
+    expect(backendSeen).toEqual(["obs_1"]);
+    expect(result.results.map((r) => r.obsId)).toEqual(["obs_1"]);
+    expect(result.explain.plan.filterStage).toContain("pre-ranking");
+    expect(result.explain.plan.prefilter.candidateCount).toBe(2);
+  });
+
+  it("applies cwd hard filters before backend ranking with session-scoped candidate ids", async () => {
+    const otherObs = makeObs({
+      id: "obs_1",
+      sessionId: "ses_other",
+      title: "Other cwd auth",
+    });
+    await kv.set("mem:sessions", "ses_other", {
+      id: "ses_other",
+      project: "my-project",
+      cwd: "/other",
+      startedAt: "2026-02-01T00:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    });
+    await kv.set("mem:obs:ses_other", "obs_1", otherObs);
+
+    const backendSeen: string[] = [];
+    registerSmartSearchFunction(
+      sdk as never,
+      kv as never,
+      async (_query, _limit, options) =>
+        [
+          {
+            observation: otherObs,
+            bm25Score: 1,
+            vectorScore: 0,
+            graphScore: 0,
+            combinedScore: 1,
+            sessionId: "ses_other",
+          },
+          searchResults[0],
+        ].filter((result) => {
+          const keep =
+            options?.candidateFilter?.(
+              result.observation.id,
+              result.sessionId,
+            ) ?? true;
+          if (keep) backendSeen.push(`${result.observation.id}:${result.sessionId}`);
+          return keep;
+        }),
+    );
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      cwd: "/tmp",
+      explain: true,
+    })) as { results: CompactSearchResult[]; explain: any };
+
+    expect(backendSeen).toEqual(["obs_1:ses_1"]);
+    expect(result.results.map((r) => r.obsId)).toEqual(["obs_1"]);
+    expect(result.explain.plan.hardFilters.cwd).toBe("/tmp");
+    expect(result.explain.plan.filterStage).toContain("pre-ranking");
+  });
+
+  it("fails closed when post-filtered results lack project metadata", async () => {
+    const orphanObs = makeObs({
+      id: "obs_orphan",
+      sessionId: "ses_missing",
+      title: "Orphan auth",
+    });
+    searchResults = [
+      {
+        observation: orphanObs,
+        bm25Score: 1,
+        vectorScore: 0,
+        graphScore: 0,
+        combinedScore: 1,
+        sessionId: "ses_missing",
+      },
+      searchResults[0],
+    ];
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      project: "my-project",
+      explain: true,
+    })) as { results: CompactSearchResult[]; explain: any };
+
+    expect(result.results.map((r) => r.obsId)).toEqual(["obs_1"]);
+    expect(result.explain.candidates.filteredOut).toBe(1);
+  });
+
+  it("excludes unscoped saved memories from project-filtered smart search", async () => {
+    const unscopedMemory: Memory = {
+      id: "mem_unscoped",
+      createdAt: "2026-02-01T00:00:00Z",
+      updatedAt: "2026-02-01T00:00:00Z",
+      type: "fact",
+      lane: "semantic_fact",
+      lifecycleState: "active",
+      title: "Unscoped auth decision",
+      content: "Unscoped auth memory.",
+      concepts: ["auth"],
+      files: ["src/auth.ts"],
+      sessionIds: [],
+      strength: 7,
+      version: 1,
+      isLatest: true,
+    };
+    await kv.set("mem:memories", unscopedMemory.id, unscopedMemory);
+    searchResults = [
+      {
+        observation: makeObs({
+          id: unscopedMemory.id,
+          sessionId: "memory",
+          title: unscopedMemory.title,
+        }),
+        bm25Score: 1,
+        vectorScore: 0,
+        graphScore: 0,
+        combinedScore: 1,
+        sessionId: "memory",
+      },
+      searchResults[0],
+    ];
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      project: "my-project",
+      explain: true,
+    })) as { results: CompactSearchResult[]; explain: any };
+
+    expect(result.results.map((r) => r.obsId)).toEqual(["obs_1"]);
+    expect(result.explain.candidates.filteredOut).toBe(1);
+  });
+
+  it("passes searchMode through and returns queryPlan plus rankedEvidence when explain is true", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      searchMode: "deep",
+      explain: true,
+      includeLessons: false,
+    })) as {
+      queryPlan: any;
+      rankedEvidence: any[];
+      explain: any;
+      results: CompactSearchResult[];
+    };
+
+    expect(searchOptions[0]?.searchMode).toBe("deep");
+    expect(result.results.map((r) => r.obsId)).toEqual(["obs_1", "obs_2"]);
+    expect(result.queryPlan).toMatchObject({
+      mode: "search",
+      searchMode: "deep",
+      streams: ["bm25", "vector", "graph", "lessons"],
+      filterStage: "none",
+    });
+    expect(result.rankedEvidence[0]).toMatchObject({
+      id: "obs_1",
+      sourceType: "observation",
+      rank: 1,
+      title: "Auth handler",
+      sessionId: "ses_1",
+      score: 0.8,
+      reasons: ["keyword_match"],
+      components: {
+        bm25: 0.8,
+        vector: 0,
+      },
+    });
+    expect(result.explain.queryPlan).toEqual(result.queryPlan);
+    expect(result.explain.rankedEvidence).toEqual(result.rankedEvidence);
+    expect(result.explain.plan).toEqual(result.queryPlan);
+    expect(result.explain.ranking[0]).toMatchObject({
+      obsId: "obs_1",
+      combinedScore: 0.8,
+      reasons: ["keyword_match"],
+    });
+  });
+
+  it("records global_community retrieval mode and emits community summary evidence", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      searchMode: "balanced",
+      retrievalMode: "global_community",
+      explain: true,
+      includeLessons: false,
+    })) as {
+      queryPlan: any;
+      rankedEvidence: any[];
+      explain: any;
+    };
+
+    expect(result.queryPlan).toMatchObject({
+      retrievalMode: "global_community",
+      searchMode: "balanced",
+    });
+    expect(result.queryPlan.streams).toContain("community_summary");
+    expect(result.rankedEvidence[0]).toMatchObject({
+      sourceType: "community_summary",
+      reasons: ["global_community", "community_summary"],
+    });
+    expect(result.rankedEvidence.some((evidence) => evidence.sourceType === "observation")).toBe(true);
+    expect(result.explain.rankedEvidence).toEqual(result.rankedEvidence);
+  });
+
+  it("uses includeReport and tokenBudget to return a packed evidence report", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      retrievalMode: "global_community",
+      includeReport: true,
+      tokenBudget: 80,
+      includeLessons: false,
+    })) as {
+      queryPlan: QueryPlan;
+      rankedEvidence: RankedEvidence[];
+      budgetReport: { budgetTokens: number; ignoredCount: number };
+      packedContext: { context: string; selected: RankedEvidence[] };
+      context: string;
+      tokens: number;
+      truncated: boolean;
+      explain?: unknown;
+    };
+
+    expect(result.explain).toBeUndefined();
+    expect(result.queryPlan.limits.tokenBudget).toBe(80);
+    expect(result.budgetReport.budgetTokens).toBe(80);
+    expect(result.budgetReport.ignoredCount).toBeGreaterThan(0);
+    expect(result.rankedEvidence).toEqual(result.packedContext.selected);
+    expect(result.context).toContain("agentmemory smart-search: auth");
+    expect(result.tokens).toBeLessThanOrEqual(80);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("includes a queryPlan in expandIds explain output", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      expandIds: ["obs_1"],
+      searchMode: "fast",
+      explain: true,
+    })) as { explain: any };
+
+    expect(result.explain.queryPlan).toMatchObject({
+      mode: "expandIds",
+      searchMode: "fast",
+      streams: ["expandIds"],
+      filterStage: "none",
+    });
+    expect(result.explain.plan).toMatchObject({
+      mode: "expandIds",
+      attempted: 1,
+      returned: 1,
+      filteredOut: 0,
+    });
+  });
+
+  it("filters saved-memory candidates by memory project and returns explain metadata", async () => {
+    const savedMemory: Memory = {
+      id: "mem_billing",
+      createdAt: "2026-02-01T00:00:00Z",
+      updatedAt: "2026-02-01T00:00:00Z",
+      type: "fact",
+      lane: "semantic_fact",
+      lifecycleState: "active",
+      title: "Billing auth decision",
+      content: "Billing auth uses scoped recall only.",
+      concepts: ["auth"],
+      files: ["src/billing-auth.ts"],
+      sessionIds: [],
+      strength: 7,
+      version: 1,
+      isLatest: true,
+      project: "billing",
+    };
+    const otherMemory: Memory = {
+      ...savedMemory,
+      id: "mem_other",
+      title: "Other auth decision",
+      content: "Other project auth memory.",
+      project: "other",
+    };
+    await kv.set("mem:memories", savedMemory.id, savedMemory);
+    await kv.set("mem:memories", otherMemory.id, otherMemory);
+    searchResults = [
+      {
+        observation: makeObs({
+          id: savedMemory.id,
+          sessionId: "memory",
+          title: savedMemory.title,
+        }),
+        bm25Score: 0.8,
+        vectorScore: 0.2,
+        graphScore: 0,
+        combinedScore: 0.9,
+        sessionId: "memory",
+      },
+      {
+        observation: makeObs({
+          id: otherMemory.id,
+          sessionId: "memory",
+          title: otherMemory.title,
+        }),
+        bm25Score: 0.9,
+        vectorScore: 0.2,
+        graphScore: 0,
+        combinedScore: 1,
+        sessionId: "memory",
+      },
+    ];
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      project: "billing",
+      memoryTier: "semantic_fact",
+      explain: true,
+    })) as { results: CompactSearchResult[]; explain: any };
+
+    expect(result.results.map((r) => r.obsId)).toEqual(["mem_billing"]);
+    expect(result.explain.plan.hardFilters.project).toBe("billing");
+    expect(result.explain.candidates.filteredOut).toBe(1);
+    expect(result.explain.ranking[0].components.bm25).toBe(0.8);
+  });
+
+  it("adds drift evidence for related stale or superseding memories", async () => {
+    const current: Memory = {
+      id: "mem_current_auth",
+      createdAt: "2026-03-01T00:00:00Z",
+      updatedAt: "2026-03-01T00:00:00Z",
+      type: "fact",
+      lane: "semantic_fact",
+      lifecycleState: "active",
+      title: "Current auth policy",
+      content: "Auth policy requires scoped project tokens.",
+      concepts: ["auth", "policy"],
+      files: ["src/auth.ts"],
+      sessionIds: [],
+      sourceObservationIds: ["obs_policy"],
+      supersedes: ["mem_old_auth"],
+      strength: 8,
+      version: 2,
+      isLatest: true,
+      project: "billing",
+    };
+    const old: Memory = {
+      ...current,
+      id: "mem_old_auth",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      title: "Old auth policy",
+      content: "Auth policy used global tokens.",
+      lifecycleState: "superseded",
+      isLatest: false,
+      supersedes: [],
+      version: 1,
+    };
+    await kv.set("mem:memories", current.id, current);
+    await kv.set("mem:memories", old.id, old);
+    searchResults = [
+      {
+        observation: makeObs({
+          id: current.id,
+          sessionId: "memory",
+          title: current.title,
+          narrative: current.content,
+        }),
+        bm25Score: 0.8,
+        vectorScore: 0.2,
+        graphScore: 0,
+        combinedScore: 0.9,
+        sessionId: "memory",
+      },
+    ];
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth policy",
+      project: "billing",
+      retrievalMode: "drift",
+      explain: true,
+      includeLessons: false,
+    })) as {
+      queryPlan: any;
+      rankedEvidence: any[];
+    };
+
+    expect(result.queryPlan).toMatchObject({
+      retrievalMode: "drift",
+    });
+    expect(result.queryPlan.streams).toContain("drift");
+    expect(result.rankedEvidence[0]).toMatchObject({
+      id: "drift_mem_current_auth",
+      sourceType: "summary",
+      reasons: ["drift", "memory_relation_review"],
+    });
+    expect(result.rankedEvidence[0].metadata.related[0]).toMatchObject({
+      id: "mem_old_auth",
+      lifecycleState: "superseded",
+      isLatest: false,
+    });
+    expect(result.rankedEvidence[1]).toMatchObject({
+      id: current.id,
+      sourceType: "observation",
+    });
+  });
+
+  it("filters saved memories by asOf validity and reports the temporal query plan", async () => {
+    const baseMemory: Memory = {
+      id: "mem_current_policy",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      type: "fact",
+      lane: "semantic_fact",
+      lifecycleState: "active",
+      title: "Current billing policy",
+      content: "Billing policy uses invoice holds.",
+      concepts: ["billing", "policy"],
+      files: ["src/billing.ts"],
+      sessionIds: [],
+      strength: 8,
+      version: 1,
+      isLatest: true,
+      project: "billing",
+    };
+    const current = {
+      ...baseMemory,
+      validFrom: "2026-01-01T00:00:00.000Z",
+      validUntil: "2026-03-01T00:00:00.000Z",
+    };
+    const future = {
+      ...baseMemory,
+      id: "mem_future_policy",
+      title: "Future billing policy",
+      validFrom: "2026-03-01T00:00:00.000Z",
+    };
+    const stale = {
+      ...baseMemory,
+      id: "mem_stale_policy",
+      title: "Stale billing policy",
+      validUntil: "2026-01-15T00:00:00.000Z",
+    };
+    const expiredAt = {
+      ...baseMemory,
+      id: "mem_expires_at_policy",
+      title: "ExpiresAt billing policy",
+      expiresAt: "2026-01-20T00:00:00.000Z",
+    } satisfies Memory & { expiresAt: string };
+    for (const memory of [current, future, stale, expiredAt]) {
+      await kv.set("mem:memories", memory.id, memory);
+    }
+    searchResults = [current, future, stale, expiredAt].map(
+      (memory, index) => ({
+        observation: makeObs({
+          id: memory.id,
+          sessionId: "memory",
+          title: memory.title,
+          narrative: memory.content,
+        }),
+        bm25Score: 1 - index * 0.1,
+        vectorScore: 0,
+        graphScore: 0,
+        combinedScore: 1 - index * 0.1,
+        sessionId: "memory",
+      }),
+    );
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "billing policy",
+      project: "billing",
+      retrievalMode: "as_of",
+      asOf: "2026-02-01T00:00:00.000Z",
+      explain: true,
+      includeLessons: false,
+    })) as {
+      results: CompactSearchResult[];
+      queryPlan: any;
+      explain: any;
+    };
+
+    expect(searchOptions[0]?.candidateFilter?.("mem_current_policy", "memory")).toBe(true);
+    expect(searchOptions[0]?.candidateFilter?.("mem_future_policy", "memory")).toBe(false);
+    expect(result.results.map((r) => r.obsId)).toEqual(["mem_current_policy"]);
+    expect(result.queryPlan.retrievalMode).toBe("as_of");
+    expect(result.queryPlan.hardFilters.temporalValidity).toEqual({
+      source: "asOf",
+      validAt: "2026-02-01T00:00:00.000Z",
+    });
+    expect(result.queryPlan.filterStage).toContain("temporal validity");
+    expect(result.explain.candidates.filteredOut).toBe(3);
   });
 
   it("expand returns empty for nonexistent observation IDs", async () => {
@@ -262,6 +899,104 @@ describe("Smart Search Function", () => {
         query: "rebase",
         project: "gitops-assistant",
       });
+    });
+
+    it("omits unscoped lessons when an agentId filter is requested", async () => {
+      let receivedPayload: any = null;
+      sdk.registerFunction("mem::lesson-recall", async (payload: any) => {
+        receivedPayload = payload;
+        return {
+          success: true,
+          lessons: [
+            {
+              id: "lsn_cross_agent",
+              content: "same-project lesson without agent lineage",
+              confidence: 0.9,
+              createdAt: "2026-04-01T00:00:00Z",
+              project: "my-project",
+              tags: [],
+              score: 0.8,
+            },
+          ],
+        };
+      });
+
+      const result = (await sdk.trigger("mem::smart-search", {
+        query: "auth",
+        project: "my-project",
+        agentId: "codex",
+      })) as { lessons: any[] };
+
+      expect(receivedPayload).toMatchObject({
+        query: "auth",
+        project: "my-project",
+        agentId: "codex",
+      });
+      expect(result.lessons).toEqual([]);
+    });
+
+    it("filters agent-aware lessons by requested agentId", async () => {
+      sdk.registerFunction("mem::lesson-recall", async () => ({
+        success: true,
+        lessons: [
+          {
+            id: "lsn_codex",
+            content: "codex-local lesson",
+            confidence: 0.9,
+            createdAt: "2026-04-01T00:00:00Z",
+            project: "my-project",
+            tags: [],
+            score: 0.8,
+            agentId: "codex",
+          },
+          {
+            id: "lsn_claude",
+            content: "other-agent lesson",
+            confidence: 0.9,
+            createdAt: "2026-04-01T00:00:00Z",
+            project: "my-project",
+            tags: [],
+            score: 0.8,
+            agentId: "claude",
+          },
+        ],
+      }));
+
+      const result = (await sdk.trigger("mem::smart-search", {
+        query: "auth",
+        project: "my-project",
+        agentId: "codex",
+      })) as { lessons: any[] };
+
+      expect(result.lessons.map((lesson) => lesson.lessonId)).toEqual([
+        "lsn_codex",
+      ]);
+    });
+
+    it("omits legacy lessons when isolated agent scoping is active", async () => {
+      process.env["AGENT_ID"] = "codex";
+      process.env["AGENTMEMORY_AGENT_SCOPE"] = "isolated";
+      sdk.registerFunction("mem::lesson-recall", async () => ({
+        success: true,
+        lessons: [
+          {
+            id: "lsn_project_only",
+            content: "project-only lesson must not cross agent scope",
+            confidence: 0.9,
+            createdAt: "2026-04-01T00:00:00Z",
+            project: "my-project",
+            tags: [],
+            score: 0.8,
+          },
+        ],
+      }));
+
+      const result = (await sdk.trigger("mem::smart-search", {
+        query: "auth",
+        project: "my-project",
+      })) as { lessons: any[] };
+
+      expect(result.lessons).toEqual([]);
     });
 
     it("tolerates mem::lesson-recall failure: returns empty lessons, observations unchanged", async () => {

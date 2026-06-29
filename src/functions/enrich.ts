@@ -1,10 +1,50 @@
 import type { ISdk } from "iii-sdk";
-import type { Memory } from "../types.js";
+import type { ContextBudgetReport, Memory, RankedEvidence } from "../types.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { logger } from "../logger.js";
+import {
+  estimateContextTokens,
+  packContext,
+} from "../retrieval/context-router.js";
 
 const MAX_CONTEXT_LENGTH = 4000;
+const MAX_CONTEXT_TOKENS = estimateContextTokens("x".repeat(MAX_CONTEXT_LENGTH));
+
+type EnrichInput = {
+  sessionId: string;
+  files: string[];
+  terms?: string[];
+  toolName?: string;
+  project?: string;
+  explain?: boolean;
+  includeReport?: boolean;
+};
+
+type EnrichResult = {
+  context: string;
+  truncated: boolean;
+  budgetReport?: ContextBudgetReport;
+};
+
+function rankedEvidence(
+  id: string,
+  sourceType: RankedEvidence["sourceType"],
+  rank: number,
+  content: string,
+  reasons: string[],
+  sourceIds?: string[],
+): RankedEvidence {
+  return {
+    id,
+    sourceType,
+    rank,
+    content,
+    sourceIds,
+    reasons,
+    tokens: estimateContextTokens(content),
+  };
+}
 
 function escapeXml(s: string): string {
   return s
@@ -17,19 +57,15 @@ function escapeXml(s: string): string {
 
 export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::enrich",
-    async (data: {
-      sessionId: string;
-      files: string[];
-      terms?: string[];
-      toolName?: string;
-      project?: string;
-    }) => {
+    async (data: EnrichInput): Promise<EnrichResult> => {
+      const includeReport =
+        data.includeReport === true || data.explain === true;
       const project =
         typeof data.project === "string" && data.project.trim().length > 0
           ? data.project.trim()
           : undefined;
 
-      const parts: string[] = [];
+      const evidence: RankedEvidence[] = [];
 
       const fileContextPromise = sdk
         .trigger<{ sessionId: string; files: string[] }, { context: string }>({
@@ -92,7 +128,15 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
       ]);
 
       if (fileContext.context) {
-        parts.push(fileContext.context);
+        evidence.push(
+          rankedEvidence(
+            "file_context",
+            "context",
+            evidence.length + 1,
+            fileContext.context,
+            ["file_context"],
+          ),
+        );
       }
 
       if (searchResult.results.length > 0) {
@@ -102,8 +146,15 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
           .map((n) => escapeXml(n as string))
           .join("\n");
         if (observations) {
-          parts.push(
-            `<agentmemory-relevant-context>\n${observations}\n</agentmemory-relevant-context>`,
+          const content = `<agentmemory-relevant-context>\n${observations}\n</agentmemory-relevant-context>`;
+          evidence.push(
+            rankedEvidence(
+              "relevant_context",
+              "observation",
+              evidence.length + 1,
+              content,
+              ["search_result"],
+            ),
           );
         }
       }
@@ -113,13 +164,30 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
           .slice(0, 3)
           .map((m) => `- ${escapeXml(m.title)}: ${escapeXml(m.content)}`)
           .join("\n");
-        parts.push(
-          `<agentmemory-past-errors>\n${bugs}\n</agentmemory-past-errors>`,
+        const content = `<agentmemory-past-errors>\n${bugs}\n</agentmemory-past-errors>`;
+        evidence.push(
+          rankedEvidence(
+            "past_errors",
+            "memory",
+            evidence.length + 1,
+            content,
+            ["bug_memory"],
+            bugMemories.slice(0, 3).map((m) => m.id),
+          ),
         );
       }
 
-      let context = parts.join("\n\n");
-      let truncated = false;
+      const packed = packContext({
+        evidence,
+        budgetTokens: MAX_CONTEXT_TOKENS,
+        separator: "\n\n",
+      });
+      const fullContext = evidence.map((item) => item.content).join("\n\n");
+      let context = packed.context;
+      let truncated = packed.budgetReport.ignoredCount > 0;
+      if (truncated) {
+        context = fullContext.slice(0, MAX_CONTEXT_LENGTH);
+      }
       if (context.length > MAX_CONTEXT_LENGTH) {
         context = context.slice(0, MAX_CONTEXT_LENGTH);
         truncated = true;
@@ -133,7 +201,9 @@ export function registerEnrichFunction(sdk: ISdk, kv: StateKV): void {
         truncated,
       });
 
-      return { context, truncated };
+      const response: EnrichResult = { context, truncated };
+      if (includeReport) response.budgetReport = packed.budgetReport;
+      return response;
     },
   );
 }

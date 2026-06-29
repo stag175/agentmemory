@@ -1,0 +1,80 @@
+{
+  "name": "@agentmemory/vscode-extension",
+  "displayName": "agentmemory",
+  "description": "VS Code control plane for a local agentmemory daemon.",
+  "version": "0.9.27",
+  "publisher": "agentmemory",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./extension.js",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "agentmemory",
+    "memory",
+    "agent",
+    "mcp"
+  ],
+  "activationEvents": [
+    "onCommand:agentmemory.status",
+    "onCommand:agentmemory.doctor",
+    "onCommand:agentmemory.connectRepair",
+    "onCommand:agentmemory.openViewer"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentmemory.status",
+        "title": "Agentmemory: Status",
+        "category": "Agentmemory"
+      },
+      {
+        "command": "agentmemory.doctor",
+        "title": "Agentmemory: Doctor",
+        "category": "Agentmemory"
+      },
+      {
+        "command": "agentmemory.connectRepair",
+        "title": "Agentmemory: Connect Repair",
+        "category": "Agentmemory"
+      },
+      {
+        "command": "agentmemory.openViewer",
+        "title": "Agentmemory: Open Local Viewer",
+        "category": "Agentmemory"
+      }
+    ],
+    "configuration": {
+      "title": "Agentmemory",
+      "properties": {
+        "agentmemory.cliCommand": {
+          "type": "string",
+          "default": "agentmemory",
+          "description": "Command name for the installed agentmemory CLI. The default expects agentmemory to be on PATH."
+        },
+        "agentmemory.viewerUrl": {
+          "type": "string",
+          "default": "http://localhost:3113",
+          "description": "Local agentmemory viewer URL opened by the control-plane command."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rohitg00/agentmemory",
+    "directory": "packaging/vscode-extension"
+  },
+  "bugs": {
+    "url": "https://github.com/rohitg00/agentmemory/issues"
+  },
+  "homepage": "https://github.com/rohitg00/agentmemory#readme",
+  "files": [
+    "extension.js",
+    "README.md"
+  ]
+}

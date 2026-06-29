@@ -1,14 +1,27 @@
 import type { ISdk } from 'iii-sdk'
-import type { CompactSearchResult, CompressedObservation, Memory, SearchResult, Session } from '../types.js'
+import type {
+  CompactSearchResult,
+  CompressedObservation,
+  Memory,
+  SearchCandidateFilter,
+  SearchResult,
+  Session,
+} from '../types.js'
 import { KV } from '../state/schema.js'
 import { StateKV } from '../state/kv.js'
 import { SearchIndex } from '../state/search-index.js'
 import { VectorIndex } from '../state/vector-index.js'
 import type { EmbeddingProvider } from '../types.js'
-import { memoryToObservation } from '../state/memory-utils.js'
+import {
+  isMemorySearchable,
+  isMemoryTemporallyCompatible,
+  memoryToObservation,
+  normalizeTemporalValidityFilter,
+  type TemporalValidityFilter,
+} from '../state/memory-utils.js'
 import { recordAccessBatch } from './access-tracker.js'
 import { logger } from "../logger.js";
-import { getAgentId, isAgentScopeIsolated } from "../config.js";
+import { getAgentId, getEnvVar, isAgentScopeIsolated } from "../config.js";
 
 let index: SearchIndex | null = null
 let vectorIndex: VectorIndex | null = null
@@ -257,7 +270,7 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
   try {
     const memories = await kv.list<Memory>(KV.memories)
     for (const memory of memories) {
-      if (memory.isLatest === false) continue
+      if (!isMemorySearchable(memory)) continue
       if (!memory.title || !memory.content) continue
       idx.add(memoryToObservation(memory))
       await enqueue({
@@ -319,6 +332,48 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
   return count
 }
 
+function searchCandidateKey(obsId: string, sessionId: string): string {
+  return `${sessionId}\0${obsId}`
+}
+
+async function buildSearchCandidateIds(
+  kv: StateKV,
+  filters: {
+    project?: string
+    cwd?: string
+    agentId?: string
+    temporal?: TemporalValidityFilter
+  },
+): Promise<Set<string> | undefined> {
+  if (!filters.project && !filters.cwd && !filters.agentId && !filters.temporal) return undefined
+
+  const candidateIds = new Set<string>()
+  const memories = await kv.list<Memory>(KV.memories).catch(() => [])
+  for (const mem of memories) {
+    if (!isMemorySearchable(mem)) continue
+    if (!isMemoryTemporallyCompatible(mem, filters.temporal)) continue
+    if (filters.project && mem.project !== filters.project) continue
+    if (filters.cwd) continue
+    if (filters.agentId && mem.agentId !== filters.agentId) continue
+    candidateIds.add(searchCandidateKey(mem.id, mem.sessionIds?.[0] ?? 'memory'))
+  }
+
+  const sessions = await kv.list<Session>(KV.sessions).catch(() => [])
+  for (const session of sessions) {
+    if (filters.project && session.project !== filters.project) continue
+    if (filters.cwd && session.cwd !== filters.cwd) continue
+    const observations = await kv
+      .list<CompressedObservation>(KV.observations(session.id))
+      .catch(() => [])
+    for (const obs of observations) {
+      if (filters.agentId && obs.agentId !== filters.agentId) continue
+      candidateIds.add(searchCandidateKey(obs.id, obs.sessionId || session.id))
+    }
+  }
+
+  return candidateIds
+}
+
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
     'mem::search',
@@ -330,6 +385,8 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       format?: string
       token_budget?: number
       agentId?: string
+      asOf?: string
+      validAt?: string
     }) => {
       const idx = getSearchIndex()
 
@@ -361,7 +418,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // than silently dropping the filter. Allowing the call through
       // with filterAgentId=undefined is the same leak this fix is
       // supposed to close.
-      const isolated = isAgentScopeIsolated();
+      const isolated =
+        isAgentScopeIsolated() ||
+        getEnvVar("AGENTMEMORY_AGENT_SCOPE") === "isolated";
       const explicitAgentId =
         typeof data.agentId === "string" && data.agentId.trim().length > 0
           ? data.agentId.trim()
@@ -395,6 +454,13 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         }
         tokenBudget = data.token_budget
       }
+      const temporal = normalizeTemporalValidityFilter({
+        asOf: data.asOf,
+        validAt: data.validAt,
+      })
+      if (temporal.error) {
+        throw new Error(`mem::search: ${temporal.error}`)
+      }
 
       if (idx.size === 0) {
         const count = await rebuildIndex(kv)
@@ -408,9 +474,18 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // doesn't carry it), so without the over-fetch isolated-mode
       // queries return underfilled pages when same-agent matches
       // rank lower than cross-agent ones in the hybrid score.
-      const filtering = !!(projectFilter || cwdFilter || filterAgentId)
+      const filtering = !!(projectFilter || cwdFilter || filterAgentId || temporal.filter)
       const fetchLimit = filtering ? Math.max(effectiveLimit * 10, 100) : effectiveLimit
-      const results = idx.search(query, fetchLimit)
+      const candidateIds = await buildSearchCandidateIds(kv, {
+        project: projectFilter,
+        cwd: cwdFilter,
+        agentId: filterAgentId,
+        temporal: temporal.filter,
+      })
+      const candidateFilter: SearchCandidateFilter | undefined = candidateIds
+        ? (obsId, sessionId) => candidateIds.has(searchCandidateKey(obsId, sessionId))
+        : undefined
+      const results = idx.search(query, fetchLimit, candidateFilter)
 
       // Resolve session -> project/cwd once per sessionId we touch.
       const sessionCache = new Map<string, Session | null>()
@@ -461,18 +536,13 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             //      to be a session from a different lifecycle. Probe KV.memories
             //      directly to get the memory's own project field.
             //   2. Deleted session — the session existed when the entry was indexed
-            //      but was since evicted. The KV.memories probe returns null for
-            //      these (they are observations, not memories), so memProject is
-            //      null and the entry passes through as unscoped. This is the safe
-            //      fallback: we lose the ability to filter but never incorrectly
-            //      block a result whose session we can no longer verify.
-            // In both cases, a null memProject means "project unknown — treat as
-            // unscoped and let it through" to preserve backward-compatibility.
+            //      but was since evicted. With an explicit hard scope, missing
+            //      metadata cannot prove membership, so fail closed.
             if (projectFilter) {
               const memProject = await loadMemoryProject(r.obsId)
-              if (memProject !== null && memProject !== projectFilter) continue
+              if (memProject !== projectFilter) continue
             }
-            // cwd filter does not apply to unbound entries.
+            if (cwdFilter) continue
           }
         }
         candidates.push(r)
@@ -491,7 +561,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           const mem = await kv
             .get<Memory>(KV.memories, r.obsId)
             .catch(() => null)
-          return mem ? memoryToObservation(mem) : null
+          return mem &&
+            isMemorySearchable(mem) &&
+            isMemoryTemporallyCompatible(mem, temporal.filter)
+            ? memoryToObservation(mem)
+            : null
         })
       )
       const enriched: SearchResult[] = []

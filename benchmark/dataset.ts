@@ -9,9 +9,15 @@ export interface LabeledQuery {
 
 const SESSION_COUNT = 30;
 const OBS_PER_SESSION = 8;
+const DAY_MS = 86_400_000;
+const DATASET_ANCHOR_MS = Date.UTC(2026, 5, 28, 12, 0, 0);
 
 function ts(daysAgo: number): string {
-  return new Date(Date.now() - daysAgo * 86400000).toISOString();
+  return new Date(DATASET_ANCHOR_MS - daysAgo * DAY_MS).toISOString();
+}
+
+function deterministicScaleDaysAgo(index: number): number {
+  return ((index * 37 + 17) % 9000) / 100;
 }
 
 const RAW_SESSIONS: Array<{
@@ -284,7 +290,7 @@ export function generateScaleDataset(count: number): CompressedObservation[] {
       ...src,
       id: `obs_scale_${i.toString().padStart(6, "0")}`,
       sessionId: `ses_${Math.floor(i / 8).toString().padStart(4, "0")}`,
-      timestamp: ts(Math.random() * 90),
+      timestamp: ts(deterministicScaleDaysAgo(i)),
       title: `${src.title} (iteration ${i})`,
       narrative: `${src.narrative} [Scale test variant ${i}, session group ${Math.floor(i / 8)}]`,
     });

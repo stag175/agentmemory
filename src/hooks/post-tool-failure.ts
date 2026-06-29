@@ -1,5 +1,13 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import {
+  buildLineage,
+  eventFields,
+  firstString,
+  safeMetadata,
+  sendAgentEvent,
+  summarizeValue,
+  targetIdsFor,
+} from "./_lineage.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -33,33 +41,51 @@ async function main() {
   if (data.is_interrupt || data.isInterrupt) return;
 
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
-  const toolName = data.tool_name ?? data.toolName;
+  const toolName = firstString(data.tool_name, data.toolName) ?? "unknown";
   const toolInput = data.tool_input ?? data.toolArgs;
   const error = data.error ?? data.errorMessage;
+  const lineage = buildLineage(data, "post_tool_failure", { sessionId });
+  const fields = eventFields(lineage);
+  const headers = authHeaders();
+  const timestamp = new Date().toISOString();
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
-    headers: authHeaders(),
+    headers,
     body: JSON.stringify({
       hookType: "post_tool_failure",
-      sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
-      timestamp: new Date().toISOString(),
+      ...fields,
+      timestamp,
       data: {
         tool_name: toolName,
-        tool_input:
+        tool_input: safeMetadata(
           typeof toolInput === "string"
             ? toolInput.slice(0, 4000)
-            : JSON.stringify(toolInput ?? "").slice(0, 4000),
+            : JSON.stringify(safeMetadata(toolInput) ?? "").slice(0, 4000),
+        ),
         error:
           typeof error === "string"
-            ? error.slice(0, 4000)
-            : JSON.stringify(error ?? "").slice(0, 4000),
+            ? safeMetadata(error.slice(0, 4000))
+            : JSON.stringify(safeMetadata(error) ?? "").slice(0, 4000),
+        lineage,
       },
     }),
     signal: AbortSignal.timeout(3000),
   }).catch(() => {});
+
+  sendAgentEvent(REST_URL, headers, {
+    type: "tool_failed",
+    status: "error",
+    ...fields,
+    functionId: `tool:${toolName}`,
+    targetIds: targetIdsFor(lineage.toolCallId, toolName),
+    metadata: {
+      hookType: "post_tool_failure",
+      toolName,
+      toolInput: summarizeValue(toolInput),
+      error: summarizeValue(error),
+    },
+  });
   setTimeout(() => process.exit(0), 500).unref();
 }
 

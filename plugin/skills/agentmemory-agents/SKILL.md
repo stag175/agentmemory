@@ -18,11 +18,12 @@ After wiring, restart the host or run its MCP reload (for example `/mcp` in Clau
 
 1. Detect the calling agent. If unknown, default to `claude-code`.
 2. Run `agentmemory connect <name>` using a name from the table in REFERENCE.md.
-3. Verify: the host should show the full tool set with a server running. Only 7 tools means the MCP shim could not reach a server (see ../_shared/TROUBLESHOOTING.md).
+3. Verify: the host should show the full tool set with a server running. Only 19 tools means the MCP shim could not reach a server (see ../_shared/TROUBLESHOOTING.md).
 
 ## Notes
 
 - The action skills (remember, recall, and the rest) are installed separately with `npx skills add rohitg00/agentmemory`. `connect` makes tools available; skills teach the agent when to use them.
+- Native hook adapters forward available session, project, cwd, agent, framework, and host-native IDs into REST payloads. When debugging cross-agent traces, check those lineage fields before assuming the server lost the event.
 - Windows: use WSL2. Native Windows runs the server but `connect` is not supported there.
 
 ## See also

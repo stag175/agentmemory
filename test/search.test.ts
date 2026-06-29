@@ -7,7 +7,7 @@ vi.mock("../src/logger.js", () => ({
 import { registerSearchFunction, getSearchIndex, rebuildIndex, setVectorIndex, setEmbeddingProvider, getVectorIndex } from "../src/functions/search.js";
 import { VectorIndex } from "../src/state/vector-index.js";
 import { KV } from "../src/state/schema.js";
-import type { CompressedObservation, Session } from "../src/types.js";
+import type { CompressedObservation, Memory, Session } from "../src/types.js";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -182,6 +182,95 @@ describe("mem::search", () => {
     const hit = result.results.find((r) => r.obsId === "mem_x1");
     expect(hit).toBeDefined();
     expect(hit?.title).toBe("Pineapple belongs on pizza");
+  });
+
+  it("filters saved memories by validAt validity", async () => {
+    const baseMemory: Memory = {
+      id: "mem_billing_current",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      type: "fact",
+      title: "Billing policy",
+      content: "Billing policy keeps invoice holds active.",
+      concepts: ["billing", "policy"],
+      files: [],
+      sessionIds: [],
+      strength: 8,
+      version: 1,
+      isLatest: true,
+      lifecycleState: "active",
+    };
+    const current = {
+      ...baseMemory,
+      validFrom: "2026-01-01T00:00:00.000Z",
+      validUntil: "2026-03-01T00:00:00.000Z",
+    };
+    const future = {
+      ...baseMemory,
+      id: "mem_billing_future",
+      title: "Future billing policy",
+      validFrom: "2026-03-01T00:00:00.000Z",
+    };
+    const stale = {
+      ...baseMemory,
+      id: "mem_billing_stale",
+      title: "Stale billing policy",
+      validUntil: "2026-01-15T00:00:00.000Z",
+    };
+    const expiredAt = {
+      ...baseMemory,
+      id: "mem_billing_expires_at",
+      title: "ExpiresAt billing policy",
+      expiresAt: "2026-01-20T00:00:00.000Z",
+    } satisfies Memory & { expiresAt: string };
+
+    for (const memory of [current, future, stale, expiredAt]) {
+      await kv.set(KV.memories, memory.id, memory);
+    }
+    await rebuildIndex(kv as never);
+
+    const result = (await sdk.trigger("mem::search", {
+      query: "billing policy",
+      format: "compact",
+      validAt: "2026-02-01T00:00:00.000Z",
+    })) as { results: Array<{ obsId: string; title: string }> };
+
+    expect(result.results.map((r) => r.obsId)).toEqual(["mem_billing_current"]);
+  });
+
+  it("filters saved memories by agentId before returning compact recall", async () => {
+    const baseMemory: Memory = {
+      id: "mem_agent_a",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      type: "fact",
+      title: "Scoped phoenix policy",
+      content: "Scoped phoenix policy belongs to one agent.",
+      concepts: ["phoenix", "policy"],
+      files: [],
+      sessionIds: [],
+      strength: 8,
+      version: 1,
+      isLatest: true,
+      lifecycleState: "active",
+      agentId: "codex-a",
+    };
+    await kv.set(KV.memories, baseMemory.id, baseMemory);
+    await kv.set(KV.memories, "mem_agent_b", {
+      ...baseMemory,
+      id: "mem_agent_b",
+      title: "Scoped phoenix policy other",
+      agentId: "codex-b",
+    });
+    await rebuildIndex(kv as never);
+
+    const result = (await sdk.trigger("mem::search", {
+      query: "scoped phoenix policy",
+      format: "compact",
+      agentId: "codex-a",
+    })) as { results: Array<{ obsId: string }> };
+
+    expect(result.results.map((r) => r.obsId)).toEqual(["mem_agent_a"]);
   });
 
   it("rebuildIndex populates the vector index", async () => {

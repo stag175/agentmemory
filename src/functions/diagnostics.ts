@@ -6,11 +6,11 @@ import { recordAudit } from "./audit.js";
 import type {
   Action,
   ActionEdge,
+  AuditEntry,
   DiagnosticCheck,
   Insight,
   Lease,
   Lesson,
-  Checkpoint,
   Crystal,
   ProceduralMemory,
   SemanticMemory,
@@ -22,6 +22,16 @@ import type {
   Session,
   Memory,
 } from "../types.js";
+import {
+  findPotentialSecretLeaks,
+  isReleaseGateStatus,
+  type ReleaseGateStatus,
+} from "../eval/validator.js";
+import { scoreRetrievalScopeCoverage } from "../eval/quality.js";
+import {
+  evaluateEncryptionReadinessFromEnv,
+  type EncryptionReadinessReport,
+} from "../security/encryption-policy.js";
 
 const ALL_CATEGORIES = [
   "actions",
@@ -38,20 +48,499 @@ const ALL_CATEGORIES = [
   "crystals",
   "insights",
   "mesh",
+  "security",
 ];
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
+type ReleaseGateKey =
+  | "build"
+  | "test"
+  | "docs"
+  | "packSmoke"
+  | "redactionForget"
+  | "retrievalScope"
+  | "restMcpParity";
+
+interface ReleaseGateCheck {
+  status: ReleaseGateStatus;
+  message: string;
+  evidence: string[];
+  failures: string[];
+  blockers: string[];
+  nextAction: string;
+}
+
+type ReleaseGateEvidence = Partial<
+  Record<
+    ReleaseGateKey,
+    {
+      status?: unknown;
+      message?: unknown;
+      evidence?: unknown;
+      failures?: unknown;
+      blockers?: unknown;
+    }
+  >
+>;
+
+const RELEASE_GATE_KEYS: ReleaseGateKey[] = [
+  "build",
+  "test",
+  "docs",
+  "packSmoke",
+  "redactionForget",
+  "retrievalScope",
+  "restMcpParity",
+];
+
+const RELEASE_GATE_NEXT_ACTIONS: Record<ReleaseGateKey, string> = {
+  build: "Run npm run build and attach the exact command result.",
+  test: "Run npm test so release-only evidence is backed by the full suite.",
+  docs: "Run npm run skills:check and regenerate skills docs if it fails.",
+  packSmoke: "Run npm pack --dry-run and inspect the package file list.",
+  redactionForget:
+    "Run the redaction/forget tests and verify the memory plus audit stores have no live forgotten ids or secret leaks.",
+  retrievalScope:
+    "Backfill project scope for latest memories or rerun the retrieval-scope migration.",
+  restMcpParity:
+    "Run tool-count and MCP standalone parity tests before release.",
+};
+
+function releaseGateCheck(
+  status: ReleaseGateStatus,
+  message: string,
+  evidence: string[] = [],
+  failures: string[] = [],
+  blockers: string[] = [],
+  nextAction = "",
+): ReleaseGateCheck {
+  return { status, message, evidence, failures, blockers, nextAction };
+}
+
+function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function asMessage(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+}
+
+function mergeReleaseGateCheck(
+  current: ReleaseGateCheck,
+  incoming: ReleaseGateCheck,
+): ReleaseGateCheck {
+  const evidence = [...new Set([...current.evidence, ...incoming.evidence])];
+  const failures = [...new Set([...current.failures, ...incoming.failures])];
+  const blockers = [...new Set([...current.blockers, ...incoming.blockers])];
+
+  if (current.status === "fail" || incoming.status === "fail") {
+    const failing = current.status === "fail" ? current : incoming;
+    return {
+      ...failing,
+      status: "fail",
+      evidence,
+      failures,
+      blockers,
+      nextAction: incoming.nextAction || current.nextAction,
+    };
+  }
+
+  if (current.status === "blocked" || incoming.status === "blocked") {
+    const blocked = current.status === "blocked" ? current : incoming;
+    return {
+      ...blocked,
+      status: "blocked",
+      evidence,
+      failures,
+      blockers,
+      nextAction: incoming.nextAction || current.nextAction,
+    };
+  }
+
+  if (incoming.status === "pass") {
+    return { ...incoming, evidence, failures, blockers };
+  }
+
+  if (current.status === "pass") {
+    return { ...current, evidence, failures, blockers };
+  }
+
+  return {
+    ...current,
+    evidence,
+    failures,
+    blockers,
+    nextAction: incoming.nextAction || current.nextAction,
+  };
+}
+
+function applyReleaseGateEvidence(
+  checks: Record<ReleaseGateKey, ReleaseGateCheck>,
+  evidence?: ReleaseGateEvidence,
+): void {
+  if (!evidence) return;
+  for (const key of RELEASE_GATE_KEYS) {
+    const item = evidence[key];
+    if (!item) continue;
+    if (!isReleaseGateStatus(item.status)) {
+      checks[key] = mergeReleaseGateCheck(
+        checks[key],
+        releaseGateCheck(
+          "blocked",
+          `Invalid release-gate evidence status for ${key}`,
+          [],
+          [],
+          ["expected status to be pass, fail, blocked, or not_run"],
+          RELEASE_GATE_NEXT_ACTIONS[key],
+        ),
+      );
+      continue;
+    }
+
+    checks[key] = mergeReleaseGateCheck(
+      checks[key],
+      releaseGateCheck(
+      item.status,
+        asMessage(item.message) ?? checks[key].message,
+        asStringArray(item.evidence) ?? [],
+        asStringArray(item.failures) ?? [],
+        asStringArray(item.blockers) ?? [],
+        RELEASE_GATE_NEXT_ACTIONS[key],
+      ),
+    );
+  }
+}
+
+function releaseGateOverall(
+  checks: Record<ReleaseGateKey, ReleaseGateCheck>,
+): ReleaseGateStatus {
+  const statuses = RELEASE_GATE_KEYS.map((key) => checks[key].status);
+  if (statuses.includes("fail")) return "fail";
+  if (statuses.includes("blocked")) return "blocked";
+  if (statuses.includes("not_run")) return "not_run";
+  return "pass";
+}
+
+async function listKvForDiagnostics<T>(
+  kv: StateKV,
+  scope: string,
+): Promise<{ rows: T[] | null; error: string | null }> {
+  try {
+    return { rows: await kv.list<T>(scope), error: null };
+  } catch (error) {
+    return {
+      rows: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function releaseGateReport(checks: Record<ReleaseGateKey, ReleaseGateCheck>): {
+  blockingFindings: Array<{
+    key: ReleaseGateKey;
+    status: ReleaseGateStatus;
+    message: string;
+    evidence: string[];
+    failures: string[];
+    blockers: string[];
+    nextAction: string;
+  }>;
+  nextActions: string[];
+} {
+  const blockingFindings = RELEASE_GATE_KEYS.flatMap((key) => {
+    const check = checks[key];
+    if (check.status === "pass") return [];
+    const nextAction = check.nextAction || RELEASE_GATE_NEXT_ACTIONS[key];
+    return [
+      {
+        key,
+        status: check.status,
+        message: check.message,
+        evidence: check.evidence,
+        failures: check.failures,
+        blockers: check.blockers,
+        nextAction,
+      },
+    ];
+  });
+  return {
+    blockingFindings,
+    nextActions: blockingFindings.map(
+      (finding) => `${finding.key}: ${finding.nextAction}`,
+    ),
+  };
+}
+
+function encryptionReadinessDiagnostic(
+  report: EncryptionReadinessReport,
+): DiagnosticCheck {
+  const missing = report.missingFields.length > 0
+    ? ` Missing: ${report.missingFields.join(", ")}.`
+    : "";
+  return {
+    name: "encryption-readiness",
+    category: "security",
+    status: report.status,
+    message:
+      `Encryption readiness is ${report.status}; cryptography implemented=${report.cryptography.implemented}, storage wired=${report.cryptography.storageWired}.${missing}`,
+    fixable: false,
+  };
+}
+
+async function buildReleaseGateDiagnostics(
+  kv: StateKV,
+  evidence?: ReleaseGateEvidence,
+): Promise<{
+  overall: ReleaseGateStatus;
+  summary: Record<ReleaseGateStatus, number>;
+  checks: Record<ReleaseGateKey, ReleaseGateCheck>;
+  blockingFindings: Array<{
+    key: ReleaseGateKey;
+    status: ReleaseGateStatus;
+    message: string;
+    evidence: string[];
+    failures: string[];
+    blockers: string[];
+    nextAction: string;
+  }>;
+  nextActions: string[];
+}> {
+  const checks: Record<ReleaseGateKey, ReleaseGateCheck> = {
+    build: releaseGateCheck(
+      "not_run",
+      "No build evidence was provided to mem::diagnose",
+      [],
+      [],
+      [],
+      RELEASE_GATE_NEXT_ACTIONS.build,
+    ),
+    test: releaseGateCheck(
+      "not_run",
+      "No test evidence was provided to mem::diagnose",
+      [],
+      [],
+      [],
+      RELEASE_GATE_NEXT_ACTIONS.test,
+    ),
+    docs: releaseGateCheck(
+      "not_run",
+      "No docs or generated-skill check evidence was provided to mem::diagnose",
+      [],
+      [],
+      [],
+      RELEASE_GATE_NEXT_ACTIONS.docs,
+    ),
+    packSmoke: releaseGateCheck(
+      "not_run",
+      "No package smoke evidence was provided to mem::diagnose",
+      [],
+      [],
+      [],
+      RELEASE_GATE_NEXT_ACTIONS.packSmoke,
+    ),
+    redactionForget: releaseGateCheck(
+      "not_run",
+      "No redaction or forget evidence exists in the current store",
+      [],
+      [],
+      [],
+      RELEASE_GATE_NEXT_ACTIONS.redactionForget,
+    ),
+    retrievalScope: releaseGateCheck(
+      "not_run",
+      "Retrieval scope was not checked",
+      [],
+      [],
+      [],
+      RELEASE_GATE_NEXT_ACTIONS.retrievalScope,
+    ),
+    restMcpParity: releaseGateCheck(
+      "not_run",
+      "No REST/MCP parity evidence was provided to mem::diagnose",
+      [],
+      [],
+      [],
+      RELEASE_GATE_NEXT_ACTIONS.restMcpParity,
+    ),
+  };
+
+  const [memoryResult, auditResult] = await Promise.all([
+    listKvForDiagnostics<Memory>(kv, KV.memories),
+    listKvForDiagnostics<AuditEntry>(kv, KV.audit),
+  ]);
+  const memories = memoryResult.rows;
+  const auditRows = auditResult.rows;
+
+  if (!memories) {
+    const blocker = `memory store unavailable: ${memoryResult.error ?? "unknown error"}`;
+    checks.retrievalScope = releaseGateCheck(
+      "blocked",
+      "Unable to inspect retrieval scope because memories could not be listed",
+      [],
+      [],
+      [blocker],
+      RELEASE_GATE_NEXT_ACTIONS.retrievalScope,
+    );
+    checks.redactionForget = releaseGateCheck(
+      "blocked",
+      "Unable to scan stored memories for redaction/forget release evidence",
+      [],
+      [],
+      [blocker],
+      RELEASE_GATE_NEXT_ACTIONS.redactionForget,
+    );
+  } else {
+    const scope = scoreRetrievalScopeCoverage(memories);
+    checks.retrievalScope =
+      scope.unscopedCount === 0
+        ? releaseGateCheck(
+            "pass",
+            `All ${scope.latestCount} latest memories have project scope`,
+            [
+              `latest=${scope.latestCount}`,
+              `scoped=${scope.scopedCount}`,
+              `score=${scope.score}`,
+            ],
+            [],
+            [],
+            RELEASE_GATE_NEXT_ACTIONS.retrievalScope,
+          )
+        : releaseGateCheck(
+            "fail",
+            `${scope.unscopedCount} of ${scope.latestCount} latest memories have no project scope`,
+            [
+              `latest=${scope.latestCount}`,
+              `scoped=${scope.scopedCount}`,
+              `score=${scope.score}`,
+            ],
+            ["unscoped latest memories can leak into unrelated retrieval"],
+            [],
+            RELEASE_GATE_NEXT_ACTIONS.retrievalScope,
+          );
+
+    const leakFailures: string[] = [];
+    let hasRedactionEvidence = false;
+    for (const memory of memories) {
+      hasRedactionEvidence ||= Boolean(
+        memory.redactionApplied || memory.sensitivityLabels?.length,
+      );
+      const leaks = findPotentialSecretLeaks({
+        title: memory.title,
+        content: memory.content,
+        concepts: memory.concepts,
+        files: memory.files,
+        sourceUri: memory.sourceUri,
+        branch: memory.branch,
+        ownerId: memory.ownerId,
+      });
+      if (leaks.length > 0) {
+        leakFailures.push(`${memory.id}:${leaks.join(",")}`);
+      }
+    }
+
+    if (leakFailures.length > 0) {
+      checks.redactionForget = releaseGateCheck(
+        "fail",
+        "Stored memory payloads still contain high-risk secret patterns",
+        ["mem:memories scan"],
+        leakFailures,
+        [],
+        RELEASE_GATE_NEXT_ACTIONS.redactionForget,
+      );
+    } else if (!auditRows) {
+      checks.redactionForget = releaseGateCheck(
+        "blocked",
+        "Unable to inspect forget audit evidence because audit rows could not be listed",
+        ["mem:memories scan"],
+        [],
+        [`audit store unavailable: ${auditResult.error ?? "unknown error"}`],
+        RELEASE_GATE_NEXT_ACTIONS.redactionForget,
+      );
+    } else if (auditRows) {
+      const forgetRows = auditRows.filter(
+        (row) => row.operation === "forget" || row.functionId === "mem::forget",
+      );
+      const liveMemoryIds = new Set(memories.map((memory) => memory.id));
+      const forgottenStillLive = forgetRows.flatMap((row) => {
+        const deleted = Number(row.details?.["memoriesDeleted"] ?? 0);
+        if (deleted <= 0) return [];
+        return row.targetIds.filter((id) => liveMemoryIds.has(id));
+      });
+
+      if (forgottenStillLive.length > 0) {
+        checks.redactionForget = releaseGateCheck(
+          "fail",
+          "Forget audit rows reference memory ids that are still live",
+          ["mem:audit forget rows", "mem:memories scan"],
+          forgottenStillLive,
+          [],
+          RELEASE_GATE_NEXT_ACTIONS.redactionForget,
+        );
+      } else if (hasRedactionEvidence && forgetRows.length > 0) {
+        checks.redactionForget = releaseGateCheck(
+          "pass",
+          "Redaction and forget evidence are both present with no stored leak or live-forgotten-memory failures",
+          ["mem:memories redaction markers", "mem:audit forget rows"],
+          [],
+          [],
+          RELEASE_GATE_NEXT_ACTIONS.redactionForget,
+        );
+      } else if (hasRedactionEvidence || forgetRows.length > 0) {
+        checks.redactionForget = releaseGateCheck(
+          "blocked",
+          "Only partial redaction/forget evidence exists in the current store",
+          [
+            hasRedactionEvidence ? "mem:memories redaction markers" : "no redaction markers",
+            forgetRows.length > 0 ? "mem:audit forget rows" : "no forget audit rows",
+          ],
+          [],
+          ["need both redaction evidence and forget evidence"],
+          RELEASE_GATE_NEXT_ACTIONS.redactionForget,
+        );
+      }
+    }
+  }
+
+  applyReleaseGateEvidence(checks, evidence);
+
+  const summary: Record<ReleaseGateStatus, number> = {
+    pass: 0,
+    fail: 0,
+    blocked: 0,
+    not_run: 0,
+  };
+  for (const key of RELEASE_GATE_KEYS) {
+    summary[checks[key].status] += 1;
+  }
+
+  const report = releaseGateReport(checks);
+
+  return {
+    overall: releaseGateOverall(checks),
+    summary,
+    checks,
+    ...report,
+  };
+}
+
 export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::diagnose", 
-    async (data: { categories?: string[] }) => {
+    async (data: { categories?: string[]; releaseGateEvidence?: ReleaseGateEvidence }) => {
       const categories = data.categories && data.categories.length > 0
         ? data.categories.filter((c) => ALL_CATEGORIES.includes(c))
         : ALL_CATEGORIES;
 
       const checks: DiagnosticCheck[] = [];
       const now = Date.now();
+      const encryptionReadiness = evaluateEncryptionReadinessFromEnv();
 
       if (categories.includes("actions")) {
         const actions = await kv.list<Action>(KV.actions);
@@ -620,6 +1109,10 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
+      if (categories.includes("security")) {
+        checks.push(encryptionReadinessDiagnostic(encryptionReadiness));
+      }
+
       const summary = {
         pass: checks.filter((c) => c.status === "pass").length,
         warn: checks.filter((c) => c.status === "warn").length,
@@ -627,7 +1120,18 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         fixable: checks.filter((c) => c.fixable).length,
       };
 
-      return { success: true, checks, summary };
+      const releaseGate = await buildReleaseGateDiagnostics(
+        kv,
+        data.releaseGateEvidence,
+      );
+
+      return {
+        success: true,
+        checks,
+        summary,
+        releaseGate,
+        security: { encryption: encryptionReadiness },
+      };
     },
   );
 

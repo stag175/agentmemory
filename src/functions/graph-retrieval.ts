@@ -1,6 +1,7 @@
 import type {
   GraphNode,
   GraphEdge,
+  SearchCandidateFilter,
 } from "../types.js";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
@@ -45,6 +46,7 @@ export class GraphRetrieval {
     entityNames: string[],
     maxDepth = 2,
     maxResults = 20,
+    candidateFilter?: SearchCandidateFilter,
   ): Promise<GraphRetrievalResult[]> {
     const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale);
     const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale);
@@ -74,6 +76,7 @@ export class GraphRetrieval {
       for (const path of paths) {
         const lastNode = path[path.length - 1].node;
         for (const obsId of lastNode.sourceObservationIds) {
+          if (candidateFilter && !candidateFilter(obsId, "")) continue;
           if (visitedObs.has(obsId)) continue;
           visitedObs.add(obsId);
 
@@ -98,6 +101,7 @@ export class GraphRetrieval {
       }
 
       for (const obsId of startNode.sourceObservationIds) {
+        if (candidateFilter && !candidateFilter(obsId, "")) continue;
         if (visitedObs.has(obsId)) continue;
         visitedObs.add(obsId);
         results.push({
@@ -118,6 +122,7 @@ export class GraphRetrieval {
     obsIds: string[],
     maxDepth = 1,
     maxResults = 10,
+    candidateFilter?: SearchCandidateFilter,
   ): Promise<GraphRetrievalResult[]> {
     const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale);
     const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale);
@@ -134,6 +139,7 @@ export class GraphRetrieval {
       for (const path of paths) {
         const lastNode = path[path.length - 1].node;
         for (const obsId of lastNode.sourceObservationIds) {
+          if (candidateFilter && !candidateFilter(obsId, "")) continue;
           if (visitedObs.has(obsId)) continue;
           visitedObs.add(obsId);
 

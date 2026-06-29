@@ -9,6 +9,8 @@
 **Embedding provider:** local default
 **Sandbox:** isolated data dir at `/tmp/agentmemory-eval-sandbox/`, ports 3411/3412
 
+Historical note: this scorecard covers the original 15-query slice. The current `coding-agent-life-v1` corpus has since been expanded to 20 sessions and 20 queries with task-category metadata for coding-agent memory scenarios; republish this scorecard after rerunning the expanded corpus.
+
 ## Math ceiling on this dataset
 
 12 of 15 questions have 1 gold session, 3 have 2 gold sessions. Per

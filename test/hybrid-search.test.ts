@@ -1,6 +1,14 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+vi.mock("../src/state/reranker.js", () => ({
+  rerank: vi.fn(async (_query: string, results: unknown[]) => results),
+  isRerankerAvailable: vi.fn(() => true),
+}));
+
 import { HybridSearch } from "../src/state/hybrid-search.js";
 import { SearchIndex } from "../src/state/search-index.js";
+import { VectorIndex } from "../src/state/vector-index.js";
+import { rerank } from "../src/state/reranker.js";
 import type { CompressedObservation, EmbeddingProvider } from "../src/types.js";
 
 function makeObs(
@@ -43,6 +51,30 @@ function mockKV() {
   };
 }
 
+function mockEmbeddingProvider(): EmbeddingProvider {
+  return {
+    name: "mock",
+    dimensions: 2,
+    embed: vi.fn(async () => new Float32Array([1, 0])),
+    embedBatch: vi.fn(async (texts: string[]) =>
+      texts.map(() => new Float32Array([1, 0])),
+    ),
+  };
+}
+
+function mockGraphRetrieval(results: Array<{
+  obsId: string;
+  sessionId: string;
+  score: number;
+  graphContext: string;
+  pathLength: number;
+}> = []) {
+  return {
+    searchByEntities: vi.fn(async () => results),
+    expandFromChunks: vi.fn(async () => results),
+  };
+}
+
 describe("HybridSearch", () => {
   let bm25: SearchIndex;
   let kv: ReturnType<typeof mockKV>;
@@ -50,6 +82,7 @@ describe("HybridSearch", () => {
   beforeEach(() => {
     bm25 = new SearchIndex();
     kv = mockKV();
+    vi.mocked(rerank).mockClear();
   });
 
   it("returns BM25-only results when no vector index is provided", async () => {
@@ -132,6 +165,196 @@ describe("HybridSearch", () => {
     const hybrid = new HybridSearch(bm25, null, null, kv as never);
     const results = await hybrid.search("auth", 3);
     expect(results.length).toBe(3);
+  });
+
+  it("applies candidate filters before result enrichment", async () => {
+    const allowed = makeObs({
+      id: "obs_allowed",
+      sessionId: "ses_1",
+      title: "auth allowed",
+      narrative: "auth allowed candidate",
+    });
+    const blocked = makeObs({
+      id: "obs_blocked",
+      sessionId: "ses_2",
+      title: "auth blocked",
+      narrative: "auth blocked candidate",
+    });
+    bm25.add(allowed);
+    bm25.add(blocked);
+    await kv.set("mem:obs:ses_1", allowed.id, allowed);
+    await kv.set("mem:obs:ses_2", blocked.id, blocked);
+
+    const hybrid = new HybridSearch(bm25, null, null, kv as never);
+    const results = await hybrid.search("auth", 10, {
+      candidateFilter: (obsId) => obsId === allowed.id,
+    });
+
+    expect(results.map((r) => r.observation.id)).toEqual([allowed.id]);
+  });
+
+  it("fast mode skips graph retrieval and reranking", async () => {
+    const obs1 = makeObs({
+      id: "obs_fast_1",
+      sessionId: "ses_1",
+      title: "AuthRouter middleware",
+      narrative: "AuthRouter auth middleware",
+    });
+    const obs2 = makeObs({
+      id: "obs_fast_2",
+      sessionId: "ses_1",
+      title: "AuthRouter token checks",
+      narrative: "AuthRouter token checks",
+    });
+    bm25.add(obs1);
+    bm25.add(obs2);
+    await kv.set("mem:obs:ses_1", obs1.id, obs1);
+    await kv.set("mem:obs:ses_1", obs2.id, obs2);
+
+    const vector = new VectorIndex();
+    vector.add(obs1.id, obs1.sessionId, new Float32Array([1, 0]));
+    vector.add(obs2.id, obs2.sessionId, new Float32Array([1, 0]));
+
+    const hybrid = new HybridSearch(
+      bm25,
+      vector,
+      mockEmbeddingProvider(),
+      kv as never,
+      0.4,
+      0.6,
+      0.3,
+      true,
+    );
+    const graph = mockGraphRetrieval([
+      {
+        obsId: "obs_graph",
+        sessionId: "ses_graph",
+        score: 1,
+        graphContext: "AuthRouter graph",
+        pathLength: 0,
+      },
+    ]);
+    (hybrid as any).graphRetrieval = graph;
+
+    const results = await hybrid.search("AuthRouter", 10, { searchMode: "fast" });
+
+    expect(graph.searchByEntities).not.toHaveBeenCalled();
+    expect(graph.expandFromChunks).not.toHaveBeenCalled();
+    expect(rerank).not.toHaveBeenCalled();
+    expect(results.map((r) => r.observation.id)).not.toContain("obs_graph");
+  });
+
+  it("balanced mode preserves graph expansion and reranking behavior", async () => {
+    const obs1 = makeObs({
+      id: "obs_balanced_1",
+      sessionId: "ses_1",
+      title: "AuthRouter middleware",
+      narrative: "AuthRouter auth middleware",
+    });
+    const obs2 = makeObs({
+      id: "obs_balanced_2",
+      sessionId: "ses_1",
+      title: "AuthRouter token checks",
+      narrative: "AuthRouter token checks",
+    });
+    const graphObs = makeObs({
+      id: "obs_graph_balanced",
+      sessionId: "ses_graph",
+      title: "Graph-linked AuthRouter decision",
+      narrative: "Graph-linked AuthRouter decision",
+    });
+    bm25.add(obs1);
+    bm25.add(obs2);
+    await kv.set("mem:obs:ses_1", obs1.id, obs1);
+    await kv.set("mem:obs:ses_1", obs2.id, obs2);
+    await kv.set("mem:obs:ses_graph", graphObs.id, graphObs);
+
+    const vector = new VectorIndex();
+    vector.add(obs1.id, obs1.sessionId, new Float32Array([1, 0]));
+    vector.add(obs2.id, obs2.sessionId, new Float32Array([1, 0]));
+
+    const hybrid = new HybridSearch(
+      bm25,
+      vector,
+      mockEmbeddingProvider(),
+      kv as never,
+      0.4,
+      0.6,
+      0.3,
+      true,
+    );
+    const graph = mockGraphRetrieval([
+      {
+        obsId: graphObs.id,
+        sessionId: graphObs.sessionId,
+        score: 1,
+        graphContext: "AuthRouter graph",
+        pathLength: 0,
+      },
+    ]);
+    (hybrid as any).graphRetrieval = graph;
+
+    const results = await hybrid.search("AuthRouter", 10, {
+      searchMode: "balanced",
+    });
+
+    expect(graph.searchByEntities).toHaveBeenCalled();
+    expect(graph.expandFromChunks).toHaveBeenCalled();
+    expect(rerank).toHaveBeenCalled();
+    expect(results.map((r) => r.observation.id)).toContain(graphObs.id);
+  });
+
+  it("deep mode allows graph retrieval and reranking when available", async () => {
+    const obs1 = makeObs({
+      id: "obs_deep_1",
+      sessionId: "ses_1",
+      title: "AuthRouter middleware",
+      narrative: "AuthRouter auth middleware",
+    });
+    const obs2 = makeObs({
+      id: "obs_deep_2",
+      sessionId: "ses_1",
+      title: "AuthRouter token checks",
+      narrative: "AuthRouter token checks",
+    });
+    const graphObs = makeObs({
+      id: "obs_graph_deep",
+      sessionId: "ses_graph",
+      title: "Deep graph AuthRouter decision",
+      narrative: "Deep graph AuthRouter decision",
+    });
+    bm25.add(obs1);
+    bm25.add(obs2);
+    await kv.set("mem:obs:ses_1", obs1.id, obs1);
+    await kv.set("mem:obs:ses_1", obs2.id, obs2);
+    await kv.set("mem:obs:ses_graph", graphObs.id, graphObs);
+
+    const hybrid = new HybridSearch(
+      bm25,
+      null,
+      null,
+      kv as never,
+      0.4,
+      0.6,
+      0.3,
+      true,
+    );
+    const graph = mockGraphRetrieval([
+      {
+        obsId: graphObs.id,
+        sessionId: graphObs.sessionId,
+        score: 1,
+        graphContext: "AuthRouter graph",
+        pathLength: 0,
+      },
+    ]);
+    (hybrid as any).graphRetrieval = graph;
+
+    const results = await hybrid.search("AuthRouter", 10, { searchMode: "deep" });
+
+    expect(graph.searchByEntities).toHaveBeenCalled();
+    expect(rerank).toHaveBeenCalled();
+    expect(results.map((r) => r.observation.id)).toContain(graphObs.id);
   });
 
   it("skips observations not found in KV", async () => {

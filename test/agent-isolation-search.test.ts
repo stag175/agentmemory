@@ -24,6 +24,10 @@ const configState = {
 
 vi.mock("../src/config.js", () => ({
   getAgentId: () => configState.agentId,
+  getEnvVar: (key: string) =>
+    key === "AGENTMEMORY_AGENT_SCOPE" && configState.isolated
+      ? "isolated"
+      : undefined,
   isAgentScopeIsolated: () => configState.isolated,
 }));
 

@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import {
+  BENCHMARK_ADAPTERS,
+  defaultBenchmarkAdapters,
+  knownBenchmarkAdapters,
+  resolveBenchmarkAdapters,
+} from "../eval/runner/adapters/index.js";
+import { UnavailableAdapterError } from "../eval/runner/adapters/unavailable.js";
 import { grepAdapter } from "../eval/runner/adapters/grep.js";
 import { aggregate, scoreQuestion } from "../eval/runner/score.js";
 import type { Question, Session } from "../eval/runner/types.js";
@@ -11,7 +18,96 @@ const queries = JSON.parse(readFileSync(`${DATA_DIR}/queries.json`, "utf8")) as 
   Omit<Question, "haystack">
 >;
 
+const coreAdapters = ["grep", "vector", "agentmemory"];
+const competitorAdapters = [
+  "mem0",
+  "letta",
+  "zep-graphiti",
+  "langmem",
+  "basic-memory",
+  "openmemory",
+  "supermemory",
+];
+const requiredTaskCategories = [
+  "bug-replay",
+  "stale-branch-trap",
+  "pr-review-recall",
+  "repo-onboarding",
+  "failed-fix-avoidance",
+  "deletion-correctness",
+  "cross-agent-handoff",
+];
+
 describe("eval scaffold", () => {
+  it("benchmark adapter registry exposes the runner default order", () => {
+    expect(defaultBenchmarkAdapters()).toEqual(coreAdapters);
+    expect(knownBenchmarkAdapters()).toEqual([...coreAdapters, ...competitorAdapters]);
+    expect(resolveBenchmarkAdapters().map((descriptor) => descriptor.name)).toEqual([
+      "grep",
+      "vector",
+      "agentmemory",
+    ]);
+    expect(resolveBenchmarkAdapters("grep, agentmemory").map((descriptor) => descriptor.name)).toEqual([
+      "grep",
+      "agentmemory",
+    ]);
+    expect(resolveBenchmarkAdapters(["vector", "grep"]).map((descriptor) => descriptor.name)).toEqual([
+      "vector",
+      "grep",
+    ]);
+  });
+
+  it("benchmark adapter registry rejects unknown adapters with options", () => {
+    expect(() => resolveBenchmarkAdapters("grep,missing")).toThrow(
+      `unknown adapter: missing. options: ${[...coreAdapters, ...competitorAdapters].join(",")}`,
+    );
+  });
+
+  it("benchmark adapter descriptors are complete and match adapters", () => {
+    for (const descriptor of BENCHMARK_ADAPTERS) {
+      expect(descriptor.name.length).toBeGreaterThan(0);
+      expect(descriptor.adapter.name.length).toBeGreaterThan(0);
+      expect(descriptor.backend.length).toBeGreaterThan(0);
+      expect(typeof descriptor.requiresApiKey).toBe("boolean");
+      if (descriptor.requiresApiKey) {
+        expect(descriptor.apiKeyEnv).toBeTruthy();
+      }
+      expect(descriptor.availability?.status).toMatch(/available|unavailable/);
+    }
+  });
+
+  it("competitor descriptors resolve but report unavailable diagnostics", async () => {
+    const descriptors = resolveBenchmarkAdapters(competitorAdapters);
+    expect(descriptors.map((descriptor) => descriptor.name)).toEqual(competitorAdapters);
+    for (const descriptor of descriptors) {
+      expect(descriptor.defaultEnabled).toBe(false);
+      expect(descriptor.availability?.status).toBe("unavailable");
+      expect(descriptor.availability?.optionalExecutable).toBeTruthy();
+      try {
+        await descriptor.adapter.init([]);
+        throw new Error("expected adapter init to skip");
+      } catch (err) {
+        expect(err).toBeInstanceOf(UnavailableAdapterError);
+        const unavailable = err as UnavailableAdapterError;
+        expect(unavailable.code).toBe("BENCHMARK_ADAPTER_UNAVAILABLE");
+        expect(unavailable.skip).toMatchObject({
+          status: "skipped",
+          reason: "adapter_unavailable",
+          adapter: descriptor.name,
+          missing: {
+            executableEnv: descriptor.availability?.optionalExecutable,
+            configEnv: descriptor.availability?.optionalConfigEnv,
+          },
+          installHint: expect.stringContaining("does not bundle or auto-install competitor SDKs"),
+        });
+        expect(unavailable.toJSON()).toEqual({
+          code: unavailable.code,
+          skip: unavailable.skip,
+        });
+      }
+    }
+  });
+
   it("coding-agent-life-v1 corpus is well-formed", () => {
     expect(sessions.length).toBeGreaterThan(0);
     expect(queries.length).toBeGreaterThan(0);
@@ -21,6 +117,15 @@ describe("eval scaffold", () => {
       for (const id of q.goldSessionIds) {
         expect(sessionIds.has(id)).toBe(true);
       }
+      expect(q.taskCategory).toBeTruthy();
+      expect(q.taskTags?.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("coding-agent-life-v1 covers coding-memory task categories", () => {
+    const categories = new Set(queries.map((q) => q.taskCategory));
+    for (const category of requiredTaskCategories) {
+      expect(categories.has(category)).toBe(true);
     }
   });
 

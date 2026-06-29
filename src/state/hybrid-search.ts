@@ -6,8 +6,9 @@ import type {
   CompressedObservation,
   Memory,
   QueryExpansion,
+  SearchBackendOptions,
 } from "../types.js";
-import { memoryToObservation } from "./memory-utils.js";
+import { isMemorySearchable, memoryToObservation } from "./memory-utils.js";
 import type { StateKV } from "./kv.js";
 import { KV } from "./schema.js";
 import {
@@ -35,14 +36,19 @@ export class HybridSearch {
     this.graphRetrieval = new GraphRetrieval(kv);
   }
 
-  async search(query: string, limit = 20): Promise<HybridSearchResult[]> {
-    return this.tripleStreamSearch(query, limit);
+  async search(
+    query: string,
+    limit = 20,
+    options: SearchBackendOptions = {},
+  ): Promise<HybridSearchResult[]> {
+    return this.tripleStreamSearch(query, limit, undefined, options);
   }
 
   async searchWithExpansion(
     query: string,
     limit: number,
     expansion: QueryExpansion,
+    options: SearchBackendOptions = {},
   ): Promise<HybridSearchResult[]> {
     const allQueries = [
       query,
@@ -56,7 +62,7 @@ export class HybridSearch {
     ];
 
     const resultSets = await Promise.all(
-      allQueries.map((q) => this.tripleStreamSearch(q, limit, allEntities)),
+      allQueries.map((q) => this.tripleStreamSearch(q, limit, allEntities, options)),
     );
 
     const merged = new Map<string, HybridSearchResult>();
@@ -78,8 +84,12 @@ export class HybridSearch {
     query: string,
     limit: number,
     entityHints?: string[],
+    options: SearchBackendOptions = {},
   ): Promise<HybridSearchResult[]> {
-    const bm25Results = this.bm25.search(query, limit * 2);
+    const { candidateFilter } = options;
+    const searchMode = options.searchMode ?? "balanced";
+    const useGraph = searchMode !== "fast";
+    const bm25Results = this.bm25.search(query, limit * 2, candidateFilter);
 
     let vectorResults: Array<{
       obsId: string;
@@ -91,7 +101,7 @@ export class HybridSearch {
     if (this.vector && this.embeddingProvider && this.vector.size > 0) {
       try {
         queryEmbedding = await this.embeddingProvider.embed(query);
-        vectorResults = this.vector.search(queryEmbedding, limit * 2);
+        vectorResults = this.vector.search(queryEmbedding, limit * 2, candidateFilter);
       } catch {
         // fall through to BM25-only
       }
@@ -102,12 +112,13 @@ export class HybridSearch {
         ? entityHints
         : extractEntitiesFromQuery(query);
     let graphResults: GraphRetrievalResult[] = [];
-    if (entities.length > 0) {
+    if (useGraph && entities.length > 0) {
       try {
         graphResults = await this.graphRetrieval.searchByEntities(
           entities,
           2,
           limit,
+          candidateFilter,
         );
       } catch {
         // graph search is best-effort
@@ -115,10 +126,15 @@ export class HybridSearch {
     }
 
     const topVectorObs = vectorResults.slice(0, 5).map((r) => r.obsId);
-    if (topVectorObs.length > 0) {
+    if (useGraph && topVectorObs.length > 0) {
       try {
         const expansionResults =
-          await this.graphRetrieval.expandFromChunks(topVectorObs, 1, 5);
+          await this.graphRetrieval.expandFromChunks(
+            topVectorObs,
+            1,
+            5,
+            candidateFilter,
+          );
         graphResults = [...graphResults, ...expansionResults];
       } catch {
         // expansion is best-effort
@@ -225,7 +241,7 @@ export class HybridSearch {
     const diversified = this.diversifyBySession(combined, retrievalDepth);
     const enriched = await this.enrichResults(diversified, retrievalDepth);
 
-    if (this.rerankEnabled && enriched.length > 1) {
+    if (searchMode !== "fast" && this.rerankEnabled && enriched.length > 1) {
       try {
         const head = enriched.slice(0, rerankWindow);
         const tail = enriched.slice(rerankWindow);
@@ -301,7 +317,7 @@ export class HybridSearch {
         const mem = await this.kv
           .get<Memory>(KV.memories, r.obsId)
           .catch(() => null);
-        return mem ? memoryToObservation(mem) : null;
+        return mem && isMemorySearchable(mem) ? memoryToObservation(mem) : null;
       }),
     );
     const enriched: HybridSearchResult[] = [];

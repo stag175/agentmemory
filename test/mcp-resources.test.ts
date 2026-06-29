@@ -106,6 +106,12 @@ describe("MCP Resources", () => {
     expect(result.status_code).toBe(200);
     const data = JSON.parse(result.body.contents[0].text);
     expect(data.sessionCount).toBe(1);
+    expect(data.encryption).toMatchObject({
+      status: "fail",
+      storageWired: false,
+      remoteMode: false,
+    });
+    expect(data.encryption.missingFields).toContain("storage.encryptionWired");
   });
 
   it("reads agentmemory://project/{name}/profile", async () => {
@@ -253,6 +259,31 @@ describe("MCP Resources", () => {
       makeReq(undefined, { authorization: "Bearer test-secret" }),
     )) as { status_code: number };
     expect(authedResult.status_code).toBe(200);
+  });
+
+  it("forwards cwd hard filters from smart-search MCP tools", async () => {
+    const seen: Record<string, unknown>[] = [];
+    sdk.overrideTrigger("mem::smart-search", async (payload: unknown) => {
+      seen.push(payload as Record<string, unknown>);
+      return { results: [] };
+    });
+
+    const fn = sdk.getFunction("mcp::tools::call")!;
+    await fn(
+      makeReq({
+        name: "memory_smart_search",
+        arguments: { query: "auth bug", cwd: "C:\\repo\\billing" },
+      }),
+    );
+    await fn(
+      makeReq({
+        name: "memory_search_explain",
+        arguments: { query: "auth bug", cwd: "/repo/billing" },
+      }),
+    );
+
+    expect(seen[0]).toMatchObject({ cwd: "C:\\repo\\billing" });
+    expect(seen[1]).toMatchObject({ cwd: "/repo/billing", explain: true });
   });
 
   it("handles URI with special characters via decodeURIComponent", async () => {

@@ -71,6 +71,18 @@ describe("KV scopes", () => {
     expect(KV.signals).toBe("mem:signals");
   });
 
+  it("has agentEvents scope", () => {
+    expect(KV.agentEvents).toBe("mem:agent-events");
+  });
+
+  it("has agentEventIndexes scope", () => {
+    expect(KV.agentEventIndexes).toBe("mem:agent-events:indexes");
+  });
+
+  it("has memoryHistory scope", () => {
+    expect(KV.memoryHistory).toBe("mem:memory-history");
+  });
+
   it("has checkpoints scope", () => {
     expect(KV.checkpoints).toBe("mem:checkpoints");
   });

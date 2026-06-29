@@ -8,9 +8,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   buildRemovePlan,
   formatPlan,
-  type ConnectManifest,
   type RemoveContext,
 } from "../src/cli/remove-plan.js";
+import type { ConnectManifest } from "../src/cli/connect/types.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +35,10 @@ function touch(relPath: string, content = ""): void {
 
 function mkdir(relPath: string): void {
   mkdirSync(join(sandbox, relPath), { recursive: true });
+}
+
+function iiiBinName(): string {
+  return process.platform === "win32" ? "iii.exe" : "iii";
 }
 
 beforeEach(() => {
@@ -109,8 +113,40 @@ describe("buildRemovePlan", () => {
     expect(connectItems.every((p) => p.applicable)).toBe(true);
   });
 
+  it("expands v2 connect-manifest entries without requiring legacy symlink fields", () => {
+    const target = join(sandbox, "fake-copilot-config.json");
+    const manifest: ConnectManifest = {
+      version: 2,
+      updatedAt: "2026-06-28T12:00:00.000Z",
+      installed: [
+        {
+          target,
+          agent: "copilot-cli",
+          displayName: "GitHub Copilot CLI",
+          backupPath: join(sandbox, ".agentmemory", "backups", "copilot.json"),
+          timestamp: "2026-06-28T12:00:00.000Z",
+          runId: "connect-test",
+          action: "updated",
+          rollback: "restore-backup",
+          metadata: { previousExists: true, resultKind: "installed" },
+        },
+      ],
+      history: [],
+    };
+    touch("fake-copilot-config.json");
+
+    const plan = buildRemovePlan(ctx({ connectManifest: manifest }), {
+      force: false,
+      keepData: false,
+    });
+
+    const item = plan.find((p) => p.id === `connect:${target}`)!;
+    expect(item.applicable).toBe(true);
+    expect(item.description).toContain("copilot-cli");
+  });
+
   it("local-bin/iii is alwaysAsk when version does not match", () => {
-    touch(".local/bin/iii", "fakebin");
+    touch(join(".local", "bin", iiiBinName()), "fakebin");
     const plan = buildRemovePlan(
       ctx({ localBinIiiVersion: "9.9.9" }),
       { force: false, keepData: false },
@@ -121,7 +157,7 @@ describe("buildRemovePlan", () => {
   });
 
   it("local-bin/iii is auto-fixable when version matches pinned", () => {
-    touch(".local/bin/iii", "fakebin");
+    touch(join(".local", "bin", iiiBinName()), "fakebin");
     const plan = buildRemovePlan(
       ctx({ localBinIiiVersion: "0.11.2" }),
       { force: false, keepData: false },
@@ -139,7 +175,7 @@ describe("buildRemovePlan", () => {
   });
 
   it("private ~/.agentmemory/bin/iii is removed without prompt", () => {
-    touch(".agentmemory/bin/iii", "fakebin");
+    touch(join(".agentmemory", "bin", iiiBinName()), "fakebin");
     const plan = buildRemovePlan(ctx(), { force: false, keepData: false });
     const item = plan.find((p) => p.id === "private-bin-iii")!;
     expect(item).toBeDefined();

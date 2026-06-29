@@ -20,6 +20,7 @@ import {
   createImageEmbeddingProvider,
 } from "./providers/index.js";
 import { StateKV } from "./state/kv.js";
+import { configureStateEncryptionRuntime } from "./state/encryption-runtime.js";
 import { KV } from "./state/schema.js";
 import { VectorIndex } from "./state/vector-index.js";
 import { HybridSearch } from "./state/hybrid-search.js";
@@ -46,6 +47,8 @@ import { registerFileIndexFunction } from "./functions/file-index.js";
 import { registerConsolidateFunction } from "./functions/consolidate.js";
 import { registerPatternsFunction } from "./functions/patterns.js";
 import { registerRememberFunction } from "./functions/remember.js";
+import { registerMemoryLifecycleFunctions } from "./functions/memory-lifecycle.js";
+import { registerAgentEventFunctions } from "./functions/agent-events.js";
 import { registerEvictFunction } from "./functions/evict.js";
 import { registerRelationsFunction } from "./functions/relations.js";
 import { registerTimelineFunction } from "./functions/timeline.js";
@@ -74,6 +77,12 @@ import { registerSentinelsFunction } from "./functions/sentinels.js";
 import { registerSketchesFunction } from "./functions/sketches.js";
 import { registerCrystallizeFunction } from "./functions/crystallize.js";
 import { registerDiagnosticsFunction } from "./functions/diagnostics.js";
+import { registerComplianceEvidenceFunction } from "./functions/compliance-evidence.js";
+import { registerAuditIntegrityFunctions } from "./functions/audit-integrity.js";
+import { registerDeletionPropagationFunction } from "./functions/deletion-propagation.js";
+import { registerMemoryProposalFunctions } from "./functions/memory-proposals.js";
+import { registerOtelLineageFunctions } from "./functions/otel-lineage.js";
+import { registerSyncControlPlaneFunctions } from "./functions/sync-control-plane.js";
 import { registerFacetsFunction } from "./functions/facets.js";
 import { registerVerifyFunction } from "./functions/verify.js";
 import { registerCascadeFunction } from "./functions/cascade.js";
@@ -95,6 +104,7 @@ import { getAllTools } from "./mcp/tools-registry.js";
 import { startViewerServer } from "./viewer/server.js";
 import { MetricsStore } from "./eval/metrics-store.js";
 import { DedupMap } from "./functions/dedup.js";
+import { isMemorySearchable } from "./state/memory-utils.js";
 import { registerHealthMonitor } from "./health/monitor.js";
 import { initMetrics, OTEL_CONFIG } from "./telemetry/setup.js";
 import { VERSION } from "./version.js";
@@ -216,7 +226,14 @@ async function main() {
 
   writeWorkerPidfile();
 
-  const kv = new StateKV(sdk);
+  const rawKv = new StateKV(sdk);
+  const encryptionRuntime = configureStateEncryptionRuntime(rawKv);
+  const kv = encryptionRuntime.kv as unknown as StateKV;
+  if (encryptionRuntime.encrypted) {
+    bootLog(
+      `Storage encryption: enabled for sensitive StateKV scopes (${encryptionRuntime.keyRef ?? "configured key"})`,
+    );
+  }
   const secret = getEnvVar("AGENTMEMORY_SECRET");
   const metricsStore = new MetricsStore(kv);
   const dedupMap = new DedupMap();
@@ -249,6 +266,8 @@ async function main() {
   registerConsolidateFunction(sdk, kv, provider);
   registerPatternsFunction(sdk, kv);
   registerRememberFunction(sdk, kv);
+  registerMemoryLifecycleFunctions(sdk, kv);
+  registerAgentEventFunctions(sdk, kv);
   registerEvictFunction(sdk, kv);
 
   registerRelationsFunction(sdk, kv);
@@ -317,6 +336,12 @@ async function main() {
   registerSketchesFunction(sdk, kv);
   registerCrystallizeFunction(sdk, kv, provider);
   registerDiagnosticsFunction(sdk, kv);
+  registerComplianceEvidenceFunction(sdk, kv);
+  registerAuditIntegrityFunctions(sdk, kv);
+  registerDeletionPropagationFunction(sdk, kv);
+  registerMemoryProposalFunctions(sdk, kv);
+  registerOtelLineageFunctions(sdk, kv);
+  registerSyncControlPlaneFunctions(sdk, kv);
   registerFacetsFunction(sdk, kv);
   registerVerifyFunction(sdk, kv);
   registerLessonsFunctions(sdk, kv);
@@ -364,8 +389,8 @@ async function main() {
     graphWeight,
   );
 
-  registerSmartSearchFunction(sdk, kv, (query, limit) =>
-    hybridSearch.search(query, limit),
+  registerSmartSearchFunction(sdk, kv, (query, limit, options) =>
+    hybridSearch.search(query, limit, options),
   );
   registerRecentSearchesSweepFunction(sdk, kv);
 
@@ -474,17 +499,18 @@ async function main() {
     // empty for everything saved via memory_save (#257). Walk KV.memories
     // and add the ones missing from the restored index. Idempotent on
     // re-runs because SearchIndex.has() short-circuits already-indexed
-    // ids.
+    // id/session pairs.
     try {
       const memories = await kv.list<import("./types.js").Memory>(KV.memories);
       let backfilled = 0;
       for (const memory of memories) {
-        if (memory.isLatest === false) continue;
+        if (!isMemorySearchable(memory)) continue;
         if (!memory.title || !memory.content) continue;
-        if (bm25Index.has(memory.id)) continue;
+        const sessionId = memory.sessionIds?.[0] ?? "memory";
+        if (bm25Index.has(memory.id, sessionId)) continue;
         bm25Index.add({
           id: memory.id,
-          sessionId: memory.sessionIds?.[0] ?? "memory",
+          sessionId,
           timestamp: memory.createdAt,
           type: "decision",
           title: memory.title,
@@ -518,7 +544,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 128 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 162 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,

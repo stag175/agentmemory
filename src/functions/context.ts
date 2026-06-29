@@ -7,6 +7,9 @@ import type {
   ProjectProfile,
   MemorySlot,
   Lesson,
+  ContextBudgetReport,
+  PackedContext,
+  QueryPlan,
 } from "../types.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
@@ -17,6 +20,28 @@ import {
   listPinnedSlots,
   renderPinnedContext,
 } from "./slots.js";
+import {
+  buildQueryPlan,
+  contextBlockToRankedEvidence,
+  packContext,
+} from "../retrieval/context-router.js";
+
+type ContextInput = {
+  sessionId: string;
+  project: string;
+  budget?: number;
+  explain?: boolean;
+  includeReport?: boolean;
+};
+
+type ContextResult = {
+  context: string;
+  blocks: number;
+  tokens: number;
+  budgetReport?: ContextBudgetReport;
+  packedContext?: PackedContext;
+  queryPlan?: QueryPlan;
+};
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3);
@@ -36,8 +61,10 @@ export function registerContextFunction(
   tokenBudget: number,
 ): void {
   sdk.registerFunction("mem::context", 
-    async (data: { sessionId: string; project: string; budget?: number }) => {
+    async (data: ContextInput): Promise<ContextResult> => {
       const budget = data.budget || tokenBudget;
+      const explain = data.explain === true;
+      const includeReport = explain || data.includeReport === true;
       const blocks: ContextBlock[] = [];
 
       const [pinnedSlots, profile, lessons] = await Promise.all([
@@ -170,6 +197,10 @@ export function registerContextFunction(
             .catch(() => []),
         ),
       );
+      const scannedObservations = obsResults.reduce(
+        (sum, observations) => sum + observations.length,
+        0,
+      );
 
       for (let j = 0; j < sessionsNeedingObs.length; j++) {
         const i = sessionsNeedingObs[j];
@@ -198,37 +229,84 @@ export function registerContextFunction(
 
       blocks.sort((a, b) => b.recency - a.recency);
 
-      let usedTokens = 0;
-      const selected: string[] = [];
-      const accessedIds: string[] = [];
       const header = `<agentmemory-context project="${escapeXmlAttr(data.project)}">`;
       const footer = `</agentmemory-context>`;
-      usedTokens += estimateTokens(header) + estimateTokens(footer);
+      const evidence = blocks
+        .map(contextBlockToRankedEvidence)
+        .map((item) => (explain ? { ...item, tokens: undefined } : item));
+      const packed = packContext({
+        evidence,
+        budgetTokens: budget,
+        header,
+        footer,
+        separator: "\n\n",
+        explain,
+      });
+      const queryPlan = explain
+        ? buildQueryPlan({
+            mode: "context",
+            searchMode: "balanced",
+            streams: [
+              "pinned-slots",
+              "project-profile",
+              "lessons",
+              "session-summaries",
+              "observations",
+            ],
+            filterStage: "project and current-session filters before packing",
+            hardFilters: {
+              project: data.project,
+              excludeSessionId: data.sessionId,
+            },
+            requestedLimit: blocks.length,
+            overFetchLimit: blocks.length,
+            tokenBudget: budget,
+            prefilter: {
+              candidateCount: blocks.length,
+              scannedSessions: allSessions.length,
+              scannedObservations,
+            },
+          })
+        : undefined;
 
-      for (const block of blocks) {
-        if (usedTokens + block.tokens > budget) continue;
-        selected.push(block.content);
-        usedTokens += block.tokens;
-        if (block.sourceIds && block.sourceIds.length > 0) {
-          accessedIds.push(...block.sourceIds);
-        }
-      }
+      const accessedIds = packed.selected.flatMap(
+        (item) => item.sourceIds ?? [],
+      );
 
       if (accessedIds.length > 0) {
         void recordAccessBatch(kv, accessedIds);
       }
 
-      if (selected.length === 0) {
+      if (packed.blocks === 0) {
         logger.info("No context available", { project: data.project });
-        return { context: "", blocks: 0, tokens: 0 };
+        const response: ContextResult = {
+          context: "",
+          blocks: 0,
+          tokens: 0,
+        };
+        if (includeReport) response.budgetReport = packed.budgetReport;
+        if (explain) {
+          response.packedContext = packed;
+          response.queryPlan = queryPlan;
+        }
+        return response;
       }
 
-      const result = `${header}\n${selected.join("\n\n")}\n${footer}`;
       logger.info("Context generated", {
-        blocks: selected.length,
-        tokens: usedTokens,
+        blocks: packed.blocks,
+        tokens: packed.tokens,
       });
-      return { context: result, blocks: selected.length, tokens: usedTokens };
+      const response: ContextResult = {
+        context: packed.context,
+        blocks: packed.blocks,
+        tokens: packed.tokens,
+      };
+      if (includeReport) response.budgetReport = packed.budgetReport;
+      if (explain) {
+        response.packedContext = packed;
+        response.queryPlan = queryPlan;
+      }
+      return response;
     },
   );
 }
