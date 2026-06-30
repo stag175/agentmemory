@@ -151,6 +151,15 @@ interface SyncConflict {
   reason: "digest_mismatch";
 }
 
+interface SyncStaleSkip {
+  scope: SyncScope;
+  sourceId: string;
+  snapshotId: string;
+  existingUpdatedAt?: string;
+  incomingUpdatedAt?: string;
+  reason: "incoming_not_newer";
+}
+
 interface SyncApplyRecord {
   kind: "sync-apply";
   id: string;
@@ -169,6 +178,8 @@ interface SyncApplyRecord {
   unchangedCounts: Record<SyncScope, number>;
   conflictCount: number;
   conflicts: SyncConflict[];
+  staleCount: number;
+  staleSkips: SyncStaleSkip[];
   snapshotIds: string[];
   errors: string[];
   evidence: Record<string, unknown>;
@@ -249,6 +260,39 @@ export function registerSyncControlPlaneFunctions(sdk: ISdk, kv: StateKV): void 
     await kv.set(KV.state, stateKey.peer(peer.id), peer);
     await auditSync(kv, "mem::sync-peer-register", [peer.id], {
       action: "sync.peer.register",
+      peer: peerEvidence(peer),
+    });
+    return { success: true, peer };
+  });
+
+  sdk.registerFunction("mem::sync-peer-set-status", async (data: unknown) => {
+    const input = asRecord(data);
+    if (!input) return { success: false, error: "payload required" };
+    const peerId = requiredString(input.peerId, "peerId");
+    if (!peerId.ok) return { success: false, error: peerId.error };
+    const enabled = optionalBoolean(input.enabled, true);
+    if (!enabled.ok) return { success: false, error: enabled.error };
+
+    const stored = await kv.get<SyncPeer>(KV.state, stateKey.peer(peerId.value));
+    if (!stored || stored.kind !== "sync-peer") {
+      return { success: false, error: "peer not found" };
+    }
+
+    const now = new Date().toISOString();
+    // Clearing status drops run-derived block reasons and recomputes health from
+    // config alone, recovering a peer that an untrusted run had marked blocked.
+    const withEnabled: SyncPeer = { ...stored, enabled: enabled.value };
+    const health = derivePeerHealth(withEnabled, []);
+    const peer: SyncPeer = {
+      ...withEnabled,
+      status: health.status,
+      statusReasons: health.statusReasons,
+      updatedAt: now,
+    };
+
+    await kv.set(KV.state, stateKey.peer(peer.id), peer);
+    await auditSync(kv, "mem::sync-peer-set-status", [peer.id], {
+      action: "sync.peer.set-status",
       peer: peerEvidence(peer),
     });
     return { success: true, peer };
@@ -356,16 +400,11 @@ export function registerSyncControlPlaneFunctions(sdk: ISdk, kv: StateKV): void 
 
     await kv.set(KV.state, stateKey.run(run.id), run);
     if (parsed.peer) {
-      await kv.set(KV.state, stateKey.peer(parsed.peer.id), {
-        ...parsed.peer,
-        lastRunAt: run.startedAt,
-        status: run.status === "failed" || run.status === "blocked" ? "blocked" : parsed.peer.status,
-        statusReasons:
-          run.status === "failed" || run.status === "blocked"
-            ? unique([...parsed.peer.statusReasons, `last run ${run.status}`])
-            : parsed.peer.statusReasons,
-        updatedAt: now,
-      });
+      await kv.set(
+        KV.state,
+        stateKey.peer(parsed.peer.id),
+        applyRunOutcomeToPeer(parsed.peer, run.status, run.startedAt, now),
+      );
     }
 
     await auditSync(kv, "mem::sync-run-record", [run.id], {
@@ -429,9 +468,29 @@ export function registerSyncControlPlaneFunctions(sdk: ISdk, kv: StateKV): void 
     const blocked = conflicts.length > 0 && parsed.conflictPolicy === "block";
     const applyId = generateId("syncapply");
     const now = new Date().toISOString();
-    const writes = blocked
+    const changed = blocked
       ? []
       : existing.filter(({ record, candidate }) => record?.digest !== candidate.digest);
+    // Under merge, an incoming row only wins if it is strictly newer than the stored
+    // snapshot; otherwise the write is a stale overwrite and is skipped/flagged.
+    const staleSkips: SyncStaleSkip[] =
+      parsed.conflictPolicy === "merge"
+        ? changed
+            .filter(
+              ({ record, candidate }) =>
+                record !== null && !isCandidateNewer(candidate.sourceUpdatedAt, record.sourceUpdatedAt),
+            )
+            .map(({ candidate, snapshotId, record }) => ({
+              scope: candidate.scope,
+              sourceId: candidate.sourceId,
+              snapshotId,
+              existingUpdatedAt: record?.sourceUpdatedAt,
+              incomingUpdatedAt: candidate.sourceUpdatedAt,
+              reason: "incoming_not_newer",
+            }))
+        : [];
+    const staleSnapshotIds = new Set(staleSkips.map((skip) => skip.snapshotId));
+    const writes = changed.filter(({ snapshotId }) => !staleSnapshotIds.has(snapshotId));
     const record: SyncApplyRecord = {
       kind: "sync-apply",
       id: applyId,
@@ -450,8 +509,14 @@ export function registerSyncControlPlaneFunctions(sdk: ISdk, kv: StateKV): void 
       unchangedCounts: countCandidates(unchanged.map((entry) => entry.candidate)),
       conflictCount: conflicts.length,
       conflicts,
+      staleCount: staleSkips.length,
+      staleSkips,
       snapshotIds: writes.map(({ snapshotId }) => snapshotId),
-      errors: blocked ? ["snapshot conflicts detected"] : [],
+      errors: blocked
+        ? ["snapshot conflicts detected"]
+        : staleSkips.length > 0
+          ? [`${staleSkips.length} stale snapshot write(s) skipped`]
+          : [],
       evidence: sanitizeEvidence({
         peer: peerEvidence(parsed.peer),
         workspace: workspaceEvidence(parsed.workspace),
@@ -1236,6 +1301,19 @@ function snapshotUpdatedAt(item: Record<string, unknown>): string | undefined {
   return typeof value === "string" && !Number.isNaN(new Date(value).getTime()) ? value : undefined;
 }
 
+// True only when the incoming row can be proven strictly newer than the stored one.
+// If either side lacks a usable timestamp the incoming cannot win, so an unstamped
+// or equally-stamped incoming row is treated as a stale overwrite.
+function isCandidateNewer(incoming: string | undefined, existing: string | undefined): boolean {
+  if (!incoming) return false;
+  const incomingTime = new Date(incoming).getTime();
+  if (Number.isNaN(incomingTime)) return false;
+  if (!existing) return true;
+  const existingTime = new Date(existing).getTime();
+  if (Number.isNaN(existingTime)) return true;
+  return incomingTime > existingTime;
+}
+
 function normalizeLimit(value: unknown): { ok: true; value: number } | { ok: false; error: string } {
   if (value === undefined || value === null || value === "") return { ok: true, value: 20 };
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 200) {
@@ -1376,6 +1454,44 @@ function peerStatusReasons(mode: SyncMode, loopback: boolean, enabled: boolean):
   return reasons;
 }
 
+const RUN_DERIVED_REASON_PREFIX = "last run ";
+
+function configPeerStatusReasons(peer: SyncPeer): string[] {
+  return peerStatusReasons(peer.mode, peer.loopback, peer.enabled);
+}
+
+function derivePeerHealth(
+  peer: SyncPeer,
+  runReasons: string[],
+): { status: SyncPeerStatus; statusReasons: string[] } {
+  const reasons = unique([...configPeerStatusReasons(peer), ...runReasons]);
+  if (!peer.enabled) {
+    return { status: "disabled", statusReasons: reasons };
+  }
+  return { status: reasons.length === 0 ? "ready" : "blocked", statusReasons: reasons };
+}
+
+// Run status is untrusted ledger input, not authoritative peer state. A non-failed
+// run clears any prior run-derived block so a later success heals the peer; only a
+// failed run records a recoverable run-derived reason.
+function applyRunOutcomeToPeer(
+  peer: SyncPeer,
+  runStatus: SyncRunStatus,
+  lastRunAt: string,
+  now: string,
+): SyncPeer {
+  const failed = runStatus === "failed";
+  const runReasons = failed ? [`${RUN_DERIVED_REASON_PREFIX}${runStatus}`] : [];
+  const health = derivePeerHealth(peer, runReasons);
+  return {
+    ...peer,
+    lastRunAt,
+    status: health.status,
+    statusReasons: health.statusReasons,
+    updatedAt: now,
+  };
+}
+
 function directionAllowed(requested: SyncDirection, allowed: SyncDirection): boolean {
   if (allowed === "both") return true;
   if (requested === "both") return false;
@@ -1455,6 +1571,7 @@ function applyEvidence(apply: SyncApplyRecord): Record<string, unknown> {
     appliedCounts: apply.appliedCounts,
     unchangedCounts: apply.unchangedCounts,
     conflictCount: apply.conflictCount,
+    staleCount: apply.staleCount,
     snapshotIds: apply.snapshotIds,
     errorCount: apply.errors.length,
   };
@@ -1505,13 +1622,11 @@ async function recordApplyRun(
     updatedAt: now,
   };
   await kv.set(KV.state, stateKey.run(run.id), run);
-  await kv.set(KV.state, stateKey.peer(peer.id), {
-    ...peer,
-    lastRunAt: now,
-    status: peer.status,
-    statusReasons: peer.statusReasons,
-    updatedAt: now,
-  });
+  await kv.set(
+    KV.state,
+    stateKey.peer(peer.id),
+    applyRunOutcomeToPeer(peer, run.status, now, now),
+  );
   return run;
 }
 
@@ -1557,7 +1672,8 @@ function stableValue(value: unknown): unknown {
 
 function isLoopbackHost(host: string): boolean {
   const normalized = host.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
-  return normalized === "localhost" || normalized === "::1" || /^127\./.test(normalized);
+  if (normalized === "localhost" || normalized === "::1") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized);
 }
 
 function unique<T>(values: T[]): T[] {

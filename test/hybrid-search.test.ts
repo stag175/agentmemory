@@ -366,6 +366,122 @@ describe("HybridSearch", () => {
     expect(results).toEqual([]);
   });
 
+  it("uses the in-process VectorIndex path unchanged when no external store is wired (#13)", async () => {
+    const obs = makeObs({ id: "obs_1", sessionId: "ses_1" });
+    bm25.add(obs);
+    await kv.set("mem:obs:ses_1", "obs_1", obs);
+
+    const vector = new VectorIndex();
+    vector.add(obs.id, obs.sessionId, new Float32Array([1, 0]));
+
+    // Default constructor (no store argument) must run the existing in-process
+    // VectorIndex path. The vector hit surfaces obs_1 with a non-zero
+    // vectorScore, proving the in-process path served the read.
+    const hybrid = new HybridSearch(
+      bm25,
+      vector,
+      mockEmbeddingProvider(),
+      kv as never,
+    );
+
+    const results = await hybrid.search("auth");
+
+    expect(results.length).toBe(1);
+    expect(results[0].observation.id).toBe("obs_1");
+    expect(results[0].vectorScore).toBeGreaterThan(0);
+  });
+
+  it("routes vector retrieval through a provided external store (#13)", async () => {
+    const obs = makeObs({
+      id: "obs_store",
+      sessionId: "ses_store",
+      title: "auth via external store",
+      narrative: "auth via external store",
+    });
+    // Intentionally NOT added to the in-process VectorIndex — the only way this
+    // obsId surfaces as a vector hit is via the external store.
+    await kv.set("mem:obs:ses_store", obs.id, obs);
+
+    const searchByVector = vi.fn(async () => [
+      {
+        id: "obs_store",
+        score: 0.99,
+        payload: { sessionId: "ses_store" },
+      },
+    ]);
+    const store = {
+      upsert: vi.fn(async () => {}),
+      searchByVector,
+      deleteByIds: vi.fn(async () => {}),
+      healthCheck: vi.fn(async () => ({
+        reachable: true,
+        status: 200,
+        detail: "ok",
+      })),
+    };
+
+    const hybrid = new HybridSearch(
+      bm25,
+      // A non-null in-process VectorIndex is supplied but MUST be ignored when
+      // an external store is present.
+      new VectorIndex(),
+      mockEmbeddingProvider(),
+      kv as never,
+      0.4,
+      0.6,
+      0.3,
+      false,
+      store,
+    );
+
+    const results = await hybrid.search("auth", 10);
+
+    expect(searchByVector).toHaveBeenCalledTimes(1);
+    const [vector, limit] = searchByVector.mock.calls[0];
+    expect(Array.isArray(vector)).toBe(true);
+    expect(limit).toBe(20);
+    expect(results.map((r) => r.observation.id)).toContain("obs_store");
+    const stored = results.find((r) => r.observation.id === "obs_store");
+    expect(stored?.vectorScore).toBe(0.99);
+    expect(stored?.sessionId).toBe("ses_store");
+  });
+
+  it("setRetrievalStore late-binds the external store (#13)", async () => {
+    const obs = makeObs({
+      id: "obs_late",
+      sessionId: "ses_late",
+      title: "auth late bound",
+      narrative: "auth late bound",
+    });
+    await kv.set("mem:obs:ses_late", obs.id, obs);
+
+    const searchByVector = vi.fn(async () => [
+      { id: "obs_late", score: 0.5, payload: { sessionId: "ses_late" } },
+    ]);
+    const store = {
+      upsert: vi.fn(async () => {}),
+      searchByVector,
+      deleteByIds: vi.fn(async () => {}),
+      healthCheck: vi.fn(async () => ({
+        reachable: true,
+        status: 200,
+        detail: "ok",
+      })),
+    };
+
+    const hybrid = new HybridSearch(
+      bm25,
+      new VectorIndex(),
+      mockEmbeddingProvider(),
+      kv as never,
+    );
+    hybrid.setRetrievalStore(store);
+
+    const results = await hybrid.search("auth", 10);
+    expect(searchByVector).toHaveBeenCalledTimes(1);
+    expect(results.map((r) => r.observation.id)).toContain("obs_late");
+  });
+
   it("falls back to KV.memories when an indexed entry is a saved memory (#265)", async () => {
     // mem::remember writes to KV.memories under the synthetic sessionId
     // "memory" — the BM25 index sees that synthetic sessionId, but

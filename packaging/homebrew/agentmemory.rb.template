@@ -9,6 +9,9 @@ class Agentmemory < Formula
   depends_on "node"
 
   def install
+    # __AGENTMEMORY_TARBALL_URL__ must point at a prebuilt artifact (an npm-pack
+    # tarball) that already ships dist/cli.mjs. dist/ is gitignored build output,
+    # so a git source tarball does not contain it and would break this symlink.
     libexec.install Dir["*"]
     bin.install_symlink libexec/"dist/cli.mjs" => "agentmemory"
   end

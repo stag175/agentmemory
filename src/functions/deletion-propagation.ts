@@ -10,6 +10,11 @@ import type {
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { safeAudit } from "./audit.js";
+import {
+  flushIndexSave,
+  getSearchIndex,
+  vectorIndexRemove,
+} from "./search.js";
 
 type PropagationMode = "review" | "tombstone";
 
@@ -248,6 +253,61 @@ function relationRefId(relation: KeyedMemoryRelation): string {
 
 async function safeList<T>(kv: StateKV, scope: string): Promise<T[]> {
   return kv.list<T>(scope).catch(() => []);
+}
+
+function isUnregisteredFunctionError(err: unknown): boolean {
+  return err instanceof Error && /^No function:/.test(err.message);
+}
+
+// Apply a real, index-aware tombstone to a single impacted memory.
+//
+// Prefer the canonical mem::memory-delete tombstone path so there is ONE
+// audited, content-clearing, index-removing implementation. When that
+// function is not registered (e.g. unit tests that wire only this module),
+// fall back to an inline tombstone that mirrors deleteOneMemory in
+// memory-lifecycle.ts: clear content/title/concepts/files, mark the row
+// tombstoned + not-latest, and remove it from both the BM25 and vector
+// indexes so "deleted" data is no longer retrievable.
+async function tombstoneImpactedMemory(
+  sdk: ISdk,
+  kv: StateKV,
+  memoryId: string,
+  actor: string | undefined,
+  reason: string | undefined,
+): Promise<boolean> {
+  try {
+    const result = (await sdk.trigger({
+      function_id: "mem::memory-delete",
+      payload: {
+        memoryId,
+        mode: "tombstone",
+        ...(actor ? { actor } : {}),
+        ...(reason ? { reason } : {}),
+      },
+    })) as { success?: unknown; deleted?: unknown } | undefined;
+    return Boolean(result && (result as { success?: unknown }).success === true);
+  } catch (err) {
+    if (!isUnregisteredFunctionError(err)) throw err;
+  }
+  const existing = await kv.get<Memory>(KV.memories, memoryId).catch(() => null);
+  if (!existing) return false;
+  const now = new Date().toISOString();
+  const tombstone: Memory = {
+    ...existing,
+    updatedAt: now,
+    deletedAt: existing.deletedAt ?? now,
+    lifecycleState: "tombstoned",
+    reviewState: "rejected",
+    isLatest: false,
+    title: `[deleted] ${existing.id}`,
+    content: "",
+    concepts: [],
+    files: [],
+  };
+  await kv.set(KV.memories, tombstone.id, tombstone);
+  getSearchIndex().remove(tombstone.id);
+  vectorIndexRemove(tombstone.id);
+  return true;
 }
 
 async function markGraphRowsStale(
@@ -493,25 +553,41 @@ export function registerDeletionPropagationFunction(sdk: ISdk, kv: StateKV): voi
 
       if (apply && impactedMemories.length > 0) {
         const now = generatedAt;
+        let indexTouched = false;
         appliedMemoryIds = (
           await Promise.all(
             impactedMemories.map(async (item) => {
+              if (mode === "tombstone") {
+                const tombstoned = await tombstoneImpactedMemory(
+                  sdk,
+                  kv,
+                  item.id,
+                  text(input.actor),
+                  text(input.reason),
+                );
+                if (tombstoned) indexTouched = true;
+                return tombstoned ? item.id : undefined;
+              }
               const existing = await kv.get<Memory>(KV.memories, item.id).catch(() => null);
               if (!existing) return undefined;
+              // review mode is non-destructive (content is preserved for the
+              // reviewer) but must still pull the row out of the live BM25 and
+              // vector indexes so pending-deletion data is not retrievable.
               const updated: Memory = {
                 ...existing,
                 updatedAt: now,
                 reviewState: "needs_review",
-                ...(mode === "tombstone"
-                  ? { lifecycleState: "tombstoned", deletedAt: existing.deletedAt ?? now }
-                  : {}),
               };
               await kv.set(KV.memories, updated.id, updated);
+              getSearchIndex().remove(updated.id);
+              vectorIndexRemove(updated.id);
+              indexTouched = true;
               return updated.id;
             }),
           )
         ).filter((id): id is string => typeof id === "string");
         memoryMutationApplied = appliedMemoryIds.length > 0;
+        if (indexTouched) await flushIndexSave();
       }
 
       if (apply && (graphNodeRefs.length > 0 || graphEdgeRefs.length > 0)) {

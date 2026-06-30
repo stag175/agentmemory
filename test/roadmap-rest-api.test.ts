@@ -21,6 +21,34 @@ describe("roadmap REST endpoint whitelists", () => {
     expect(paths).toContain("/agentmemory/memory/today");
     expect(paths).toContain("/agentmemory/memory/unlinked-mentions");
     expect(paths).toContain("/agentmemory/handoffs/status");
+    // item 6 (sync recovery) + item 3 (audit-chain exposure)
+    expect(paths).toContain("/agentmemory/sync/peer/set-status");
+    expect(paths).toContain("/agentmemory/audit/chain");
+    expect(paths).toContain("/agentmemory/audit/chain/verify");
+  });
+
+  it("registers the audit-chain GET read and verify POST routes", () => {
+    const sdk = mockSdk();
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    const routes = sdk.registerTrigger.mock.calls.map(
+      ([trigger]: [{ config?: { api_path?: string; http_method?: string } }]) => ({
+        path: trigger.config?.api_path,
+        method: trigger.config?.http_method,
+      }),
+    );
+
+    expect(routes).toContainEqual({
+      path: "/agentmemory/audit/chain",
+      method: "GET",
+    });
+    expect(routes).toContainEqual({
+      path: "/agentmemory/audit/chain/verify",
+      method: "POST",
+    });
+    expect(routes).toContainEqual({
+      path: "/agentmemory/sync/peer/set-status",
+      method: "POST",
+    });
   });
 
   it("registers memory inspect POST and GET REST parity routes", () => {
@@ -72,7 +100,7 @@ describe("roadmap REST endpoint whitelists", () => {
     expect(seen).toEqual([{ memoryId: "mem_post" }, { memoryId: "mem_get" }]);
   });
 
-  it("whitelists memory proposal payload fields", async () => {
+  it("strips body authorization and resolves the principal server-side", async () => {
     const sdk = mockSdk();
     let payload: Record<string, unknown> | undefined;
     sdk.registerFunction("mem::memory-proposal-create", async (input) => {
@@ -82,23 +110,99 @@ describe("roadmap REST endpoint whitelists", () => {
     registerApiTriggers(sdk as never, mockKV() as never, undefined);
 
     const response = (await sdk.trigger("api::memory-proposal-create", {
-      headers: {},
+      headers: { "x-actor-id": "alice" },
       body: {
         project: "billing",
         action: "create",
         change: { content: "approved" },
-        permissions: ["project:write"],
+        // Forged authorization fields must be stripped and must NOT widen the
+        // principal: the server grants the fixed trusted-operator set only.
+        permissions: ["governance:delete", "*"],
+        roles: ["admin"],
+        roleGrants: { admin: true },
+        teamPolicy: { allowSelfApproval: true },
+        auth: { sub: "attacker" },
+        access: "all",
+        actor: { id: "attacker" },
+        requestContext: { trusted: true },
         ignored: "drop",
       },
     })) as { status_code: number };
 
     expect(response.status_code).toBe(200);
+    // Only proposal-content fields survive; the principal is injected by the
+    // server, never derived from the body.
     expect(payload).toEqual({
       project: "billing",
       action: "create",
       change: { content: "approved" },
-      permissions: ["project:write"],
+      principal: {
+        actorId: "alice",
+        permissions: ["project:read", "project:write", "governance:delete"],
+        teamPolicy: { allowSelfApproval: false },
+      },
     });
+    // The forged "*" wildcard never reaches the function.
+    expect(
+      (payload?.principal as { permissions: string[] }).permissions,
+    ).not.toContain("*");
+  });
+
+  it("falls back to body.actorId then 'operator' for the audit identity label", async () => {
+    const sdk = mockSdk();
+    const seen: Record<string, unknown>[] = [];
+    sdk.registerFunction("mem::memory-proposal-approve", async (input) => {
+      seen.push(input as Record<string, unknown>);
+      return { success: true };
+    });
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+
+    // No x-actor-id header: actorId falls back to body.actorId (identity label
+    // only — carries no authorization).
+    await sdk.trigger("api::memory-proposal-approve", {
+      headers: {},
+      body: { proposalId: "prop_1", actorId: "bob" },
+    });
+    // No header and no body.actorId: defaults to "operator".
+    await sdk.trigger("api::memory-proposal-approve", {
+      headers: {},
+      body: { proposalId: "prop_2" },
+    });
+
+    expect((seen[0]?.principal as { actorId: string }).actorId).toBe("bob");
+    expect((seen[1]?.principal as { actorId: string }).actorId).toBe(
+      "operator",
+    );
+    // body.actorId is an identity label, not a whitelisted content field, so it
+    // is not forwarded as a top-level payload key.
+    expect(seen[0]).not.toHaveProperty("actorId");
+  });
+
+  it("honors AGENTMEMORY_ALLOW_SELF_APPROVAL for the resolved teamPolicy", async () => {
+    const prev = process.env.AGENTMEMORY_ALLOW_SELF_APPROVAL;
+    process.env.AGENTMEMORY_ALLOW_SELF_APPROVAL = "true";
+    try {
+      const sdk = mockSdk();
+      let payload: Record<string, unknown> | undefined;
+      sdk.registerFunction("mem::memory-proposal-approve", async (input) => {
+        payload = input as Record<string, unknown>;
+        return { success: true };
+      });
+      registerApiTriggers(sdk as never, mockKV() as never, undefined);
+
+      await sdk.trigger("api::memory-proposal-approve", {
+        headers: {},
+        body: { proposalId: "prop_1" },
+      });
+
+      expect(
+        (payload?.principal as { teamPolicy: { allowSelfApproval: boolean } })
+          .teamPolicy.allowSelfApproval,
+      ).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.AGENTMEMORY_ALLOW_SELF_APPROVAL;
+      else process.env.AGENTMEMORY_ALLOW_SELF_APPROVAL = prev;
+    }
   });
 
   it("whitelists handoff status update payload fields", async () => {
@@ -320,5 +424,125 @@ describe("roadmap REST endpoint whitelists", () => {
     expect(badLimit.body.error).toBe("invalid numeric parameter: limit");
     expect(badMinMentions.status_code).toBe(400);
     expect(badMinMentions.body.error).toBe("invalid numeric parameter: minMentions");
+  });
+
+  it("whitelists sync peer set-status payload to peerId + enabled (item 6)", async () => {
+    const sdk = mockSdk();
+    let payload: Record<string, unknown> | undefined;
+    sdk.registerFunction("mem::sync-peer-set-status", async (input) => {
+      payload = input as Record<string, unknown>;
+      return { success: true };
+    });
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+
+    const ok = (await sdk.trigger("api::sync-peer-set-status", {
+      headers: {},
+      body: { peerId: "peer_1", enabled: false, status: "drop", reason: "drop" },
+    })) as { status_code: number };
+    const badEnabled = (await sdk.trigger("api::sync-peer-set-status", {
+      headers: {},
+      body: { peerId: "peer_1", enabled: "false" },
+    })) as { status_code: number; body: { error: string } };
+
+    expect(ok.status_code).toBe(200);
+    expect(payload).toEqual({ peerId: "peer_1", enabled: false });
+    expect(badEnabled.status_code).toBe(400);
+    expect(badEnabled.body.error).toBe("enabled must be a boolean");
+  });
+
+  it("forwards whitelisted audit-chain read filters from GET query params (item 3)", async () => {
+    const sdk = mockSdk();
+    let payload: Record<string, unknown> | undefined;
+    sdk.registerFunction("mem::audit-chain", async (input) => {
+      payload = input as Record<string, unknown>;
+      return { success: true, headHash: "abc", entries: [] };
+    });
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+
+    const response = (await sdk.trigger("api::audit-chain", {
+      headers: {},
+      query_params: {
+        offset: "0",
+        limit: "25",
+        includeLinks: "true",
+        operation: "memory.write",
+        functionId: "mem::remember",
+        dateFrom: "2026-06-01",
+        dateTo: "2026-06-30",
+        secret: "drop",
+      },
+    })) as { status_code: number };
+
+    expect(response.status_code).toBe(200);
+    // Query params arrive as strings; mem::audit-chain coerces them. The REST
+    // layer only forwards whitelisted keys and drops "secret".
+    expect(payload).toEqual({
+      offset: "0",
+      limit: "25",
+      includeLinks: "true",
+      operation: "memory.write",
+      functionId: "mem::remember",
+      dateFrom: "2026-06-01",
+      dateTo: "2026-06-30",
+    });
+  });
+
+  it("whitelists audit-chain verify anchors and rejects bad field types (item 3)", async () => {
+    const sdk = mockSdk();
+    let payload: Record<string, unknown> | undefined;
+    sdk.registerFunction("mem::audit-chain-verify", async (input) => {
+      payload = input as Record<string, unknown>;
+      return { success: true, checked: {}, mismatches: [] };
+    });
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+
+    const ok = (await sdk.trigger("api::audit-chain-verify", {
+      headers: {},
+      body: {
+        expectedHeadHash: "head_hash",
+        expectedCount: 12,
+        expectedFirstEntryId: "first",
+        expectedLastEntryId: "last",
+        chain: [{ entryHash: "h1" }],
+        allowUnanchored: false,
+        offset: 0,
+        limit: 50,
+        includeLinks: true,
+        operation: "memory.write",
+        functionId: "mem::remember",
+        dateFrom: "2026-06-01",
+        dateTo: "2026-06-30",
+        secret: "drop",
+      },
+    })) as { status_code: number };
+    const badCount = (await sdk.trigger("api::audit-chain-verify", {
+      headers: {},
+      body: { expectedCount: "twelve" },
+    })) as { status_code: number; body: { error: string } };
+    const badChain = (await sdk.trigger("api::audit-chain-verify", {
+      headers: {},
+      body: { chain: "not-an-array" },
+    })) as { status_code: number; body: { error: string } };
+
+    expect(ok.status_code).toBe(200);
+    expect(payload).toEqual({
+      expectedHeadHash: "head_hash",
+      expectedCount: 12,
+      expectedFirstEntryId: "first",
+      expectedLastEntryId: "last",
+      chain: [{ entryHash: "h1" }],
+      allowUnanchored: false,
+      offset: 0,
+      limit: 50,
+      includeLinks: true,
+      operation: "memory.write",
+      functionId: "mem::remember",
+      dateFrom: "2026-06-01",
+      dateTo: "2026-06-30",
+    });
+    expect(badCount.status_code).toBe(400);
+    expect(badCount.body.error).toBe("expectedCount must be an integer");
+    expect(badChain.status_code).toBe(400);
+    expect(badChain.body.error).toBe("chain must be an array");
   });
 });

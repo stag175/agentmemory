@@ -6,6 +6,7 @@ import type {
 import {
   LOCAL_JSON_ENCRYPTION_ENVELOPE_VERSION,
   decryptLocalJsonPayload,
+  deriveDeterministicLocalJsonSalt,
   encryptLocalJsonPayload,
 } from "../security/encryption.js";
 import { KV } from "./schema.js";
@@ -63,14 +64,23 @@ export const DEFAULT_SENSITIVE_STATE_SCOPE_MATCHERS: StateScopeMatcher[] = [
   KV.lessons,
   KV.insights,
   KV.memoryHistory,
-  KV.agentEvents,
-  KV.bm25Index,
+  KV.relations,
+  KV.profiles,
   KV.imageEmbeddings,
   KV.slots,
   KV.globalSlots,
+  // KV.bm25Index ("mem:index:bm25") holds the small manifest, but the bulk
+  // BM25/vector payload lives in sharded scopes such as
+  // "mem:index:bm25:bm25:<gen>:00000" and "mem:index:bm25:vectors:<gen>:00000".
+  // A prefix match covers the manifest scope and every shard scope.
+  (scope) => scope.startsWith(KV.bm25Index),
+  // KV.agentEvents ("mem:agent-events") plus its derived index scope
+  // "mem:agent-events:indexes" both carry agent activity records.
+  (scope) => scope.startsWith(KV.agentEvents),
   (scope) => scope.startsWith("mem:emb:"),
   (scope) => scope.startsWith("mem:obs:"),
   (scope) => scope.startsWith("mem:enriched:"),
+  (scope) => scope.startsWith("mem:latent:"),
   (scope) => scope.startsWith("mem:team:"),
 ];
 
@@ -88,6 +98,7 @@ export class EncryptedStateKV implements StateKVLike {
   private readonly encryptedScopes: StateScopeMatcher[];
   private readonly plaintextReadPolicy: PlaintextReadPolicy;
   private readonly encryption: LocalJsonEncryptionOptions;
+  private writeSalt: Buffer | null = null;
 
   constructor(
     private readonly base: StateKVLike,
@@ -98,6 +109,22 @@ export class EncryptedStateKV implements StateKVLike {
       options.encryptedScopes ?? DEFAULT_SENSITIVE_STATE_SCOPE_MATCHERS;
     this.plaintextReadPolicy = options.plaintextReadPolicy ?? "reject";
     this.encryption = options.encryption ?? {};
+  }
+
+  // One deterministic salt shared by every envelope this adapter writes. The
+  // scrypt wrapping key cache then serves list() reads of those envelopes after
+  // a single derivation instead of one scrypt per item. Envelopes restored from
+  // an older random-salt run still decrypt; they cost one scrypt per distinct
+  // legacy salt, amortised by the same cache.
+  private resolveWriteSalt(): Buffer {
+    if (this.encryption.salt) return this.encryption.salt;
+    if (!this.writeSalt) {
+      this.writeSalt = deriveDeterministicLocalJsonSalt(
+        this.keySource,
+        this.encryption.keyRef,
+      );
+    }
+    return this.writeSalt;
   }
 
   async get<T = unknown>(scope: string, key: string): Promise<T | null> {
@@ -163,7 +190,7 @@ export class EncryptedStateKV implements StateKVLike {
           value,
         } satisfies EncryptedStatePayload,
         this.keySource,
-        this.encryption,
+        { ...this.encryption, salt: this.resolveWriteSalt() },
       ),
     };
   }

@@ -381,6 +381,43 @@ export function latestConnectManifestEntries(
   return source;
 }
 
+// Group manifest entries into runs (by runId, falling back to timestamp),
+// ordered newest-first. Used by rollback so that when the newest run is a
+// no-op (e.g. an `already-wired` run with nothing to undo) we can fall back to
+// the most recent run that actually has rollbackable entries (#item19).
+export function connectManifestRunsNewestFirst(
+  manifest: ConnectManifest,
+): ConnectManifestEntry[][] {
+  const source = manifest.history?.length ? manifest.history : manifest.installed;
+  if (source.length === 0) return [];
+  const order: string[] = [];
+  const groups = new Map<string, ConnectManifestEntry[]>();
+  const sortKey = new Map<string, string>();
+  for (const entry of source) {
+    const key = entry.runId ?? entry.timestamp ?? `__entry-${order.length}`;
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      order.push(key);
+      sortKey.set(key, entry.timestamp ?? "");
+    }
+    groups.get(key)!.push(entry);
+    // Track the newest timestamp within the run for ordering.
+    const current = sortKey.get(key) ?? "";
+    const candidate = entry.timestamp ?? "";
+    if (candidate > current) sortKey.set(key, candidate);
+  }
+  return order
+    .slice()
+    .sort((a, b) => {
+      // ISO-8601 timestamps sort correctly as plain strings; newest first.
+      const ta = sortKey.get(a) ?? "";
+      const tb = sortKey.get(b) ?? "";
+      if (ta === tb) return 0;
+      return ta > tb ? -1 : 1;
+    })
+    .map((key) => groups.get(key)!);
+}
+
 function normalizeRollbackPlanOptions(
   options?: ConnectRollbackPlanOptions,
 ): NormalizedConnectRollbackPlanOptions {
@@ -514,12 +551,14 @@ function validateRollbackBackup(
   return null;
 }
 
-export function buildConnectRollbackPlan(
-  manifest: ConnectManifest,
+// Plan a rollback over an explicit set of entries (one run). Shared by the
+// latest-run planner and the no-op fallback planner (#item19).
+export function buildConnectRollbackPlanForEntries(
+  entries: ConnectManifestEntry[],
   options?: ConnectRollbackPlanOptions,
 ): ConnectRollbackPlanItem[] {
   const validation = normalizeRollbackPlanOptions(options);
-  return latestConnectManifestEntries(manifest).map((entry) => {
+  return entries.map((entry) => {
     if (entry.rollback === "restore-backup" || entry.backupPath) {
       const targetReason = validateRollbackTarget(entry, "restore", validation);
       if (targetReason) return rollbackSkip(entry, targetReason);
@@ -558,6 +597,31 @@ export function buildConnectRollbackPlan(
       reason: entry.action === "already-wired" ? "already-wired" : "not-rollbackable",
     };
   });
+}
+
+export function buildConnectRollbackPlan(
+  manifest: ConnectManifest,
+  options?: ConnectRollbackPlanOptions,
+): ConnectRollbackPlanItem[] {
+  return buildConnectRollbackPlanForEntries(
+    latestConnectManifestEntries(manifest),
+    options,
+  );
+}
+
+// Build a rollback plan for the most recent run that actually has actionable
+// (non-skip) entries. Returns null when no run is rollbackable. This is the
+// no-op fallback: if the newest run was e.g. all `already-wired`, we look back
+// to the most recent run we can actually undo (#item19).
+export function buildLatestRollbackablePlan(
+  manifest: ConnectManifest,
+  options?: ConnectRollbackPlanOptions,
+): ConnectRollbackPlanItem[] | null {
+  for (const run of connectManifestRunsNewestFirst(manifest)) {
+    const plan = buildConnectRollbackPlanForEntries(run, options);
+    if (plan.some((item) => item.action !== "skip")) return plan;
+  }
+  return null;
 }
 
 export function formatConnectRollbackPlan(

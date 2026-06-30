@@ -73,6 +73,38 @@ describe("connect doctor inspection", () => {
     expect(inspect()).toMatchObject({ status: "invalid-config", repairSafe: true });
     expect(readFileSync(configPath, "utf-8")).toBe("{not-json");
   });
+
+  it("flags an unrelated mcpServers.agentmemory entry as foreign (not auto-repairable, #item19)", () => {
+    mkdirSync(detectDir, { recursive: true });
+    // A DIFFERENT server parked under the `agentmemory` key — note it does
+    // NOT reference @agentmemory/mcp. Repair/--force must not clobber it.
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          agentmemory: { command: "node", args: ["some-other-server.js"] },
+        },
+      }),
+    );
+    const inspection = inspect();
+    expect(inspection.status).toBe("foreign");
+    expect(inspection.repairSafe).toBe(false);
+    expect(inspection.reason).toMatch(/@agentmemory\/mcp/);
+  });
+
+  it("treats a stale OURS entry (references @agentmemory/mcp) as repairable", () => {
+    mkdirSync(detectDir, { recursive: true });
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          // references @agentmemory/mcp via args -> ours, just stale
+          agentmemory: { command: "npx", args: ["@agentmemory/mcp"] },
+        },
+      }),
+    );
+    expect(inspect()).toMatchObject({ status: "stale", repairSafe: true });
+  });
 });
 
 describe("connect repair planning", () => {
@@ -124,6 +156,34 @@ describe("connect repair planning", () => {
         force: false,
       }),
     ]);
+  });
+
+  it("never repairs a foreign entry even with --force (#item19)", () => {
+    const foreign: ConnectInspection = {
+      agent: "claude-code",
+      displayName: "Claude Code",
+      status: "foreign",
+      configPath: "claude.json",
+      expectedMutation: "repair claude-code",
+      windowsSafe: true,
+      repairSafe: false,
+      reason: "foreign entry",
+    };
+    // Not safe to repair regardless of force; the unrelated entry is preserved.
+    expect(
+      buildConnectRepairPlan([foreign], {
+        force: false,
+        withHooks: false,
+        isWindows: false,
+      })[0],
+    ).toMatchObject({ action: "skip", reason: "repair-not-safe" });
+    expect(
+      buildConnectRepairPlan([foreign], {
+        force: true,
+        withHooks: false,
+        isWindows: false,
+      })[0],
+    ).toMatchObject({ action: "skip", reason: "repair-not-safe" });
   });
 
   it("force-refreshes healthy adapters only when requested", () => {

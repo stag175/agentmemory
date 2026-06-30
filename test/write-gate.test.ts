@@ -17,6 +17,7 @@ import {
   evaluateWriteGate,
   type WriteGateDecision,
 } from "../src/functions/write-gate.js";
+import { isMemorySearchable } from "../src/state/memory-utils.js";
 
 type GatedMemory = Memory & { writeGate: WriteGateDecision };
 
@@ -56,7 +57,7 @@ describe("mem::remember write gate", () => {
     expect(result.memory.lifecycleState).toBe("active");
   });
 
-  it("stores duplicate low-novelty memories but marks them for review", async () => {
+  it("records a low-novelty decision but still supersedes the near-duplicate (advisory gate)", async () => {
     const payload = {
       content:
         "Always use the billing webhook rotation playbook before changing src/webhooks/rotate.ts.",
@@ -76,11 +77,22 @@ describe("mem::remember write gate", () => {
     };
 
     expect(duplicate.success).toBe(true);
+    // The advisory gate still records the low-novelty decision for the
+    // review queue and observability...
     expect(duplicate.memory.writeGate.pass).toBe(false);
     expect(duplicate.memory.writeGate.reasons).toContain("low_novelty");
     expect(duplicate.memory.writeGate.nearestMemoryId).toBe(first.memory.id);
-    expect(duplicate.memory.reviewState).toBe("needs_review");
+
+    // ...but advisory mode does not change dedup: the near-duplicate
+    // supersedes the prior memory (latest wins) and is itself recalled.
+    expect(duplicate.memory.reviewState).toBe("unreviewed");
     expect(duplicate.memory.supersedes).toContain(first.memory.id);
+    const storedFirst = await kv.get<Memory>(KV.memories, first.memory.id);
+    expect(storedFirst?.isLatest).toBe(false);
+    expect(storedFirst?.lifecycleState).toBe("superseded");
+
+    const hits = getSearchIndex().search("billing webhook rotation playbook", 10);
+    expect(hits.map((hit) => hit.obsId)).toContain(duplicate.memory.id);
   });
 
   it("does not let one agent supersede or downrank another agent's memory", async () => {
@@ -172,6 +184,62 @@ describe("mem::remember write gate", () => {
       "openai_project_key",
     );
     expect(JSON.stringify(result.memory.writeGate)).not.toContain(secret);
+  });
+
+  it("admits and recalls a gate-flagged write in advisory review mode", async () => {
+    // Default (advisory) review mode admits the write AND recalls it: the gate
+    // records its decision for the review queue but does not suppress recall or
+    // dedup. Strict suppression is opt-in via require_pass (asserted below);
+    // recall is only withheld for redacted/quarantined or reviewer-rejected
+    // memories (see isMemorySearchable).
+    const result = (await sdk.trigger("mem::remember", {
+      content: "todo",
+      type: "fact",
+    })) as { success: boolean; memory: GatedMemory };
+
+    expect(result.success).toBe(true);
+    expect(result.memory.writeGate.pass).toBe(false);
+    expect(result.memory.writeGate.mode).toBe("review");
+    expect(result.memory.reviewState).toBe("unreviewed");
+
+    const stored = await kv.get<Memory>(KV.memories, result.memory.id);
+    expect(stored).not.toBeNull();
+    expect(isMemorySearchable(stored as Memory)).toBe(true);
+
+    const hits = getSearchIndex().search("todo", 10);
+    expect(hits.map((hit) => hit.obsId)).toContain(result.memory.id);
+  });
+
+  it("re-admits a flagged write to recall once its review clears", () => {
+    const flagged: Memory = {
+      id: "mem_flagged",
+      createdAt: "2026-06-01T00:00:00Z",
+      updatedAt: "2026-06-01T00:00:00Z",
+      type: "fact",
+      title: "Flagged",
+      content: "Flagged content awaiting review.",
+      concepts: [],
+      files: [],
+      sessionIds: [],
+      strength: 7,
+      version: 1,
+      isLatest: true,
+      lifecycleState: "active",
+      reviewState: "needs_review",
+    };
+    expect(isMemorySearchable(flagged)).toBe(false);
+    expect(isMemorySearchable({ ...flagged, reviewState: "rejected" })).toBe(
+      false,
+    );
+    expect(isMemorySearchable({ ...flagged, reviewState: "reviewed" })).toBe(
+      true,
+    );
+    expect(isMemorySearchable({ ...flagged, reviewState: "trusted" })).toBe(
+      true,
+    );
+    expect(isMemorySearchable({ ...flagged, reviewState: "unreviewed" })).toBe(
+      true,
+    );
   });
 
   it("rejects low-quality writes when strict gate mode is requested", async () => {

@@ -12,7 +12,10 @@ import type {
 import { getVisibleTools } from "./tools-registry.js";
 import { timingSafeCompare } from "../auth.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
-import { registerRulesResolverFunction } from "../functions/rules-resolver.js";
+import {
+  registerRulesResolverFunction,
+  normalizeRulesResolveInput,
+} from "../functions/rules-resolver.js";
 import { evaluateEncryptionReadinessFromEnv } from "../security/encryption-policy.js";
 
 type McpResponse = {
@@ -81,6 +84,15 @@ function asPositiveInt(value: unknown): number | undefined | null {
   return n;
 }
 
+// Like asPositiveInt but permits 0 (used for audit-chain offset/expectedCount,
+// where 0 is a legitimate value). undefined when absent, null when invalid.
+function asNonNegativeInt(value: unknown): number | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) return null;
+  return n;
+}
+
 function parseCsvList(value: unknown): string[] {
   if (typeof value === "string") {
     return value.split(",").map((v) => v.trim()).filter(Boolean);
@@ -93,35 +105,49 @@ function parseCsvList(value: unknown): string[] {
   return [];
 }
 
-const RULES_RESOLVE_FIELDS = [
-  "workspaceRoot",
-  "root",
-  "cwd",
-  "instructionGlobs",
-  "ignoreDirectories",
-  "maxDepth",
-  "maxBytes",
-  "maxFileBytes",
-  "includeContent",
-] as const;
-
-function pickRulesResolveArgs(args: Record<string, unknown>): Record<string, unknown> {
-  const payload: Record<string, unknown> = {};
-  for (const field of RULES_RESOLVE_FIELDS) {
-    if (args[field] !== undefined) payload[field] = args[field];
+// Item 4: the allowed roots the network rules-resolve surface may scan.
+// Defaults to [process.cwd()]; AGENTMEMORY_RULES_ALLOWED_ROOTS (comma or
+// os.pathsep separated) lets an operator widen it deliberately. Empty entries
+// fall back to the cwd default so the network surface is never left unbounded.
+function resolveRulesAllowedRoots(): string[] {
+  const raw = process.env["AGENTMEMORY_RULES_ALLOWED_ROOTS"];
+  if (raw && raw.trim()) {
+    const roots = raw
+      .split(/[,;:]/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    if (roots.length > 0) return roots;
   }
-  return payload;
+  return [process.cwd()];
 }
 
+// Item 27: single-source the rules-resolve input contract through
+// rules-resolver.normalizeRulesResolveInput instead of maintaining a parallel
+// field whitelist here. This collapses the field-name list into the resolver's
+// own normalization (workspaceRoot/root/cwd/instructionGlobs/ignoreDirectories/
+// maxDepth/maxBytes/maxFileBytes/includeContent) so the MCP tool, the REST
+// endpoint, and the resolver can never drift. The NETWORK function registered
+// below strips caller instructionGlobs/includeContent (allowCallerOptions:false)
+// regardless of what we forward, so it is safe to pass the normalized payload.
+function pickRulesResolveArgs(args: Record<string, unknown>): Record<string, unknown> {
+  return normalizeRulesResolveInput(args, { defaultCwd: process.cwd() }) as unknown as Record<
+    string,
+    unknown
+  >;
+}
+
+// Item 4 (network MCP): treat BOTH invalid_input and forbidden_root as
+// client-side 400-equivalent rejections so a workspaceRoot outside the
+// server's allowedRoots surfaces as a 400 instead of a 200 with an error body.
 function isRulesResolveInvalidInput(
   result: unknown,
-): result is { success: false; code: "invalid_input"; error: string } {
+): result is { success: false; code: "invalid_input" | "forbidden_root"; error: string } {
+  if (!result || typeof result !== "object") return false;
+  const record = result as Record<string, unknown>;
   return (
-    Boolean(result) &&
-    typeof result === "object" &&
-    (result as Record<string, unknown>)["success"] === false &&
-    (result as Record<string, unknown>)["code"] === "invalid_input" &&
-    typeof (result as Record<string, unknown>)["error"] === "string"
+    record["success"] === false &&
+    (record["code"] === "invalid_input" || record["code"] === "forbidden_root") &&
+    typeof record["error"] === "string"
   );
 }
 
@@ -130,7 +156,37 @@ export function registerMcpEndpoints(
   kv: StateKV,
   secret?: string,
 ): void {
-  registerRulesResolverFunction(sdk);
+  // Item 4 (NETWORK MCP daemon): constrain rules-resolve to the server's
+  // configured allowedRoots (default [process.cwd()]). The registered network
+  // function keeps allowCallerOptions FALSE, so caller instructionGlobs/
+  // includeContent are stripped and a workspaceRoot outside allowedRoots is
+  // rejected with code 'forbidden_root' (surfaced as 400 by the tool dispatch).
+  // registerRulesResolverFunction is idempotent per sdk; this is the daemon's
+  // single configuration point for the network surface.
+  const rulesAllowedRoots = resolveRulesAllowedRoots();
+  registerRulesResolverFunction(sdk, { allowedRoots: rulesAllowedRoots });
+
+  // Item 2 (MCP proposals authz): resolve the principal SERVER-SIDE. MCP has no
+  // per-user identity, so permissions are the fixed trusted operator set;
+  // actorId is an identity label only (header/arg fallback). Client-supplied
+  // permissions/roles are never honored.
+  function resolveProposalPrincipal(
+    req: ApiRequest,
+    args: Record<string, unknown>,
+  ): { actorId: string; permissions: string[]; teamPolicy: { allowSelfApproval: boolean } } {
+    const headers = (req.headers ?? {}) as Record<string, string | string[] | undefined>;
+    const headerActor = headers["x-actor-id"] ?? headers["X-Actor-Id"];
+    const headerActorValue = Array.isArray(headerActor) ? headerActor[0] : headerActor;
+    const actorId =
+      asNonEmptyString(headerActorValue) ?? asNonEmptyString(args["actorId"]) ?? "operator";
+    return {
+      actorId,
+      permissions: ["project:read", "project:write", "governance:delete"],
+      teamPolicy: {
+        allowSelfApproval: process.env["AGENTMEMORY_ALLOW_SELF_APPROVAL"] === "true",
+      },
+    };
+  }
 
   function checkAuth(
     req: ApiRequest,
@@ -1709,6 +1765,197 @@ export function registerMcpEndpoints(
             return {
               status_code: 200,
               body: { content: [{ type: "text", text: JSON.stringify({ commits: filtered }, null, 2) }] },
+            };
+          }
+
+          case "memory_audit_chain": {
+            // Read-only integrity report. CSV not applicable; numeric/boolean
+            // knobs are validated; the function itself bounds limit/offset.
+            const offset = asNonNegativeInt(args.offset);
+            if (offset === null) {
+              return { status_code: 400, body: { error: "offset must be a non-negative integer" } };
+            }
+            const limit = asPositiveInt(args.limit);
+            if (limit === null) {
+              return { status_code: 400, body: { error: "limit must be a positive integer" } };
+            }
+            const includeLinks = asBoolean(args.includeLinks);
+            if (includeLinks === null) {
+              return { status_code: 400, body: { error: "includeLinks must be a boolean" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::audit-chain",
+              payload: {
+                ...(offset !== undefined && { offset }),
+                limit,
+                includeLinks,
+                operation: asNonEmptyString(args.operation),
+                functionId: asNonEmptyString(args.functionId),
+                dateFrom: asNonEmptyString(args.dateFrom),
+                dateTo: asNonEmptyString(args.dateTo),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_audit_chain_verify": {
+            const offset = asNonNegativeInt(args.offset);
+            if (offset === null) {
+              return { status_code: 400, body: { error: "offset must be a non-negative integer" } };
+            }
+            const limit = asPositiveInt(args.limit);
+            if (limit === null) {
+              return { status_code: 400, body: { error: "limit must be a positive integer" } };
+            }
+            const includeLinks = asBoolean(args.includeLinks);
+            if (includeLinks === null) {
+              return { status_code: 400, body: { error: "includeLinks must be a boolean" } };
+            }
+            const allowUnanchored = asBoolean(args.allowUnanchored);
+            if (allowUnanchored === null) {
+              return { status_code: 400, body: { error: "allowUnanchored must be a boolean" } };
+            }
+            const expectedCount = asNonNegativeInt(args.expectedCount);
+            if (expectedCount === null) {
+              return { status_code: 400, body: { error: "expectedCount must be a non-negative integer" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::audit-chain-verify",
+              payload: {
+                ...(offset !== undefined && { offset }),
+                limit,
+                includeLinks,
+                operation: asNonEmptyString(args.operation),
+                functionId: asNonEmptyString(args.functionId),
+                dateFrom: asNonEmptyString(args.dateFrom),
+                dateTo: asNonEmptyString(args.dateTo),
+                expectedHeadHash: asNonEmptyString(args.expectedHeadHash),
+                ...(expectedCount !== undefined && { expectedCount }),
+                expectedFirstEntryId: asNonEmptyString(args.expectedFirstEntryId),
+                expectedLastEntryId: asNonEmptyString(args.expectedLastEntryId),
+                allowUnanchored,
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_sync_peer_set_status": {
+            const peerId = asNonEmptyString(args.peerId);
+            if (!peerId) {
+              return { status_code: 400, body: { error: "peerId is required" } };
+            }
+            const enabled = asBoolean(args.enabled);
+            if (enabled === null) {
+              return { status_code: 400, body: { error: "enabled must be a boolean" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::sync-peer-set-status",
+              payload: {
+                peerId,
+                ...(enabled !== undefined && { enabled }),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_agent_event_prune": {
+            const maxAgeDays = asNumber(args.maxAgeDays);
+            if (args.maxAgeDays !== undefined && maxAgeDays === undefined) {
+              return { status_code: 400, body: { error: "maxAgeDays must be a number" } };
+            }
+            const maxCount = asNumber(args.maxCount);
+            if (args.maxCount !== undefined && maxCount === undefined) {
+              return { status_code: 400, body: { error: "maxCount must be a number" } };
+            }
+            const batch = asNumber(args.batch);
+            if (args.batch !== undefined && batch === undefined) {
+              return { status_code: 400, body: { error: "batch must be a number" } };
+            }
+            const dryRun = asBoolean(args.dryRun);
+            if (dryRun === null) {
+              return { status_code: 400, body: { error: "dryRun must be a boolean" } };
+            }
+            const result = await sdk.trigger({
+              function_id: "mem::agent-event-prune",
+              payload: {
+                ...(maxAgeDays !== undefined && { maxAgeDays }),
+                ...(maxCount !== undefined && { maxCount }),
+                ...(batch !== undefined && { batch }),
+                ...(dryRun !== undefined && { dryRun }),
+              },
+            });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+            };
+          }
+
+          case "memory_proposal_create":
+          case "memory_proposal_list":
+          case "memory_proposal_approve":
+          case "memory_proposal_reject":
+          case "memory_proposal_apply": {
+            // Item 2: the principal is resolved SERVER-SIDE and attached as
+            // data.principal. We forward ONLY whitelisted proposal fields plus
+            // the resolved principal — never client-supplied permissions/roles.
+            const principal = resolveProposalPrincipal(req, args);
+            const functionId = `mem::memory-proposal-${name.slice("memory_proposal_".length)}`;
+            const payload: Record<string, unknown> = { principal };
+            const teamId = asNonEmptyString(args.teamId);
+            if (teamId) payload.teamId = teamId;
+            const proposalId = asNonEmptyString(args.proposalId);
+            if (proposalId) payload.proposalId = proposalId;
+            const project = asNonEmptyString(args.project);
+            if (project) payload.project = project;
+            const reason = asNonEmptyString(args.reason);
+            if (reason) payload.reason = reason;
+            if (name === "memory_proposal_create") {
+              const action = asNonEmptyString(args.action);
+              if (action) payload.action = action;
+              const title = asNonEmptyString(args.title);
+              if (title) payload.title = title;
+              if (args.change !== undefined && typeof args.change === "object" && args.change !== null) {
+                payload.change = args.change;
+              } else if (typeof args.change === "string" && args.change.trim()) {
+                try {
+                  payload.change = JSON.parse(args.change);
+                } catch {
+                  return { status_code: 400, body: { error: "change must be a JSON object" } };
+                }
+              }
+              if (
+                args.provenance !== undefined &&
+                typeof args.provenance === "object" &&
+                args.provenance !== null
+              ) {
+                payload.provenance = args.provenance;
+              }
+            }
+            if (name === "memory_proposal_list") {
+              const action = asNonEmptyString(args.action);
+              if (action) payload.action = action;
+              const status = asNonEmptyString(args.status);
+              if (status) payload.status = status;
+              const targetMemoryId = asNonEmptyString(args.targetMemoryId);
+              if (targetMemoryId) payload.targetMemoryId = targetMemoryId;
+              const limit = asNumber(args.limit);
+              if (limit !== undefined) payload.limit = limit;
+              const offset = asNumber(args.offset);
+              if (offset !== undefined) payload.offset = offset;
+            }
+            const result = await sdk.trigger({ function_id: functionId, payload });
+            return {
+              status_code: 200,
+              body: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
             };
           }
 

@@ -2,6 +2,8 @@ import { describe, expect, it, beforeEach } from "vitest";
 
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { registerDeletionPropagationFunction } from "../src/functions/deletion-propagation.js";
+import { getSearchIndex, setIndexPersistence } from "../src/functions/search.js";
+import { isMemorySearchable, memoryToObservation } from "../src/state/memory-utils.js";
 import type {
   AgentEvent,
   AuditEntry,
@@ -45,6 +47,8 @@ describe("deletion propagation report", () => {
   beforeEach(() => {
     sdk = mockSdk();
     kv = mockKV();
+    getSearchIndex().clear();
+    setIndexPersistence(null);
     registerDeletionPropagationFunction(sdk as never, kv as never);
   });
 
@@ -161,20 +165,80 @@ describe("deletion propagation report", () => {
     expect(audit.at(-1)?.operation).toBe("memory_lifecycle");
   });
 
-  it("tombstones impacted memories only with explicit tombstone mode", async () => {
-    await kv.set("mem:memories", "mem_1", memory({ id: "mem_1" }));
+  it("tombstone apply clears content and removes the memory from the search index", async () => {
+    const stored = memory({ id: "mem_1" });
+    await kv.set("mem:memories", "mem_1", stored);
+    getSearchIndex().add(memoryToObservation(stored));
+    expect(getSearchIndex().has("mem_1")).toBe(true);
 
-    await sdk.trigger("mem::deletion-propagation-report", {
+    const report = (await sdk.trigger("mem::deletion-propagation-report", {
       targetId: "mem_1",
       dryRun: false,
       apply: true,
       mode: "tombstone",
+    })) as { mutationApplied: boolean };
+
+    const updated = await kv.get<Memory>("mem:memories", "mem_1");
+    // (a) stored content is emptied after apply.
+    expect(updated?.content).toBe("");
+    expect(updated?.title).toBe("[deleted] mem_1");
+    expect(updated?.concepts).toEqual([]);
+    expect(updated?.files).toEqual([]);
+    expect(updated?.lifecycleState).toBe("tombstoned");
+    expect(updated?.isLatest).toBe(false);
+    expect(updated?.deletedAt).toBeTruthy();
+    // (b) the search index no longer returns the tombstoned id.
+    expect(getSearchIndex().has("mem_1")).toBe(false);
+    expect(
+      getSearchIndex()
+        .search("billing")
+        .some((hit) => hit.obsId === "mem_1"),
+    ).toBe(false);
+    expect(report.mutationApplied).toBe(true);
+  });
+
+  it("review apply preserves content for the reviewer but pulls the row out of search", async () => {
+    const stored = memory({ id: "mem_1" });
+    await kv.set("mem:memories", "mem_1", stored);
+    getSearchIndex().add(memoryToObservation(stored));
+    expect(getSearchIndex().has("mem_1")).toBe(true);
+
+    await sdk.trigger("mem::deletion-propagation-report", {
+      memoryId: "mem_1",
+      dryRun: false,
+      apply: true,
+      mode: "review",
     });
 
     const updated = await kv.get<Memory>("mem:memories", "mem_1");
     expect(updated?.reviewState).toBe("needs_review");
-    expect(updated?.lifecycleState).toBe("tombstoned");
-    expect(updated?.deletedAt).toBeTruthy();
+    expect(updated?.lifecycleState).toBe("active");
+    // Content is preserved so the reviewer can still inspect it.
+    expect(updated?.content).toContain("Sensitive raw content");
+    // But pending-deletion data must not stay retrievable.
+    expect(getSearchIndex().has("mem_1")).toBe(false);
+    expect(isMemorySearchable(updated as Memory)).toBe(false);
+  });
+
+  it("default mode (no mode) is not a silent no-op and removes the row from search", async () => {
+    const stored = memory({ id: "mem_1" });
+    await kv.set("mem:memories", "mem_1", stored);
+    getSearchIndex().add(memoryToObservation(stored));
+    expect(getSearchIndex().has("mem_1")).toBe(true);
+
+    const report = (await sdk.trigger("mem::deletion-propagation-report", {
+      memoryId: "mem_1",
+      dryRun: false,
+      apply: true,
+    })) as { mutationApplied: boolean; counts: { memories: number } };
+
+    const updated = await kv.get<Memory>("mem:memories", "mem_1");
+    // (c) default mode performs a real mutation, not a no-op.
+    expect(report.mutationApplied).toBe(true);
+    expect(report.counts.memories).toBe(1);
+    expect(updated?.reviewState).toBe("needs_review");
+    expect(getSearchIndex().has("mem_1")).toBe(false);
+    expect(isMemorySearchable(updated as Memory)).toBe(false);
   });
 
   it("marks graph rows stale when apply can enforce every impacted row type", async () => {

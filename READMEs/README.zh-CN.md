@@ -58,7 +58,7 @@
 <p align="center">
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-recall.svg"><img src="../assets/tags/stat-recall.svg" alt="95.2% retrieval R@5" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tokens.svg"><img src="../assets/tags/stat-tokens.svg" alt="92% fewer tokens" height="38" /></picture>
-  <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tools.svg"><img src="../assets/tags/stat-tools.svg" alt="53 MCP tools" height="38" /></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tools.svg"><img src="../assets/tags/stat-tools.svg" alt="74 MCP tools" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-hooks.svg"><img src="../assets/tags/stat-hooks.svg" alt="12 auto hooks" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-deps.svg"><img src="../assets/tags/stat-deps.svg" alt="0 external DBs" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tests.svg"><img src="../assets/tags/stat-tests.svg" alt="950+ tests passing" height="38" /></picture>
@@ -429,7 +429,7 @@ npx @agentmemory/agentmemory upgrade
 ### Claude Code(一段话,直接粘贴)
 
 ```text
-Install agentmemory: run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server. Then run `/plugin marketplace add rohitg00/agentmemory` and `/plugin install agentmemory` — the plugin registers all 12 hooks, 4 skills, AND auto-wires the `@agentmemory/mcp` stdio server via its `.mcp.json`, so you get 53 MCP tools (memory_smart_search, memory_save, memory_sessions, memory_governance_delete, etc.) without any extra config step. Verify with `curl http://localhost:3111/agentmemory/health`. The real-time viewer is at http://localhost:3113.
+Install agentmemory: run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server. Then run `/plugin marketplace add rohitg00/agentmemory` and `/plugin install agentmemory` — the plugin registers all 12 hooks, 15 skills, AND auto-wires the `@agentmemory/mcp` stdio server via its `.mcp.json`, so you get 74 MCP tools (memory_smart_search, memory_save, memory_sessions, memory_governance_delete, etc.) without any extra config step. Verify with `curl http://localhost:3111/agentmemory/health`. The real-time viewer is at http://localhost:3113.
 ```
 
 #### Claude Code 不安装插件(MCP-standalone 路径)
@@ -459,7 +459,7 @@ codex plugin add agentmemory@agentmemory
 
 Codex 插件与 Claude Code 插件同源,来自相同的 `plugin/` 目录。它注册:
 
-- `@agentmemory/mcp` 作为 MCP 服务器(当 `AGENTMEMORY_URL` 指向运行中的 agentmemory 服务器时,代理全部 51 个工具;若服务器不可达,本地回退至 7 个工具)
+- `@agentmemory/mcp` 作为 MCP 服务器(当 `AGENTMEMORY_URL` 指向运行中的 agentmemory 服务器时,代理全部 74 个工具;若服务器不可达,本地回退至 7 个工具)
 - 6 个生命周期 hooks:`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`PreCompact`、`Stop`
 - 4 个 skills:`/recall`、`/remember`、`/session-history`、`/forget`
 
@@ -481,7 +481,7 @@ agentmemory connect codex --with-hooks
 <summary><b>OpenClaw(粘贴此提示)</b></summary>
 
 ```text
-Install agentmemory for OpenClaw. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to my OpenClaw MCP config so agentmemory is available with all 51 memory tools:
+Install agentmemory for OpenClaw. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to my OpenClaw MCP config so agentmemory is available with all 74 memory tools:
 
 {
   "mcpServers": {
@@ -506,7 +506,7 @@ Restart OpenClaw. Verify with `curl http://localhost:3111/agentmemory/health`. O
 <summary><b>Hermes Agent(粘贴此提示)</b></summary>
 
 ```text
-Install agentmemory for Hermes. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to ~/.hermes/config.yaml so Hermes can use agentmemory as an MCP server with all 51 memory tools:
+Install agentmemory for Hermes. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to ~/.hermes/config.yaml so Hermes can use agentmemory as an MCP server with all 74 memory tools:
 
 mcp_servers:
   agentmemory:
@@ -551,7 +551,7 @@ Verify with `curl http://localhost:3111/agentmemory/health`. Open http://localho
 | **Gemini CLI** | `~/.gemini/settings.json` | `gemini mcp add agentmemory npx -y @agentmemory/mcp --scope user`(自动合并)。 |
 | **OpenClaw** | OpenClaw MCP 配置 | 同样的 `mcpServers` 块,或使用更深的[记忆插件](../integrations/openclaw/)。 |
 | **Codex CLI (仅 MCP)** | `.codex/config.toml` | TOML 形式:`codex mcp add agentmemory -- npx -y @agentmemory/mcp`,或手动添加 `[mcp_servers.agentmemory]`。 |
-| **Codex CLI (完整插件)** | Codex 插件市场 | `codex plugin marketplace add rohitg00/agentmemory` 然后 `codex plugin add agentmemory@agentmemory`。注册 MCP + 6 个生命周期 hooks(SessionStart、UserPromptSubmit、PreToolUse、PostToolUse、PreCompact、Stop)+ 4 个 skills。在 Codex Desktop 上,直到 [openai/codex#16430](https://github.com/openai/codex/issues/16430) 落地之前,还要运行 `agentmemory connect codex --with-hooks` — 那里的插件 hooks 当前无响应。 |
+| **Codex CLI (完整插件)** | Codex 插件市场 | `codex plugin marketplace add rohitg00/agentmemory` 然后 `codex plugin add agentmemory@agentmemory`。注册 MCP + 6 个生命周期 hooks(SessionStart、UserPromptSubmit、PreToolUse、PostToolUse、PreCompact、Stop)+ 15 个 skills。在 Codex Desktop 上,直到 [openai/codex#16430](https://github.com/openai/codex/issues/16430) 落地之前,还要运行 `agentmemory connect codex --with-hooks` — 那里的插件 hooks 当前无响应。 |
 | **OpenCode (仅 MCP)** | `opencode.json` | 不同结构 — 顶层 `mcp` key,command 是数组:`{"mcp": {"agentmemory": {"type": "local", "command": ["npx", "-y", "@agentmemory/mcp"], "enabled": true}}}`。 |
 | **OpenCode (完整插件)** | `plugin/opencode/` | 22 个自动捕获 hooks,覆盖会话生命周期、消息、工具、错误。两个斜杠命令(`/recall`、`/remember`)。将 `plugin/opencode/` 复制到你的 OpenCode 工作空间并把插件条目添加到 `opencode.json`。完整 hook 表和差异分析见 [`plugin/opencode/README.md`](../plugin/opencode/README.md)。 |
 | **pi** | `~/.pi/agent/extensions/agentmemory` | 复制 [`integrations/pi`](../integrations/pi/) 并重启 pi。 |
@@ -837,11 +837,11 @@ npm install @xenova/transformers
 
 <h2 id="mcp-server"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-mcp.svg"><img src="../assets/tags/section-mcp.svg" alt="MCP Server" height="32" /></picture></h2>
 
-53 个工具、6 个资源、3 个提示词、4 个 skills — 任何代理可用的最全面 MCP 记忆工具包。
+74 个工具、6 个资源、3 个提示词、15 个 skills — 任何代理可用的最全面 MCP 记忆工具包。
 
-> **MCP shim 对比完整服务器:** 已发布的 `@agentmemory/mcp` 包是一个薄 shim。**只有当它能通过 `AGENTMEMORY_URL` 连通运行中的 agentmemory 服务器**(代理模式)时,才暴露完整的 51 工具表面。在没有可达服务器的情况下,shim 回退到 7 工具的本地集合(`memory_save`、`memory_recall`、`memory_smart_search`、`memory_sessions`、`memory_export`、`memory_audit`、`memory_governance_delete`)。`AGENTMEMORY_TOOLS=core|all` 环境变量是*服务器端*标志 — 在 shim 的 `env` 块中设置无效。如果在 Cursor / OpenCode / Gemini CLI 中只看到 7 个工具,启动 `npx @agentmemory/agentmemory`(或 Docker 栈)并设置 `AGENTMEMORY_URL=http://localhost:3111`。
+> **MCP shim 对比完整服务器:** 已发布的 `@agentmemory/mcp` 包是一个薄 shim。**只有当它能通过 `AGENTMEMORY_URL` 连通运行中的 agentmemory 服务器**(代理模式)时,才暴露完整的 74 工具表面。在没有可达服务器的情况下,shim 回退到 7 工具的本地集合(`memory_save`、`memory_recall`、`memory_smart_search`、`memory_sessions`、`memory_export`、`memory_audit`、`memory_governance_delete`)。`AGENTMEMORY_TOOLS=core|all` 环境变量是*服务器端*标志 — 在 shim 的 `env` 块中设置无效。如果在 Cursor / OpenCode / Gemini CLI 中只看到 7 个工具,启动 `npx @agentmemory/agentmemory`(或 Docker 栈)并设置 `AGENTMEMORY_URL=http://localhost:3111`。
 
-### 51 个工具
+### 74 个工具
 
 <details>
 <summary>核心工具(始终可用)</summary>
@@ -863,7 +863,7 @@ npm install @xenova/transformers
 </details>
 
 <details>
-<summary>扩展工具(总 51 — 设置 AGENTMEMORY_TOOLS=all)</summary>
+<summary>扩展工具(总 74 — 设置 AGENTMEMORY_TOOLS=all)</summary>
 
 | 工具 | 描述 |
 |------|-------------|
@@ -901,7 +901,7 @@ npm install @xenova/transformers
 
 </details>
 
-### 6 个资源 · 3 个提示词 · 4 个 Skills
+### 6 个资源 · 3 个提示词 · 15 个 Skills
 
 | 类型 | 名称 | 描述 |
 |------|------|-------------|
@@ -1325,7 +1325,7 @@ CONSOLIDATION_ENABLED=true
 # USER_ID=
 # TEAM_MODE=private
 
-# Tool visibility: "core" (8 tools) or "all" (51 tools)
+# Tool visibility: "core" (8 tools) or "all" (74 tools)
 # AGENTMEMORY_TOOLS=core
 ```
 

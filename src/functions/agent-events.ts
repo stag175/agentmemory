@@ -13,8 +13,9 @@ import {
 } from "./privacy.js";
 import { logger } from "../logger.js";
 import { getAutomaticCaptureControl } from "../config.js";
+import { recordAudit } from "./audit.js";
 
-const AGENT_EVENT_TYPES: AgentEventType[] = [
+export const AGENT_EVENT_TYPES: AgentEventType[] = [
   "session_started",
   "session_ended",
   "observation_recorded",
@@ -45,6 +46,9 @@ const AGENT_EVENT_TYPES: AgentEventType[] = [
 const AGENT_EVENT_TYPE_SET = new Set<AgentEventType>(AGENT_EVENT_TYPES);
 const MAX_ARRAY_VALUES = 100;
 const MAX_METADATA_CHARS = 12_000;
+const DEFAULT_RETENTION_MAX_AGE_DAYS = 90;
+const DEFAULT_RETENTION_MAX_COUNT = 50_000;
+const RETENTION_PRUNE_BATCH = 1_000;
 const MAX_OTEL_ATTRIBUTE_STRING_CHARS = 2_048;
 const MAX_OTEL_ATTRIBUTE_ARRAY_VALUES = 50;
 const MAX_OTEL_METADATA_ATTRIBUTES = 50;
@@ -81,10 +85,83 @@ const AGENT_EVENT_INDEX_FIELDS = [
 
 type AgentEventIndexField = (typeof AGENT_EVENT_INDEX_FIELDS)[number];
 
+// (A) The lowest-cardinality fields collapse into a handful of values, so a
+// per-(field,value) row would grow to hold every event id ever recorded — the
+// O(n^2) read-modify-write hotspot. We skip writing dedicated index entries for
+// them: list() narrows on a higher-cardinality field first (or falls back to a
+// time-bucketed scan) and applies type/project/sessionId as in-memory filters.
+const SKIPPED_INDEX_FIELDS = new Set<AgentEventIndexField>([
+  "type",
+  "project",
+  "sessionId",
+]);
+
+const INDEXED_AGENT_EVENT_FIELDS = AGENT_EVENT_INDEX_FIELDS.filter(
+  (field) => !SKIPPED_INDEX_FIELDS.has(field),
+);
+
+// Legacy aggregate row: a single growing eventIds array per (field,value).
+// Retained for reads so indexes written before the sharded layout still resolve.
 type AgentEventIndexEntry = {
   eventIds: string[];
   updatedAt: string;
 };
+
+// (A) Sharded layout: one keyed row per (field,value,eventId). Inserts are a
+// single O(1) kv.set with no read-modify-write, so concurrent records never
+// contend on a hot array. Each row self-describes its field/value/timestamp so
+// preselect can filter and time-order without re-reading the events.
+type AgentEventIndexShard = {
+  kind: "agent-event-index-shard";
+  field: AgentEventIndexField;
+  value: string;
+  eventId: string;
+  timestamp: string;
+};
+
+// (A) Time bucket row for date-range list / OTEL export when no narrowing
+// field filter is supplied. One keyed row per (dayBucket,eventId) keeps each
+// scan bounded to the requested window instead of the whole event corpus.
+type AgentEventTimeShard = {
+  kind: "agent-event-time-shard";
+  bucket: string;
+  eventId: string;
+  timestamp: string;
+};
+
+function isIndexShard(value: unknown): value is AgentEventIndexShard {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    (value as { kind?: unknown }).kind === "agent-event-index-shard"
+  );
+}
+
+function isTimeShard(value: unknown): value is AgentEventTimeShard {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    (value as { kind?: unknown }).kind === "agent-event-time-shard"
+  );
+}
+
+function dayBucket(timestamp: string): string {
+  const ms = new Date(timestamp).getTime();
+  const safe = Number.isNaN(ms) ? Date.now() : ms;
+  return new Date(safe).toISOString().slice(0, 10);
+}
+
+function shardKey(
+  field: AgentEventIndexField,
+  value: string,
+  eventId: string,
+): string {
+  return `s:${field}:${encodeURIComponent(value)}:${eventId}`;
+}
+
+function timeShardKey(bucket: string, eventId: string): string {
+  return `t:${bucket}:${eventId}`;
+}
 
 export type AgentEventExportFormat = "otel";
 
@@ -341,41 +418,79 @@ function filterIndexValue(
   }
 }
 
+// Only the higher-cardinality fields carry their own index entries; the skipped
+// fields are resolved as in-memory filters in listAgentEvents.
 function indexedFilterLookups(
   filter: AgentEventListFilter,
-): Array<{ field: AgentEventIndexField; key: string }> {
-  return AGENT_EVENT_INDEX_FIELDS.flatMap((field) => {
+): Array<{ field: AgentEventIndexField; value: string; legacyKey: string }> {
+  return INDEXED_AGENT_EVENT_FIELDS.flatMap((field) => {
     const value = filterIndexValue(filter, field);
-    return value ? [{ field, key: indexKey(field, value) }] : [];
+    return value
+      ? [{ field, value, legacyKey: indexKey(field, value) }]
+      : [];
   });
 }
 
-async function indexAgentEvent(kv: StateKV, event: AgentEvent): Promise<void> {
-  const updatedAt = new Date().toISOString();
-  const pairs = AGENT_EVENT_INDEX_FIELDS.flatMap((field) =>
-    eventIndexValues(event, field).map((value) => ({
-      field,
-      key: indexKey(field, value),
-    })),
-  );
-  const uniquePairs = [
-    ...new Map(pairs.map((pair) => [`${pair.field}\0${pair.key}`, pair])).values(),
-  ];
+function eventIndexShards(
+  event: AgentEvent,
+): Array<{ key: string; shard: AgentEventIndexShard }> {
+  const seen = new Set<string>();
+  const shards: Array<{ key: string; shard: AgentEventIndexShard }> = [];
+  for (const field of INDEXED_AGENT_EVENT_FIELDS) {
+    for (const value of eventIndexValues(event, field)) {
+      const key = shardKey(field, value, event.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      shards.push({
+        key,
+        shard: {
+          kind: "agent-event-index-shard",
+          field,
+          value,
+          eventId: event.id,
+          timestamp: event.timestamp,
+        },
+      });
+    }
+  }
+  return shards;
+}
 
-  await Promise.all(
-    uniquePairs.map(({ key }) =>
-      withKeyedLock(`mem:agent-events:index:${key}`, async () => {
-        const existing = normalizeIndexEntry(
-          await kv.get<AgentEventIndexEntry | string[]>(KV.agentEventIndexes, key),
-        );
-        if (existing.eventIds.includes(event.id)) return;
-        await kv.set<AgentEventIndexEntry>(KV.agentEventIndexes, key, {
-          eventIds: [...existing.eventIds, event.id],
-          updatedAt,
-        });
-      }),
+// (A) Sharded write: one O(1) kv.set per (field,value,eventId) plus the time
+// bucket row. No read-modify-write of a growing array, so concurrent records
+// never contend on a hot key.
+async function indexAgentEvent(kv: StateKV, event: AgentEvent): Promise<void> {
+  const bucket = dayBucket(event.timestamp);
+  await Promise.all([
+    ...eventIndexShards(event).map(({ key, shard }) =>
+      kv.set<AgentEventIndexShard>(KV.agentEventIndexes, key, shard),
     ),
-  );
+    kv.set<AgentEventTimeShard>(
+      KV.agentEventIndexes,
+      timeShardKey(bucket, event.id),
+      {
+        kind: "agent-event-time-shard",
+        bucket,
+        eventId: event.id,
+        timestamp: event.timestamp,
+      },
+    ),
+  ]);
+}
+
+async function removeAgentEventIndex(
+  kv: StateKV,
+  event: AgentEvent,
+): Promise<void> {
+  const bucket = dayBucket(event.timestamp);
+  await Promise.all([
+    ...eventIndexShards(event).map(({ key }) =>
+      kv.delete(KV.agentEventIndexes, key).catch(() => undefined),
+    ),
+    kv
+      .delete(KV.agentEventIndexes, timeShardKey(bucket, event.id))
+      .catch(() => undefined),
+  ]);
 }
 
 function isEventType(value: unknown): value is AgentEventType {
@@ -423,14 +538,19 @@ function cleanMetadata(
   try {
     const json = JSON.stringify(metadata);
     if (!json) return { scan: summarizePrivacyScans() };
-    const bounded =
-      json.length > MAX_METADATA_CHARS
-        ? JSON.stringify({
-            truncated: true,
-            preview: json.slice(0, MAX_METADATA_CHARS),
-          })
-        : json;
-    const scan = scanPrivateData(bounded);
+    // (C) Scan the FULL serialized metadata before truncating. Truncating first
+    // can split a secret across the MAX_METADATA_CHARS boundary, leaving each
+    // half below the pattern threshold and stored unredacted in `preview`.
+    const scan = scanPrivateData(json);
+    if (scan.redacted.length > MAX_METADATA_CHARS) {
+      return {
+        metadata: {
+          truncated: true,
+          preview: scan.redacted.slice(0, MAX_METADATA_CHARS),
+        },
+        scan,
+      };
+    }
     const parsed = JSON.parse(scan.redacted) as Record<string, unknown>;
     return { metadata: parsed, scan };
   } catch {
@@ -861,36 +981,259 @@ export async function listAgentEvents(
   };
 }
 
+// (A) The index scope holds three row shapes simultaneously: sharded rows
+// (one per field/value/eventId) and time-bucket rows — both self-describing —
+// plus, for stores written before this layout or imported via export-import,
+// legacy aggregate rows keyed by `field:value` carrying a full eventIds array.
+// kv.list returns values only (not keys), so a legacy row cannot be mapped
+// back to its (field,value) from the listing — those are resolved with a
+// direct keyed kv.get on the lookup's legacyKey instead.
+type IndexScope = {
+  shards: AgentEventIndexShard[];
+  timeShards: AgentEventTimeShard[];
+};
+
+async function loadIndexScope(kv: StateKV): Promise<IndexScope> {
+  const rows = await kv.list<unknown>(KV.agentEventIndexes).catch(() => []);
+  const shards: AgentEventIndexShard[] = [];
+  const timeShards: AgentEventTimeShard[] = [];
+  for (const row of rows) {
+    if (isIndexShard(row)) shards.push(row);
+    else if (isTimeShard(row)) timeShards.push(row);
+  }
+  return { shards, timeShards };
+}
+
+function eventIdsForBucketRange(
+  scope: IndexScope,
+  fromBucket: string | undefined,
+  toBucket: string | undefined,
+): string[] {
+  const ids = new Set<string>();
+  for (const row of scope.timeShards) {
+    if (fromBucket !== undefined && row.bucket < fromBucket) continue;
+    if (toBucket !== undefined && row.bucket > toBucket) continue;
+    ids.add(row.eventId);
+  }
+  return [...ids];
+}
+
+async function resolveEvents(
+  kv: StateKV,
+  ids: Iterable<string>,
+): Promise<AgentEvent[]> {
+  const unique = [...new Set(ids)];
+  const events = await Promise.all(
+    unique.map((id) => kv.get<AgentEvent>(KV.agentEvents, id).catch(() => null)),
+  );
+  return events.filter((event): event is AgentEvent => event !== null);
+}
+
 async function preselectAgentEvents(
   kv: StateKV,
   filter: AgentEventListFilter,
 ): Promise<AgentEvent[]> {
   const lookups = indexedFilterLookups(filter);
-  if (lookups.length === 0) {
+  const hasDateFilter =
+    Boolean(filter.dateFrom?.trim()) || Boolean(filter.dateTo?.trim());
+
+  if (lookups.length === 0 && !hasDateFilter) {
     return kv.list<AgentEvent>(KV.agentEvents).catch(() => []);
   }
 
-  const rows = await Promise.all(
-    lookups.map(async ({ field, key }) => ({
-      field,
-      key,
-      eventIds: normalizeIndexEntry(
-        await kv.get<AgentEventIndexEntry | string[]>(KV.agentEventIndexes, key).catch(() => null),
-      ).eventIds,
-    })),
-  );
-  const narrowest = rows
-    .filter((row) => row.eventIds.length > 0)
-    .sort((a, b) => a.eventIds.length - b.eventIds.length)[0];
+  if (lookups.length > 0) {
+    // Resolve each indexed (field,value) to its candidate event ids from both
+    // the sharded rows and any legacy aggregate row under the same legacyKey,
+    // then narrow on the smallest set. listAgentEvents re-applies every filter
+    // (including the skipped low-cardinality fields and the date range), so an
+    // over-broad legacy row never widens the final result.
+    const [scope, legacyEntries] = await Promise.all([
+      loadIndexScope(kv),
+      Promise.all(
+        lookups.map(async ({ legacyKey }) =>
+          normalizeIndexEntry(
+            await kv
+              .get<AgentEventIndexEntry | string[]>(
+                KV.agentEventIndexes,
+                legacyKey,
+              )
+              .catch(() => null),
+          ),
+        ),
+      ),
+    ]);
 
-  if (!narrowest) return [];
+    const rows = lookups.map(({ field, value }, i) => {
+      const ids = new Set<string>();
+      for (const shard of scope.shards) {
+        if (shard.field === field && shard.value === value) ids.add(shard.eventId);
+      }
+      for (const id of legacyEntries[i].eventIds) ids.add(id);
+      return { field, value, eventIds: [...ids] };
+    });
 
-  const events = await Promise.all(
-    narrowest.eventIds.map((id) =>
-      kv.get<AgentEvent>(KV.agentEvents, id).catch(() => null),
-    ),
+    const narrowest = rows
+      .filter((row) => row.eventIds.length > 0)
+      .sort((a, b) => a.eventIds.length - b.eventIds.length)[0];
+
+    if (!narrowest) return [];
+    return resolveEvents(kv, narrowest.eventIds);
+  }
+
+  // Date-range list / OTEL export with no narrowing field filter: scan the
+  // time-bucket rows for the requested window instead of the whole corpus.
+  // Stores written before this layout have no time-shards — fall back to a
+  // full list so legacy events stay visible.
+  const scope = await loadIndexScope(kv);
+  if (scope.timeShards.length === 0) {
+    return kv.list<AgentEvent>(KV.agentEvents).catch(() => []);
+  }
+  const fromBucket = filter.dateFrom?.trim()
+    ? dayBucket(filter.dateFrom)
+    : undefined;
+  const toBucket = filter.dateTo?.trim() ? dayBucket(filter.dateTo) : undefined;
+  return resolveEvents(kv, eventIdsForBucketRange(scope, fromBucket, toBucket));
+}
+
+export type AgentEventRetentionConfig = {
+  maxAgeDays?: number;
+  maxCount?: number;
+  batch?: number;
+  dryRun?: boolean;
+};
+
+export type AgentEventPruneResult = {
+  scanned: number;
+  pruned: number;
+  remaining: number;
+  byAge: number;
+  byCount: number;
+  cutoff?: string;
+  candidateIds: string[];
+};
+
+function envInt(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (raw === undefined) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function resolveRetentionConfig(input?: AgentEventRetentionConfig): {
+  maxAgeDays: number;
+  maxCount: number;
+  batch: number;
+} {
+  const maxAgeDays =
+    typeof input?.maxAgeDays === "number" && Number.isFinite(input.maxAgeDays)
+      ? input.maxAgeDays
+      : envInt(
+          "AGENTMEMORY_AGENT_EVENT_RETENTION_DAYS",
+          DEFAULT_RETENTION_MAX_AGE_DAYS,
+        );
+  const maxCount =
+    typeof input?.maxCount === "number" && Number.isFinite(input.maxCount)
+      ? input.maxCount
+      : envInt(
+          "AGENTMEMORY_AGENT_EVENT_RETENTION_MAX_COUNT",
+          DEFAULT_RETENTION_MAX_COUNT,
+        );
+  const batch =
+    typeof input?.batch === "number" && Number.isFinite(input.batch)
+      ? input.batch
+      : RETENTION_PRUNE_BATCH;
+  return {
+    maxAgeDays: Math.max(0, maxAgeDays),
+    maxCount: Math.max(0, maxCount),
+    batch: Math.max(1, Math.min(batch, RETENTION_PRUNE_BATCH)),
+  };
+}
+
+// (B) Retention sweep mirroring the audit/retention-evict pattern: an event is
+// a prune candidate when it is older than maxAgeDays OR falls outside the
+// newest maxCount events. Each invocation removes at most `batch` events along
+// with their index rows so a backlog drains over successive cron ticks rather
+// than in one unbounded delete storm, and emits a single batched audit row.
+export async function pruneAgentEvents(
+  kv: StateKV,
+  input?: AgentEventRetentionConfig,
+): Promise<AgentEventPruneResult> {
+  const { maxAgeDays, maxCount, batch } = resolveRetentionConfig(input);
+  const all = await kv.list<AgentEvent>(KV.agentEvents).catch(() => []);
+  const scanned = all.length;
+
+  const ordered = [...all].sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
   );
-  return events.filter((event): event is AgentEvent => event !== null);
+
+  const now = Date.now();
+  const cutoffMs =
+    maxAgeDays > 0 ? now - maxAgeDays * 24 * 60 * 60 * 1000 : undefined;
+  const cutoff =
+    cutoffMs !== undefined ? new Date(cutoffMs).toISOString() : undefined;
+
+  const candidates: Array<{ event: AgentEvent; reason: "age" | "count" }> = [];
+  ordered.forEach((event, rank) => {
+    const overCount = maxCount > 0 && rank >= maxCount;
+    const eventMs = new Date(event.timestamp).getTime();
+    const tooOld =
+      cutoffMs !== undefined &&
+      Number.isFinite(eventMs) &&
+      eventMs < cutoffMs;
+    if (!overCount && !tooOld) return;
+    // Over-count rows are the oldest tail and almost always also stale, so
+    // attribute them to "count" first to keep the breakdown deterministic.
+    candidates.push({ event, reason: overCount ? "count" : "age" });
+  });
+
+  const batchCandidates = candidates.slice(0, batch);
+  const candidateIds = batchCandidates.map(({ event }) => event.id);
+  const byAge = batchCandidates.filter((c) => c.reason === "age").length;
+  const byCount = batchCandidates.filter((c) => c.reason === "count").length;
+
+  if (input?.dryRun) {
+    return {
+      scanned,
+      pruned: 0,
+      remaining: scanned,
+      byAge,
+      byCount,
+      cutoff,
+      candidateIds,
+    };
+  }
+
+  let pruned = 0;
+  for (const { event } of batchCandidates) {
+    try {
+      await kv.delete(KV.agentEvents, event.id);
+      await removeAgentEventIndex(kv, event);
+      pruned++;
+    } catch {
+      continue;
+    }
+  }
+
+  if (pruned > 0) {
+    await recordAudit(kv, "delete", "mem::agent-event-prune", candidateIds, {
+      scanned,
+      pruned,
+      maxAgeDays,
+      maxCount,
+      cutoff,
+      reason: "agent event retention sweep",
+    });
+  }
+
+  return {
+    scanned,
+    pruned,
+    remaining: scanned - pruned,
+    byAge,
+    byCount,
+    cutoff,
+    candidateIds,
+  };
 }
 
 export function registerAgentEventFunctions(sdk: ISdk, kv: StateKV): void {
@@ -941,4 +1284,19 @@ export function registerAgentEventFunctions(sdk: ISdk, kv: StateKV): void {
     }
     return { success: true, ...result };
   });
+
+  sdk.registerFunction(
+    "mem::agent-event-prune",
+    async (data?: AgentEventRetentionConfig) => {
+      try {
+        const result = await pruneAgentEvents(kv, data ?? {});
+        return { success: true, ...result };
+      } catch (err) {
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
 }

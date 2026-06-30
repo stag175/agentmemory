@@ -225,13 +225,17 @@ describe("SearchIndex", () => {
     });
 
     it("loads legacy serialized entries keyed only by observation id", () => {
+      // A real v2 index stores STEMMED terms (the tokenizer runs Porter
+      // stemming at add-time), so "legacy" is persisted as "legaci". The query
+      // below stems the same way, so the fixture's stored token must also be the
+      // stemmed form — otherwise the query term never matches the posting list.
       const legacy = JSON.stringify({
         v: 2,
         entries: [
           ["obs_legacy", { obsId: "obs_legacy", sessionId: "ses_old", termCount: 2 }],
         ],
-        inverted: [["legacy", ["obs_legacy"]]],
-        docTerms: [["obs_legacy", [["legacy", 2]]]],
+        inverted: [["legaci", ["obs_legacy"]]],
+        docTerms: [["obs_legacy", [["legaci", 2]]]],
         totalDocLength: 2,
       });
 

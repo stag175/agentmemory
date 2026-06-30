@@ -44,6 +44,11 @@ export const KV = {
     `mem:team:${teamId}:users:${userId}`,
   teamProfile: (teamId: string) => `mem:team:${teamId}:profile`,
   audit: "mem:audit",
+  // Single-row ("current") tamper-evidence pointer to the audit chain head.
+  // Updated atomically with every appended audit entry so a fully rewritten
+  // audit log can be detected (the recomputed head no longer matches the
+  // persisted seq/chainHash). See AuditChainHead in src/types.ts.
+  auditChainHead: "mem:audit:chain-head",
   agentEvents: "mem:agent-events",
   agentEventIndexes: "mem:agent-events:indexes",
   actions: "mem:actions",

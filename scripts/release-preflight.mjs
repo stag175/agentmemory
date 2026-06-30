@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import {
   copyFileSync,
   existsSync,
@@ -756,10 +754,39 @@ function validateHomebrewMetadata(rootPkg, failures, evidence) {
   if (!formula.includes('shell_output("#{bin}/agentmemory --version")')) {
     failures.push("packaging/homebrew/agentmemory.rb.template must smoke test agentmemory --version");
   }
+
+  const cliSymlinkTarget = "dist/cli.mjs";
+  if (!formula.includes(`libexec/"${cliSymlinkTarget}"`)) {
+    failures.push(
+      `packaging/homebrew/agentmemory.rb.template must symlink libexec/"${cliSymlinkTarget}"`,
+    );
+  }
+  // The formula symlinks libexec/"dist/cli.mjs", but dist/ is gitignored build
+  // output. The tarball is only valid if it is the prebuilt npm-pack artifact
+  // that actually ships dist/cli.mjs, so verify the package will ship it and
+  // that the formula documents the prebuilt-artifact requirement.
+  if (rootPkg.bin?.agentmemory !== cliSymlinkTarget) {
+    failures.push(
+      `package.json bin.agentmemory must be ${cliSymlinkTarget} so the Homebrew tarball ships it (is ${rootPkg.bin?.agentmemory ?? "<missing>"})`,
+    );
+  }
+  if (!Array.isArray(rootPkg.files) || !rootPkg.files.includes("dist/")) {
+    failures.push(
+      'package.json files must include "dist/" so the npm-pack tarball ships dist/cli.mjs for Homebrew',
+    );
+  }
+  if (!formula.includes("prebuilt artifact")) {
+    failures.push(
+      "packaging/homebrew/agentmemory.rb.template must document that the tarball is a prebuilt artifact shipping dist/cli.mjs",
+    );
+  }
+
   for (const required of [
     "not a live formula",
     "Do not publish this template with placeholder values",
     "do not invent a",
+    "prebuilt artifact",
+    "dist/cli.mjs",
   ]) {
     if (!readme.includes(required)) {
       failures.push(`packaging/homebrew/README.md must mention: ${required}`);
@@ -1050,18 +1077,33 @@ function runRetrievalArena(summary) {
   return true;
 }
 
-function finish(summary, status, exitCode) {
+export function finish(summary, status, exitCode, options = {}) {
   summary.status = status;
   summary.finishedAt = new Date().toISOString();
-  deriveReleaseGate(summary);
+  deriveReleaseGate(summary, options);
+
+  // The release gate is the source of truth: a non-pass overall (fail, blocked,
+  // or not_run from a missing targeted-evidence file) must never report success.
+  const gateOverall = releaseGateOverallForPreflight(summary.releaseGate);
+  if (summary.status === "pass" && gateOverall !== "pass") {
+    summary.status = "fail";
+    if (!exitCode) {
+      exitCode = 1;
+    }
+  }
+
   printPreflightReport(summary);
   const json = JSON.stringify(summary);
   if (process.env.AGENTMEMORY_PREFLIGHT_SUMMARY_PATH) {
     writeFileSync(process.env.AGENTMEMORY_PREFLIGHT_SUMMARY_PATH, `${json}\n`);
   }
   console.log(`\nRELEASE_PREFLIGHT_SUMMARY_JSON=${json}`);
-  if (status === "pass") {
+  if (summary.status === "pass") {
     console.log("\nrelease preflight: pass");
+  } else if (status === "pass") {
+    console.error(
+      `\nrelease preflight: ${summary.status} (release gate overall is ${gateOverall})`,
+    );
   }
   process.exitCode = exitCode;
   return exitCode;

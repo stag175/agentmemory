@@ -42,6 +42,7 @@ import {
 import {
   resolveHandle,
   invalidateHandle,
+  ProxyHttpError,
   type Handle,
   type ProxyHandle,
 } from "./rest-proxy.js";
@@ -67,6 +68,42 @@ const IMPLEMENTED_TOOLS = new Set([
   "memory_review_queue",
   "memory_rules_resolve",
 ]);
+
+// Tools whose proxy path performs no server-side mutation. A proxy failure on
+// one of these may safely fall through to the local InMemoryKV read path. A
+// proxy failure on a state-changing tool (memory_save/create/update/delete/...)
+// must NOT silently mutate local state — a server 4xx business rejection there
+// would otherwise be "absorbed" into a divergent local copy.
+const READ_ONLY_TOOLS = new Set([
+  "memory_recall",
+  "memory_smart_search",
+  "memory_sessions",
+  "memory_export",
+  "memory_audit",
+  "memory_inspect",
+  "memory_history",
+  "memory_search_explain",
+  "memory_ledger",
+  "memory_review_queue",
+  "memory_rules_resolve",
+]);
+
+/**
+ * Decides whether a proxy-mode failure should fall through to the local KV.
+ *
+ * - A {@link ProxyHttpError} with a 4xx status is a business rejection (unknown
+ *   tool, validation, auth). Local fallback would silently diverge from the
+ *   server's decision, so we surface the error instead — always.
+ * - For any other proxy failure (network, timeout, 5xx), read-only tools may
+ *   serve a degraded local view; state-changing tools must surface the error
+ *   rather than mutate a local copy the server never accepted.
+ */
+function shouldFallBackToLocal(toolName: string, err: unknown): boolean {
+  if (err instanceof ProxyHttpError && err.status >= 400 && err.status < 500) {
+    return false;
+  }
+  return READ_ONLY_TOOLS.has(toolName);
+}
 
 const SERVER_INFO = {
   name: "agentmemory",
@@ -1859,8 +1896,20 @@ async function handleLocal(
     }
 
     case "memory_rules_resolve": {
-      const result = await resolveRulesRequest(v.rulesResolvePayload ?? {}, {
+      // Item 4 (STANDALONE LOCAL fallback): this is a trusted same-user CLI
+      // invocation of the user's own tool, not a network request. Allow the
+      // user's requested workspaceRoot (allowedRoots includes the requested
+      // root) and honor caller options (allowCallerOptions:true) so
+      // includeContent and custom instructionGlobs work — otherwise the local
+      // developer workflow breaks. The network surface stays locked down
+      // separately in src/mcp/server.ts.
+      const payload = v.rulesResolvePayload ?? normalizeRulesResolveInput({}, {
         defaultCwd: process.cwd(),
+      });
+      const result = await resolveRulesRequest(payload, {
+        defaultCwd: process.cwd(),
+        allowedRoots: [process.cwd(), payload.workspaceRoot],
+        allowCallerOptions: true,
       });
       if (!result.success) {
         throw new Error(result.error);
@@ -1911,7 +1960,11 @@ export async function handleToolCall(
         process.stderr.write(
           `[@agentmemory/mcp] proxy call failed for ${toolName}: ${err instanceof Error ? err.message : String(err)}\n`,
         );
-        invalidateHandle();
+        // A 4xx is a definitive server answer; keep the handle warm. Other
+        // failures may mean the server is gone — re-probe on the next call.
+        const is4xx =
+          err instanceof ProxyHttpError && err.status >= 400 && err.status < 500;
+        if (!is4xx) invalidateHandle();
         throw err;
       }
     }
@@ -1925,10 +1978,21 @@ export async function handleToolCall(
     try {
       return await handleProxy(validated, handle);
     } catch (err) {
+      const is4xx =
+        err instanceof ProxyHttpError && err.status >= 400 && err.status < 500;
+      // A 4xx is a definitive server answer (the connection is fine), so keep
+      // the proxy handle warm. Any other failure means the server may be
+      // unreachable — drop the handle so the next call re-probes.
+      if (!is4xx) invalidateHandle();
+      if (!shouldFallBackToLocal(toolName, err)) {
+        process.stderr.write(
+          `[@agentmemory/mcp] proxy call failed for ${toolName}: ${err instanceof Error ? err.message : String(err)}; surfacing server error (no local mutation)\n`,
+        );
+        throw err;
+      }
       process.stderr.write(
-        `[@agentmemory/mcp] proxy call failed for ${toolName}: ${err instanceof Error ? err.message : String(err)}; invalidating handle and falling back to local KV\n`,
+        `[@agentmemory/mcp] proxy call failed for ${toolName}: ${err instanceof Error ? err.message : String(err)}; falling back to local KV (read-only)\n`,
       );
-      invalidateHandle();
     }
   }
   return handleLocal(validated, kvInstance);

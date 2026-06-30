@@ -370,6 +370,12 @@ const RULES_RESOLVE_FIELDS = [
   "maxFileBytes",
   "includeContent",
 ] as const;
+// Authorization-bearing fields are deliberately EXCLUDED from this whitelist
+// (no permissions/roles/roleGrants/teamPolicy/auth/access/actor/requestContext,
+// and actorId is NOT trusted as authz). The principal is resolved server-side
+// from the authenticated operator credential — see resolveMemoryProposalPrincipal
+// — so a request body can never self-grant. Only proposal-content / lookup
+// fields belong here.
 const MEMORY_PROPOSAL_FIELDS = [
   "teamId",
   "proposalId",
@@ -383,17 +389,7 @@ const MEMORY_PROPOSAL_FIELDS = [
   "targetMemoryId",
   "limit",
   "offset",
-  "actorId",
   "requestedBy",
-  "permissions",
-  "roles",
-  "roleGrants",
-  "teamPolicy",
-  "auth",
-  "access",
-  "actor",
-  "requestContext",
-  "request",
 ] as const;
 const SYNC_CONTROL_PLANE_FIELDS = [
   "peerId",
@@ -425,6 +421,31 @@ const SYNC_CONTROL_PLANE_FIELDS = [
   "source",
   "limit",
   "offset",
+] as const;
+// Sync recovery (item 6): set-status only toggles a peer's enabled flag and
+// recovers a peer an untrusted run marked blocked. Only peerId + enabled are
+// accepted from the body.
+const SYNC_PEER_SET_STATUS_FIELDS = ["peerId", "enabled"] as const;
+// Audit-chain REST exposure (item 3). Pagination + filter fields shared by both
+// the read (mem::audit-chain) and verify (mem::audit-chain-verify) endpoints.
+const AUDIT_CHAIN_FIELDS = [
+  "offset",
+  "limit",
+  "includeLinks",
+  "operation",
+  "functionId",
+  "dateFrom",
+  "dateTo",
+] as const;
+// verify adds the integrity-proof anchors on top of the pagination/filter set.
+const AUDIT_CHAIN_VERIFY_FIELDS = [
+  "expectedHeadHash",
+  "expectedCount",
+  "expectedFirstEntryId",
+  "expectedLastEntryId",
+  "chain",
+  "allowUnanchored",
+  ...AUDIT_CHAIN_FIELDS,
 ] as const;
 const OTEL_LINEAGE_EXPORT_FIELDS = [
   "events",
@@ -484,9 +505,16 @@ function validateWhitelistedField(field: string, value: unknown): string | undef
     "actor",
     "agentId",
     "conflictPolicy",
+    "dateFrom",
+    "dateTo",
     "direction",
+    "expectedFirstEntryId",
+    "expectedHeadHash",
+    "expectedLastEntryId",
+    "functionId",
     "memoryId",
     "mode",
+    "operation",
     "peerId",
     "project",
     "proposalId",
@@ -502,7 +530,16 @@ function validateWhitelistedField(field: string, value: unknown): string | undef
     "workspaceId",
   ]);
   const stringArrayFields = new Set(["eventIds", "permissions", "scopes"]);
-  const booleanFields = new Set(["apply", "approved", "dryRun"]);
+  const booleanFields = new Set([
+    "allowUnanchored",
+    "apply",
+    "approved",
+    "dryRun",
+    "enabled",
+    "includeLinks",
+  ]);
+  const arrayFields = new Set(["chain"]);
+  const integerFields = new Set(["expectedCount", "offset"]);
   const objectFields = new Set(["change", "exportData", "metadata", "snapshot"]);
   if (stringFields.has(field) && typeof value !== "string") {
     return `${field} must be a string`;
@@ -518,6 +555,12 @@ function validateWhitelistedField(field: string, value: unknown): string | undef
   }
   if (objectFields.has(field) && !isRecord(value)) {
     return `${field} must be an object`;
+  }
+  if (arrayFields.has(field) && !Array.isArray(value)) {
+    return `${field} must be an array`;
+  }
+  if (integerFields.has(field) && !Number.isInteger(value)) {
+    return `${field} must be an integer`;
   }
   if (field === "limit" && !Number.isInteger(value)) {
     return "limit must be an integer";
@@ -558,13 +601,83 @@ async function callWhitelistedFunction(
 
 function isRulesResolveInvalidInput(
   result: unknown,
-): result is { success: false; code: "invalid_input"; error: string } {
+): result is {
+  success: false;
+  code: "invalid_input" | "forbidden_root";
+  error: string;
+} {
   return (
     isRecord(result) &&
     result.success === false &&
-    result.code === "invalid_input" &&
+    (result.code === "invalid_input" || result.code === "forbidden_root") &&
     typeof result.error === "string"
   );
+}
+
+// The trusted operator permission set. A request that passes checkAuth is a
+// trusted operator on this single-shared-secret deployment, so it is granted
+// the full operator scope. Permissions are NEVER read from the request body.
+const MEMORY_PROPOSAL_OPERATOR_PERMISSIONS = Object.freeze([
+  "project:read",
+  "project:write",
+  "governance:delete",
+]);
+
+// Resolve the effective principal SERVER-SIDE for memory-proposal triggers.
+// - permissions: the fixed trusted-operator set above (never from the body).
+// - actorId: an IDENTITY LABEL ONLY, used for audit stamping + separation of
+//   duties. Read from the x-actor-id header, falling back to body.actorId, then
+//   "operator". It carries no authorization weight.
+// - teamPolicy.allowSelfApproval: opt-in via AGENTMEMORY_ALLOW_SELF_APPROVAL
+//   (secure default false so self-approval is blocked).
+function resolveMemoryProposalPrincipal(req: ApiRequest): {
+  actorId: string;
+  permissions: string[];
+  teamPolicy: { allowSelfApproval: boolean };
+} {
+  const headers = (req.headers || {}) as Record<
+    string,
+    string | string[] | undefined
+  >;
+  const rawHeaderActor = headers["x-actor-id"] ?? headers["X-Actor-Id"];
+  const headerActor = Array.isArray(rawHeaderActor)
+    ? rawHeaderActor[0]
+    : rawHeaderActor;
+  const body = isRecord(req.body) ? req.body : {};
+  const actorId =
+    asNonEmptyString(headerActor) ??
+    asNonEmptyString(body.actorId) ??
+    "operator";
+  const allowSelfApproval =
+    process.env.AGENTMEMORY_ALLOW_SELF_APPROVAL === "true";
+  return {
+    actorId,
+    permissions: [...MEMORY_PROPOSAL_OPERATOR_PERMISSIONS],
+    teamPolicy: { allowSelfApproval },
+  };
+}
+
+// Whitelisted memory-proposal handler: strips request-body authorization,
+// resolves the principal server-side, and attaches it as data.principal.
+async function callMemoryProposalFunction(
+  sdk: ISdk,
+  req: ApiRequest,
+  functionId: string,
+): Promise<Response> {
+  if (req.body !== undefined && !isRecord(req.body)) {
+    return { status_code: 400, body: { error: "body must be an object" } };
+  }
+  const payload = pickFields(
+    (req.body ?? {}) as Record<string, unknown>,
+    MEMORY_PROPOSAL_FIELDS,
+  );
+  const validationError = validateWhitelistedPayload(payload);
+  if (validationError) {
+    return { status_code: 400, body: { error: validationError } };
+  }
+  payload.principal = resolveMemoryProposalPrincipal(req);
+  const result = await sdk.trigger({ function_id: functionId, payload });
+  return { status_code: 200, body: result };
 }
 
 export function registerApiTriggers(
@@ -595,7 +708,15 @@ export function registerApiTriggers(
     },
   );
 
-  registerRulesResolverFunction(sdk);
+  // item 4 (NETWORK trust model): constrain the public REST/MCP rules-resolve
+  // surface to the server's configured project root(s). config.ts has no
+  // project-root setting, so default to [process.cwd()]. allowCallerOptions
+  // stays FALSE (the resolver default), so caller-supplied instructionGlobs and
+  // includeContent are stripped — the public surface never widens the scan or
+  // returns raw rule content. A workspaceRoot outside these roots yields
+  // result.code === 'forbidden_root', mapped to HTTP 400 below.
+  const rulesResolveAllowedRoots = [process.cwd()];
+  registerRulesResolverFunction(sdk, { allowedRoots: rulesResolveAllowedRoots });
 
   sdk.registerFunction("api::liveness",
     async (): Promise<Response> => ({
@@ -2122,6 +2243,59 @@ export function registerApiTriggers(
     },
   });
 
+  // Audit-chain REST exposure (item 3). GET reads the tamper-evident chain;
+  // query params arrive as strings, so the read endpoint whitelists fields and
+  // forwards them to mem::audit-chain, which coerces + bounds them itself.
+  sdk.registerFunction("api::audit-chain",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const payload = pickFields(
+        req.query_params ?? {},
+        AUDIT_CHAIN_FIELDS,
+      );
+      const result = await sdk.trigger({
+        function_id: "mem::audit-chain",
+        payload,
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::audit-chain",
+    config: {
+      api_path: "/agentmemory/audit/chain",
+      http_method: "GET",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // POST verify accepts a JSON body, so it can validate whitelisted field types
+  // before forwarding to mem::audit-chain-verify (which performs the full
+  // integrity proof).
+  sdk.registerFunction("api::audit-chain-verify",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      return callWhitelistedFunction(
+        sdk,
+        req,
+        "mem::audit-chain-verify",
+        AUDIT_CHAIN_VERIFY_FIELDS,
+      );
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::audit-chain-verify",
+    config: {
+      api_path: "/agentmemory/audit/chain/verify",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
   sdk.registerFunction("api::compliance-soc2-evidence",
     async (req: ApiRequest<ComplianceEvidenceInput>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -2189,42 +2363,69 @@ export function registerApiTriggers(
     });
   };
 
-  const roadmapRoutes = [
+  // Memory-proposal routes resolve the principal server-side (item 2) and must
+  // NOT use the generic whitelisted handler, which would pass the body through
+  // without an injected principal. Each handler strips body authz, whitelists
+  // proposal-content fields, and attaches data.principal.
+  const memoryProposalRoutes = [
     {
       apiFunctionId: "api::memory-proposal-create",
       api_path: "/agentmemory/memory-proposals/create",
       memoryFunctionId: "mem::memory-proposal-create",
-      allowedFields: MEMORY_PROPOSAL_FIELDS,
     },
     {
       apiFunctionId: "api::memory-proposal-list",
       api_path: "/agentmemory/memory-proposals/list",
       memoryFunctionId: "mem::memory-proposal-list",
-      allowedFields: MEMORY_PROPOSAL_FIELDS,
     },
     {
       apiFunctionId: "api::memory-proposal-approve",
       api_path: "/agentmemory/memory-proposals/approve",
       memoryFunctionId: "mem::memory-proposal-approve",
-      allowedFields: MEMORY_PROPOSAL_FIELDS,
     },
     {
       apiFunctionId: "api::memory-proposal-reject",
       api_path: "/agentmemory/memory-proposals/reject",
       memoryFunctionId: "mem::memory-proposal-reject",
-      allowedFields: MEMORY_PROPOSAL_FIELDS,
     },
     {
       apiFunctionId: "api::memory-proposal-apply",
       api_path: "/agentmemory/memory-proposals/apply",
       memoryFunctionId: "mem::memory-proposal-apply",
-      allowedFields: MEMORY_PROPOSAL_FIELDS,
     },
+  ] as const;
+  for (const route of memoryProposalRoutes) {
+    const memoryFunctionId = route.memoryFunctionId;
+    sdk.registerFunction(route.apiFunctionId,
+      async (req: ApiRequest): Promise<Response> => {
+        const authErr = checkAuth(req, secret);
+        if (authErr) return authErr;
+        return callMemoryProposalFunction(sdk, req, memoryFunctionId);
+      },
+    );
+    sdk.registerTrigger({
+      type: "http",
+      function_id: route.apiFunctionId,
+      config: {
+        api_path: route.api_path,
+        http_method: "POST",
+        middleware_function_ids: ["middleware::api-auth"],
+      },
+    });
+  }
+
+  const roadmapRoutes = [
     {
       apiFunctionId: "api::sync-peer-register",
       api_path: "/agentmemory/sync/peers/register",
       memoryFunctionId: "mem::sync-peer-register",
       allowedFields: SYNC_CONTROL_PLANE_FIELDS,
+    },
+    {
+      apiFunctionId: "api::sync-peer-set-status",
+      api_path: "/agentmemory/sync/peer/set-status",
+      memoryFunctionId: "mem::sync-peer-set-status",
+      allowedFields: SYNC_PEER_SET_STATUS_FIELDS,
     },
     {
       apiFunctionId: "api::sync-workspace-register",
@@ -2456,6 +2657,9 @@ export function registerApiTriggers(
         source: req.body?.source ?? sourceFromHeader,
       };
       const result = await sdk.trigger({ function_id: "mem::smart-search", payload });
+      // item 18: the full mem::smart-search response is returned as-is, so any
+      // optional top-level response.warnings is forwarded additively without
+      // needing to be re-listed here.
       return { status_code: 200, body: result };
     },
   );

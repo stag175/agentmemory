@@ -15,6 +15,7 @@ import {
   readFileSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -22,7 +23,8 @@ import {
 } from "node:fs";
 import { join, dirname, delimiter as PATH_DELIMITER } from "node:path";
 import { fileURLToPath } from "node:url";
-import { homedir, platform } from "node:os";
+import { homedir, platform, tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import * as p from "@clack/prompts";
 import { generateId } from "./state/schema.js";
 import {
@@ -52,6 +54,7 @@ import {
 import {
   applyConnectRollbackPlan,
   buildConnectRollbackPlan,
+  buildLatestRollbackablePlan,
   formatConnectRollbackPlan,
   markConnectRollbackResults,
   readConnectManifest,
@@ -139,6 +142,83 @@ function iiiReleaseUrl(): string | null {
   return `https://github.com/iii-hq/iii/releases/download/iii/v${IIPINNED_VERSION}/${asset}`;
 }
 
+// URL of the published SHA-256 checksum file for the pinned asset. Convention:
+// iii-hq/iii ships `<asset>.sha256` alongside each release asset. We download
+// and verify this BEFORE extracting/executing so a compromised CDN, a
+// man-in-the-middle, or a swapped asset can't smuggle a malicious binary onto
+// the user's machine (item 5).
+function iiiReleaseChecksumUrl(): string | null {
+  const url = iiiReleaseUrl();
+  if (!url) return null;
+  return `${url}.sha256`;
+}
+
+// A pinned SHA-256 can also be supplied out-of-band via env (e.g. an air-
+// gapped mirror) so deployments that don't trust the published `.sha256` file
+// can hard-pin their own. Hex, 64 chars, case-insensitive.
+function iiiPinnedChecksumFromEnv(): string | null {
+  const raw = process.env["AGENTMEMORY_III_SHA256"];
+  if (!raw) return null;
+  const hex = raw.trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(hex) ? hex : null;
+}
+
+// Fetch and parse the published SHA-256 for the pinned asset. The checksum
+// file is typically `<hash>  <filename>` (sha256sum format) or just the bare
+// hash. Returns null if unavailable/unparseable so the caller can refuse.
+async function fetchIiiReleaseChecksum(): Promise<string | null> {
+  const pinned = iiiPinnedChecksumFromEnv();
+  if (pinned) return pinned;
+  const checksumUrl = iiiReleaseChecksumUrl();
+  if (!checksumUrl) return null;
+  try {
+    const res = await fetch(checksumUrl);
+    if (!res.ok) return null;
+    const text = await res.text();
+    const token = text.trim().split(/\s+/)[0] ?? "";
+    const hex = token.toLowerCase();
+    return /^[0-9a-f]{64}$/.test(hex) ? hex : null;
+  } catch {
+    return null;
+  }
+}
+
+// Download the pinned asset to a temp file and verify its SHA-256 against the
+// expected hash. Returns the temp path on match, or null (and cleans up) on
+// any download error or hash mismatch.
+async function downloadAndVerifyIiiAsset(
+  url: string,
+  expectedSha256: string,
+): Promise<string | null> {
+  const tmpPath = join(
+    tmpdir(),
+    `agentmemory-iii-${process.pid}-${Date.now()}-${iiiReleaseAsset() ?? "asset"}`,
+  );
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      p.log.error(`Download failed: HTTP ${res.status} for ${url}`);
+      return null;
+    }
+    const bytes = Buffer.from(await res.arrayBuffer());
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== expectedSha256.toLowerCase()) {
+      p.log.error(
+        `Checksum mismatch for ${url}\n  expected ${expectedSha256}\n  actual   ${actual}\nRefusing to install a tampered or corrupt binary.`,
+      );
+      return null;
+    }
+    writeFileSync(tmpPath, bytes);
+    return tmpPath;
+  } catch (err) {
+    safeDelete(tmpPath);
+    p.log.error(
+      `Download/verify failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
 function vlog(msg: string): void {
   if (IS_VERBOSE) p.log.info(`[verbose] ${msg}`);
 }
@@ -173,7 +253,15 @@ Commands:
                      No arg = interactive picker. --all wires every detected agent.
                      --dry-run shows what would change. --force re-installs.
                      connect frameworks lists read-only runtime setup helpers.
-  rollback --last    Restore the most recent connect backup(s). Add --dry-run to preview.
+  connect doctor     Inspect every detected agent's wiring (healthy/stale/
+                     foreign/missing) without changing anything.
+  connect repair     Re-wire stale/missing agents (skips foreign + manual-only
+                     entries). --dry-run previews. --force refreshes healthy ones.
+  rollback --last    Restore the most recent connect run's backup(s). Surgical for
+                     JSON config (only removes/restores mcpServers.agentmemory).
+                     Prompts before changing files; --force skips the prompt.
+                     --dry-run previews. Falls back to the most recent run with
+                     rollbackable changes when the latest run is a no-op.
   status             Show connection status, memory count, flags, and health
   diagnose           Run daemon diagnostics. --release-gate emits the release gate.
                      Add --json for machine-readable output.
@@ -218,6 +306,13 @@ Environment:
   AGENTMEMORY_USE_DOCKER=1     Prefer the bundled docker-compose path over the
                                native iii-engine binary on first run.
   AGENTMEMORY_III_VERSION      Override pinned iii-engine version (default ${IIPINNED_VERSION}).
+  AGENTMEMORY_AUTO_INSTALL_ENGINE=1
+                               Opt in to auto-downloading + running the iii-engine
+                               binary in non-interactive (CI/Docker) contexts. Off by
+                               default so builds never silently fetch a remote binary.
+  AGENTMEMORY_III_SHA256       Pin a trusted SHA-256 for the engine asset. The installer
+                               always verifies a checksum before extracting; set this to
+                               override the published one (air-gapped mirrors).
   AGENTMEMORY_FOLLOWUP_WINDOW_SECONDS
                                Window (seconds) for the smart-search follow-up diagnostic
                                (default 30). Long values overcount, short values undercount.
@@ -714,17 +809,20 @@ function detectIiiConsole(): IiiConsoleState {
 
 // The upstream install script reads `VERSION` as an env var (see
 // install.iii.dev/iii/main/install.sh: `engine_version="${VERSION:-}"`).
-// Pin to IIPINNED_VERSION so a fresh boot can never pull a newer iii
-// console that talks a different protocol than our pinned engine
+// Pin to IIPINNED_VERSION so a user who runs this command can never pull a
+// newer iii console that talks a different protocol than our pinned engine
 // (root cause of #712-class drift).
+//
+// SECURITY (item 5): this string is DISPLAY-ONLY. agentmemory never pipes it
+// into a shell — `/main/` is a mutable remote script and auto-executing it
+// would be a curl|sh RCE. We print it so the user can review and run it
+// themselves.
 const III_CONSOLE_INSTALL_CMD =
   `curl -fsSL https://install.iii.dev/iii/main/install.sh | VERSION=${IIPINNED_VERSION} sh`;
 
-// Display-only renderer. The internal `runCommand(shBin, ["-c", ...])`
-// path uses III_CONSOLE_INSTALL_CMD verbatim (POSIX shell). Anywhere
-// that PRINTS the command to a user has to handle Windows separately
-// since `VERSION=X sh` and the pipe-to-sh idiom aren't valid in
-// cmd.exe / PowerShell.
+// Display-only renderer. Anywhere that PRINTS the command to a user has to
+// handle Windows separately since `VERSION=X sh` and the pipe-to-sh idiom
+// aren't valid in cmd.exe / PowerShell.
 function iiiConsoleInstallHint(): string {
   if (!IS_WINDOWS) return III_CONSOLE_INSTALL_CMD;
   return (
@@ -746,9 +844,15 @@ async function ensureIiiConsole(): Promise<IiiConsoleState> {
   const prefs = readPrefs();
   if (prefs.skipConsoleInstall) return state;
 
+  // SECURITY (item 5): never pipe `install.iii.dev/iii/main/install.sh` into
+  // sh. `/main/` is a MUTABLE script — a compromised or man-in-the-middled
+  // host would execute arbitrary code as the user on a routine boot. We do
+  // NOT have a published checksum/signature for the console installer, so we
+  // refuse to auto-execute it and print copy-paste manual instructions
+  // instead. The user runs the command themselves (and can inspect it first).
   const answer = await p.confirm({
     message:
-      "iii console gives engine-level visibility (workers, functions, queues, traces). Install now?",
+      "iii console gives engine-level visibility (workers, functions, queues, traces). Show install instructions?",
     initialValue: true,
   });
   if (p.isCancel(answer)) return state;
@@ -757,24 +861,12 @@ async function ensureIiiConsole(): Promise<IiiConsoleState> {
     return state;
   }
 
-  const shBin = whichBinary("sh");
-  const curlBin = whichBinary("curl");
-  if (!shBin || !curlBin) {
-    p.log.warn(
-      `curl or sh not found. Install manually:\n  ${iiiConsoleInstallHint()}`,
-    );
-    return state;
-  }
-  const ok = runCommand(shBin, ["-c", III_CONSOLE_INSTALL_CMD], {
-    label: "Installing iii console",
-  });
-  if (!ok) {
-    p.log.warn(
-      `iii console install failed. Re-run manually:\n  ${iiiConsoleInstallHint()}`,
-    );
-    return state;
-  }
-  // Re-detect rather than trust install-script output paths.
+  p.note(
+    `Install iii console manually (review the script before running it):\n  ${iiiConsoleInstallHint()}`,
+    "iii console install",
+  );
+  // We did not mutate anything; re-detect so a console installed out-of-band
+  // (e.g. during a previous session) is still picked up.
   return detectIiiConsole();
 }
 
@@ -804,7 +896,18 @@ function adoptRunningEngine(): void {
   }
 }
 
-async function runIiiInstaller(): Promise<{ ok: boolean; binPath: string | null }> {
+// Auto-install opt-in for non-interactive (CI / Docker / piped) contexts.
+// SECURITY (item 5): a CI build or container must never silently download +
+// execute a remote binary on a routine boot. Operators who *want* that opt in
+// explicitly with AGENTMEMORY_AUTO_INSTALL_ENGINE=1.
+function autoInstallEngineOptIn(): boolean {
+  const v = process.env["AGENTMEMORY_AUTO_INSTALL_ENGINE"];
+  return v === "1" || v === "true";
+}
+
+async function runIiiInstaller(
+  opts: { interactive?: boolean } = {},
+): Promise<{ ok: boolean; binPath: string | null }> {
   const releaseUrl = iiiReleaseUrl();
   const asset = iiiReleaseAsset();
   const isZipAsset = asset?.endsWith(".zip") === true;
@@ -812,6 +915,20 @@ async function runIiiInstaller(): Promise<{ ok: boolean; binPath: string | null 
   if (!releaseUrl) {
     p.log.warn(
       `iii-engine binary not available for ${platform()}/${process.arch}. Use Docker (\`docker pull iiidev/iii:${IIPINNED_VERSION}\`) or download manually from https://github.com/iii-hq/iii/releases/tag/iii%2Fv${IIPINNED_VERSION}.`,
+    );
+    return { ok: false, binPath: null };
+  }
+
+  // Gate non-interactive (CI/Docker/piped) auto-install behind an explicit
+  // env opt-in so builds don't silently fetch + run a remote binary by
+  // default (item 5).
+  const interactive =
+    opts.interactive ?? (!!process.stdin.isTTY && !process.env["CI"]);
+  if (!interactive && !autoInstallEngineOptIn()) {
+    p.log.warn(
+      "Skipping iii-engine auto-install in a non-interactive environment.\n" +
+        "Set AGENTMEMORY_AUTO_INSTALL_ENGINE=1 to opt in, or install manually:\n" +
+        installInstructions().join("\n"),
     );
     return { ok: false, binPath: null };
   }
@@ -826,29 +943,78 @@ async function runIiiInstaller(): Promise<{ ok: boolean; binPath: string | null 
     return { ok: false, binPath: null };
   }
 
-  const shBin = whichBinary("sh");
-  const curlBin = whichBinary("curl");
-  if (!shBin || !curlBin) {
-    p.log.warn("curl or sh not found. Cannot auto-install iii-engine.");
+  const tarBin = whichBinary("tar");
+  if (!tarBin) {
+    p.log.warn("tar not found. Cannot extract the iii-engine release.");
     return { ok: false, binPath: null };
   }
 
-  const binDir = agentmemoryBinDir();
-  const binPath = privateIiiPath();
-  const installCmd = [
-    `mkdir -p "${binDir}"`,
-    `curl -fsSL "${releaseUrl}" | tar -xz -C "${binDir}"`,
-    `chmod +x "${binPath}"`,
-  ].join(" && ");
-  const installerOk = runCommand(shBin, ["-c", installCmd], {
-    label: `Installing iii-engine v${IIPINNED_VERSION} (pinned)`,
-    optional: true,
-  });
-  if (!installerOk) {
+  // SECURITY (item 5): verify a published SHA-256 BEFORE extracting/executing.
+  // We download the asset in-process (no `curl | tar` piping a mutable remote
+  // stream straight into a shell), hash it, and refuse if the checksum is
+  // unavailable or doesn't match.
+  const expectedSha256 = await fetchIiiReleaseChecksum();
+  if (!expectedSha256) {
     p.log.warn(
-      `iii-engine installer failed. Fallbacks: Docker (\`docker pull iiidev/iii:${IIPINNED_VERSION}\`) or download manually from https://github.com/iii-hq/iii/releases/tag/iii%2Fv${IIPINNED_VERSION}.`,
+      "No published SHA-256 checksum available for the pinned iii-engine release.\n" +
+        "Refusing to auto-install an unverified binary. Install manually:\n" +
+        installInstructions().join("\n") +
+        "\nOr pin a trusted hash via AGENTMEMORY_III_SHA256=<sha256>.",
     );
     return { ok: false, binPath: null };
+  }
+
+  const s = p.spinner();
+  s.start(`Downloading + verifying iii-engine v${IIPINNED_VERSION} (pinned)`);
+  const verifiedTarball = await downloadAndVerifyIiiAsset(releaseUrl, expectedSha256);
+  if (!verifiedTarball) {
+    s.stop(`iii-engine download/verify failed ✗`);
+    p.log.warn(
+      `iii-engine install aborted. Fallbacks: Docker (\`docker pull iiidev/iii:${IIPINNED_VERSION}\`) or download manually from https://github.com/iii-hq/iii/releases/tag/iii%2Fv${IIPINNED_VERSION}.`,
+    );
+    return { ok: false, binPath: null };
+  }
+  s.stop(`iii-engine v${IIPINNED_VERSION} verified (sha256 ${expectedSha256.slice(0, 12)}…)`);
+
+  const binDir = agentmemoryBinDir();
+  const binPath = privateIiiPath();
+  try {
+    mkdirSync(binDir, { recursive: true });
+  } catch (err) {
+    safeDelete(verifiedTarball);
+    p.log.warn(
+      `Could not create ${binDir}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { ok: false, binPath: null };
+  }
+
+  // Extract the LOCAL, already-verified tarball (no remote stream into the
+  // shell). `tar -xzf <file>` reads a trusted on-disk file we control.
+  const extractOk = runCommand(tarBin, ["-xzf", verifiedTarball, "-C", binDir], {
+    label: `Extracting iii-engine v${IIPINNED_VERSION}`,
+    optional: true,
+  });
+  safeDelete(verifiedTarball);
+  if (!extractOk) {
+    p.log.warn(
+      `iii-engine extraction failed. Fallbacks: Docker (\`docker pull iiidev/iii:${IIPINNED_VERSION}\`) or download manually from https://github.com/iii-hq/iii/releases/tag/iii%2Fv${IIPINNED_VERSION}.`,
+    );
+    return { ok: false, binPath: null };
+  }
+  if (!existsSync(binPath)) {
+    p.log.warn(
+      `iii-engine archive extracted but ${binPath} is missing. Download manually from https://github.com/iii-hq/iii/releases/tag/iii%2Fv${IIPINNED_VERSION}.`,
+    );
+    return { ok: false, binPath: null };
+  }
+  if (!IS_WINDOWS) {
+    const chmodBin = whichBinary("chmod");
+    if (chmodBin) {
+      runCommand(chmodBin, ["+x", binPath], {
+        label: "Marking iii-engine executable",
+        optional: true,
+      });
+    }
   }
   return { ok: true, binPath };
 }
@@ -1006,7 +1172,13 @@ async function startEngine(): Promise<boolean> {
     );
   } else if (!interactive) {
     choice = "install";
-    p.log.info("Non-interactive environment detected — auto-installing iii-engine.");
+    // SECURITY (item 5): runIiiInstaller refuses to fetch+run a remote binary
+    // in a non-interactive context unless AGENTMEMORY_AUTO_INSTALL_ENGINE=1.
+    p.log.info(
+      autoInstallEngineOptIn()
+        ? "Non-interactive environment + AGENTMEMORY_AUTO_INSTALL_ENGINE=1 — auto-installing iii-engine."
+        : "Non-interactive environment detected — set AGENTMEMORY_AUTO_INSTALL_ENGINE=1 to auto-install iii-engine, or install manually.",
+    );
   } else {
     p.log.warn(`iii-engine binary not found locally.`);
     const options: { value: Choice; label: string; hint?: string }[] = [
@@ -1039,7 +1211,7 @@ async function startEngine(): Promise<boolean> {
   }
 
   if (choice === "install") {
-    const result = await runIiiInstaller();
+    const result = await runIiiInstaller({ interactive });
     if (result.ok && result.binPath) {
       process.env["PATH"] = `${dirname(result.binPath)}${PATH_DELIMITER}${process.env["PATH"] ?? ""}`;
       iiiBin = result.binPath;
@@ -2532,7 +2704,7 @@ async function runUpgrade() {
   }
 
   const upgradeEngine = await p.confirm({
-    message: "Re-run the iii-engine install script (curl | sh)?",
+    message: `Download + verify the pinned iii-engine v${IIPINNED_VERSION} release?`,
     initialValue: true,
   });
   if (p.isCancel(upgradeEngine)) {
@@ -2540,7 +2712,9 @@ async function runUpgrade() {
     return process.exit(0);
   }
   if (upgradeEngine === true) {
-    await runIiiInstaller();
+    // Explicit interactive confirmation above; the installer still verifies a
+    // published SHA-256 before extracting (item 5).
+    await runIiiInstaller({ interactive: true });
   } else {
     p.log.info("Skipped iii-engine installer.");
   }
@@ -3040,6 +3214,94 @@ function rollbackRealPath(path: string): string | null {
   }
 }
 
+// Wrapper keys connect writes the `agentmemory` entry under, by config
+// schema. Surgical JSON rollback only ever touches `<wrapper>.agentmemory`.
+const CONNECT_JSON_WRAPPER_KEYS = ["mcpServers", "mcp"] as const;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return (
+    Boolean(value) && typeof value === "object" && !Array.isArray(value)
+  );
+}
+
+// Restore ONLY the agentmemory MCP entry from the backup into the live file,
+// preserving every other key the user may have changed since the connect run
+// (#item19). Whole-file copy over a live ~/.claude.json would clobber
+// unrelated edits. Returns null when surgical restore isn't applicable (e.g.
+// the file isn't a JSON object), so the caller can fall back to whole-file.
+function surgicalJsonRestore(
+  backupPath: string,
+  target: string,
+): { ok: boolean; message: string } | null {
+  if (!target.toLowerCase().endsWith(".json")) return null;
+
+  const backupRaw = readFileSync(backupPath, "utf-8");
+  let backupJson: unknown;
+  try {
+    backupJson = JSON.parse(backupRaw);
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(backupJson)) return null;
+
+  // Live file may not exist (connect created it) — then surgical restore means
+  // "remove the agentmemory entry from nothing", which is a no-op file we let
+  // the remove-created-target path handle. Bail to caller.
+  if (!existsSync(target)) return null;
+  let liveJson: unknown;
+  try {
+    liveJson = JSON.parse(readFileSync(target, "utf-8"));
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(liveJson)) return null;
+
+  let touched = false;
+  for (const wrapperKey of CONNECT_JSON_WRAPPER_KEYS) {
+    const liveWrapper = liveJson[wrapperKey];
+    const backupWrapper = backupJson[wrapperKey];
+    const liveHasEntry =
+      isPlainObject(liveWrapper) && "agentmemory" in liveWrapper;
+    const backupHasEntry =
+      isPlainObject(backupWrapper) && "agentmemory" in backupWrapper;
+    if (!liveHasEntry && !backupHasEntry) continue;
+
+    if (backupHasEntry) {
+      // Restore the prior agentmemory entry into the live wrapper.
+      const nextWrapper: Record<string, unknown> = isPlainObject(liveWrapper)
+        ? { ...liveWrapper }
+        : {};
+      nextWrapper["agentmemory"] = (
+        backupWrapper as Record<string, unknown>
+      )["agentmemory"];
+      liveJson[wrapperKey] = nextWrapper;
+      touched = true;
+    } else if (liveHasEntry) {
+      // Connect added the entry; the backup didn't have it — delete only it.
+      const nextWrapper = { ...(liveWrapper as Record<string, unknown>) };
+      delete nextWrapper["agentmemory"];
+      liveJson[wrapperKey] = nextWrapper;
+      touched = true;
+    }
+  }
+
+  if (!touched) {
+    return { ok: true, message: `no agentmemory entry to restore in ${target}` };
+  }
+  writeJsonAtomicFile(target, liveJson);
+  return {
+    ok: true,
+    message: `surgically restored agentmemory entry in ${target} (other keys preserved)`,
+  };
+}
+
+function writeJsonAtomicFile(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+  renameSync(tmp, path);
+}
+
 function restoreConnectBackup(
   backupPath: string,
   target: string,
@@ -3059,6 +3321,13 @@ function restoreConnectBackup(
         message: `refusing to restore over ${targetKind} target ${target}`,
       };
     }
+    // Prefer a surgical restore for JSON targets so we never clobber unrelated
+    // keys the user changed in their live config after the connect run
+    // (#item19). Falls back to whole-file copy for non-JSON / unparseable
+    // targets (text-block configs, etc).
+    const surgical = surgicalJsonRestore(backupPath, target);
+    if (surgical) return surgical;
+
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(backupPath, target);
     return { ok: true, message: `restored ${target} from ${backupPath}` };
@@ -3090,8 +3359,9 @@ async function runRollback(): Promise<void> {
   const tail = args.slice(1);
   const dryRun = tail.includes("--dry-run");
   const last = tail.includes("--last");
+  const force = tail.includes("--force") || tail.includes("--yes") || tail.includes("-y");
   if (tail.includes("--help") || tail.includes("-h")) {
-    p.note("Usage: agentmemory rollback --last [--dry-run]", "rollback");
+    p.note("Usage: agentmemory rollback --last [--dry-run] [--force]", "rollback");
     return;
   }
   if (!last) {
@@ -3107,13 +3377,30 @@ async function runRollback(): Promise<void> {
     return;
   }
 
-  const plan = buildConnectRollbackPlan(manifest, {
+  const planOptions = {
     home,
     backupsDir: backupRoot,
     pathExists: existsSync,
     pathKind: rollbackPathKind,
     realPath: rollbackRealPath,
-  });
+  };
+
+  let plan = buildConnectRollbackPlan(manifest, planOptions);
+  let fellBack = false;
+  // No-op fallback (#item19): if the newest connect run has nothing to undo
+  // (e.g. it was all `already-wired`), fall back to the most recent run that
+  // actually has rollbackable entries instead of giving up.
+  if (plan.filter((item) => item.action !== "skip").length === 0) {
+    const fallback = buildLatestRollbackablePlan(manifest, planOptions);
+    if (fallback) {
+      plan = fallback;
+      fellBack = true;
+      p.log.info(
+        "Latest connect run had nothing to undo — rolling back the most recent run with rollbackable changes.",
+      );
+    }
+  }
+
   p.note(formatConnectRollbackPlan(plan), dryRun ? "rollback dry-run" : "rollback plan");
 
   if (dryRun) {
@@ -3123,8 +3410,25 @@ async function runRollback(): Promise<void> {
 
   const actionable = plan.filter((item) => item.action !== "skip");
   if (actionable.length === 0) {
-    p.outro("No rollbackable changes in the latest connect run.");
+    p.outro(
+      fellBack
+        ? "No rollbackable changes found in any recorded connect run."
+        : "No rollbackable changes in the latest connect run.",
+    );
     return;
+  }
+
+  // Interactive confirmation (mirror runRemove). Rollback mutates / deletes
+  // live agent config, so require an explicit yes unless --force is passed.
+  if (!force) {
+    const proceed = await p.confirm({
+      message: `Apply rollback to ${actionable.length} target(s)? This rewrites live agent config.`,
+      initialValue: false,
+    });
+    if (p.isCancel(proceed) || proceed !== true) {
+      p.cancel("Cancelled. No files changed.");
+      return;
+    }
   }
 
   const results = applyConnectRollbackPlan(plan, {

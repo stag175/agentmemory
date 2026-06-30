@@ -9,7 +9,11 @@ vi.mock("../src/logger.js", () => ({
 import { getAllTools, ESSENTIAL_TOOLS } from "../src/mcp/tools-registry.js";
 
 const ROOT = join(import.meta.dirname, "..");
-const EXPECTED_TOOL_COUNT = 65;
+// Bumped 65 -> 74 when the MCP surface gained the governance/control-plane
+// tools (memory_audit_chain, memory_audit_chain_verify,
+// memory_sync_peer_set_status, memory_agent_event_prune) and the team memory
+// proposal tools (memory_proposal_create/list/approve/reject/apply).
+const EXPECTED_TOOL_COUNT = 74;
 
 function readText(relativePath: string): string {
   return readFileSync(join(ROOT, relativePath), "utf-8");

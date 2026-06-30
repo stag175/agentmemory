@@ -24,6 +24,8 @@ import { configureStateEncryptionRuntime } from "./state/encryption-runtime.js";
 import { KV } from "./state/schema.js";
 import { VectorIndex } from "./state/vector-index.js";
 import { HybridSearch } from "./state/hybrid-search.js";
+import { evaluateRetrievalBackendAvailability } from "./state/retrieval-backends.js";
+import type { RetrievalRuntimeStore } from "./state/retrieval-qdrant-adapter.js";
 import { IndexPersistence } from "./state/index-persistence.js";
 import { registerPrivacyFunction } from "./functions/privacy.js";
 import { registerObserveFunction } from "./functions/observe.js";
@@ -39,6 +41,7 @@ import {
   setVectorIndex,
   setEmbeddingProvider,
   setIndexPersistence,
+  setRetrievalStore,
 } from "./functions/search.js";
 import { registerContextFunction } from "./functions/context.js";
 import { registerSummarizeFunction } from "./functions/summarize.js";
@@ -228,6 +231,14 @@ async function main() {
 
   const rawKv = new StateKV(sdk);
   const encryptionRuntime = configureStateEncryptionRuntime(rawKv);
+  // #27: encryptionRuntime.kv is typed StateKVLike (either the raw StateKV or
+  // an EncryptedStateKV wrapper). Both implement the full StateKVLike contract
+  // (get/set/update/delete/list) that every registerX(sdk, kv) consumer uses.
+  // StateKV is a class with a `private sdk` field, so TypeScript treats it
+  // nominally and refuses a direct StateKVLike->StateKV assignment — hence the
+  // boundary cast. Retyping every consumer to StateKVLike would be a wide
+  // cross-file refactor; deferring that (see residualTODO). The cast is sound
+  // at runtime because both implementations satisfy StateKV's public surface.
   const kv = encryptionRuntime.kv as unknown as StateKV;
   if (encryptionRuntime.encrypted) {
     bootLog(
@@ -336,7 +347,12 @@ async function main() {
   registerSketchesFunction(sdk, kv);
   registerCrystallizeFunction(sdk, kv, provider);
   registerDiagnosticsFunction(sdk, kv);
-  registerComplianceEvidenceFunction(sdk, kv);
+  registerComplianceEvidenceFunction(sdk, kv, {
+    // #4: constrain workspaceRoot resolution to the server's configured roots.
+    // Default to the worker cwd so the network surface never resolves rules
+    // against an arbitrary caller-supplied path.
+    allowedRoots: [process.cwd()],
+  });
   registerAuditIntegrityFunctions(sdk, kv);
   registerDeletionPropagationFunction(sdk, kv);
   registerMemoryProposalFunctions(sdk, kv);
@@ -379,6 +395,50 @@ async function main() {
 
   const bm25Index = getSearchIndex();
   const graphWeight = parseFloat(getEnvVar("AGENTMEMORY_GRAPH_WEIGHT") || "0.3");
+
+  // #13: external retrieval backend selection. Evaluate availability BEFORE
+  // constructing HybridSearch so a healthy external store (currently qdrant)
+  // can be wired into the read path. The probe is network-free for the default
+  // sqlite path; only an explicitly-configured + reachable qdrant flips to
+  // 'available'. Any other status (reserved/unavailable/invalid) keeps the
+  // existing in-process VectorIndex path byte-for-byte unchanged. Guarded so a
+  // probe failure never blocks boot.
+  let retrievalStore: RetrievalRuntimeStore | null = null;
+  try {
+    const backend = await evaluateRetrievalBackendAvailability();
+    if (
+      backend.availability.status === "available" &&
+      backend.adapter.backend !== "sqlite" &&
+      backend.adapter.store
+    ) {
+      retrievalStore = backend.adapter.store;
+      bootLog(
+        `Retrieval backend: ${backend.adapter.backend} (external store active — vector reads routed through adapter)`,
+      );
+    } else if (backend.adapter.backend !== "sqlite") {
+      // Configured a non-sqlite backend but it is not usable: stay on the
+      // in-process path and say why. Never enable reads for a
+      // reserved/unavailable/invalid backend.
+      bootLog(
+        `Retrieval backend: ${backend.adapter.backend} requested but '${backend.availability.status}' — using in-process VectorIndex (${backend.availability.reason})`,
+      );
+    } else {
+      bootLog(`Retrieval backend: sqlite (in-process VectorIndex)`);
+    }
+  } catch (err) {
+    console.warn(
+      `[agentmemory] Retrieval backend evaluation failed; using in-process VectorIndex:`,
+      err,
+    );
+  }
+
+  // Bind the same store into the vector write-path so adds/removes dual-write
+  // to the external backend when (and only when) reads are routed through it.
+  // retrievalStore is non-null only for an 'available' external backend;
+  // every other status — including the catch path above — leaves it null,
+  // which keeps writes in-process.
+  setRetrievalStore(retrievalStore);
+
   const hybridSearch = new HybridSearch(
     bm25Index,
     vectorIndex,
@@ -387,6 +447,8 @@ async function main() {
     embeddingConfig.bm25Weight,
     embeddingConfig.vectorWeight,
     graphWeight,
+    process.env.RERANK_ENABLED === "true",
+    retrievalStore,
   );
 
   registerSmartSearchFunction(sdk, kv, (query, limit, options) =>
@@ -544,7 +606,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 163 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 166 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,
@@ -589,6 +651,36 @@ async function main() {
       } catch {}
     }, 86400000);
     insightDecayTimer.unref();
+  }
+
+  // #11/#23: agent-event retention sweep. Mirrors the lesson/insight decay
+  // sweeps above. pruneAgentEvents (behind mem::agent-event-prune) removes at
+  // most `batch` rows per tick so a backlog drains gradually rather than in one
+  // delete storm; maxAgeDays/maxCount default safely inside the function from
+  // AGENTMEMORY_AGENT_EVENT_RETENTION_* env. Interval is config-driven (default
+  // 24h) and the tick swallows errors so it never throws on the hot path.
+  if (process.env.AGENT_EVENT_RETENTION_ENABLED !== "false") {
+    const agentEventRetentionIntervalMs = parseInt(
+      process.env.AGENT_EVENT_RETENTION_INTERVAL_MS || "86400000",
+      10,
+    );
+    const safeAgentEventRetentionIntervalMs =
+      Number.isFinite(agentEventRetentionIntervalMs) &&
+      agentEventRetentionIntervalMs > 0
+        ? agentEventRetentionIntervalMs
+        : 86400000;
+    const agentEventRetentionTimer = setInterval(async () => {
+      try {
+        await sdk.trigger({
+          function_id: "mem::agent-event-prune",
+          payload: {},
+        });
+      } catch {}
+    }, safeAgentEventRetentionIntervalMs);
+    agentEventRetentionTimer.unref();
+    bootLog(
+      `Agent-event retention sweep: enabled (every ${safeAgentEventRetentionIntervalMs / 3600000}h)`,
+    );
   }
 
   // #771: hourly TTL sweep for the followup-rate diagnostic. The

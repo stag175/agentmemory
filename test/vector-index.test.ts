@@ -1,5 +1,19 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { VectorIndex } from "../src/state/vector-index.js";
+import type { EmbeddingProvider } from "../src/types.js";
+import type { RetrievalRuntimeStore } from "../src/state/retrieval-qdrant-adapter.js";
+import {
+  setVectorIndex,
+  setEmbeddingProvider,
+  setRetrievalStore,
+  vectorIndexAddGuarded,
+  vectorIndexRemove,
+} from "../src/functions/search.js";
+
+vi.mock("../src/logger.js", () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  bootLog: vi.fn(),
+}));
 
 describe("VectorIndex", () => {
   let index: VectorIndex;
@@ -128,5 +142,137 @@ describe("VectorIndex", () => {
     const results = restored.search(new Float32Array([2, 3, 4, 5]), 1);
     expect(results[0].obsId).toBe("obs_slice");
     expect(results[0].score).toBeCloseTo(1.0, 4);
+  });
+});
+
+describe("vector write-path dual-write to external retrieval store", () => {
+  const EMBEDDING = new Float32Array([0.1, 0.2, 0.3]);
+
+  function makeProvider(): EmbeddingProvider {
+    return {
+      name: "mock",
+      dimensions: 3,
+      embed: vi.fn(async () => EMBEDDING),
+      embedBatch: vi.fn(async (texts: string[]) => texts.map(() => EMBEDDING)),
+    };
+  }
+
+  function makeStore(): RetrievalRuntimeStore {
+    return {
+      upsert: vi.fn(async () => {}),
+      searchByVector: vi.fn(async () => []),
+      deleteByIds: vi.fn(async () => {}),
+      healthCheck: vi.fn(async () => ({
+        reachable: true,
+        status: 200,
+        detail: "ok",
+      })),
+    };
+  }
+
+  // Microtask flush: vectorIndexRemove dual-deletes fire-and-forget, so its
+  // store call resolves on a later microtask than the synchronous return.
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  let localIndex: VectorIndex;
+
+  beforeEach(() => {
+    localIndex = new VectorIndex();
+    setVectorIndex(localIndex);
+    setEmbeddingProvider(makeProvider());
+    setRetrievalStore(null);
+  });
+
+  afterEach(() => {
+    // Reset module-level singletons so these tests don't leak into others.
+    setRetrievalStore(null);
+    setEmbeddingProvider(null);
+    setVectorIndex(null);
+    vi.clearAllMocks();
+  });
+
+  it("dual-writes the same embedding to store.upsert on add", async () => {
+    const store = makeStore();
+    setRetrievalStore(store);
+
+    const ok = await vectorIndexAddGuarded("obs_1", "ses_1", "hello world", {
+      kind: "observation",
+      logId: "obs_1",
+    });
+
+    expect(ok).toBe(true);
+    // Local index still written.
+    expect(localIndex.size).toBe(1);
+    // Store received the SAME embedding (as a number[]), keyed by id with
+    // sessionId in the payload — matching the read-side mapping.
+    expect(store.upsert).toHaveBeenCalledTimes(1);
+    expect(store.upsert).toHaveBeenCalledWith([
+      { id: "obs_1", vector: Array.from(EMBEDDING), payload: { sessionId: "ses_1" } },
+    ]);
+  });
+
+  it("dual-deletes by id from the store on remove", async () => {
+    const store = makeStore();
+    localIndex.add("obs_1", "ses_1", EMBEDDING);
+    setRetrievalStore(store);
+
+    vectorIndexRemove("obs_1");
+    await flush();
+
+    expect(localIndex.size).toBe(0);
+    expect(store.deleteByIds).toHaveBeenCalledTimes(1);
+    expect(store.deleteByIds).toHaveBeenCalledWith(["obs_1"]);
+  });
+
+  it("does not touch any store when none is configured", async () => {
+    const store = makeStore();
+    // store created but never wired via setRetrievalStore.
+
+    const ok = await vectorIndexAddGuarded("obs_1", "ses_1", "hello", {
+      kind: "observation",
+      logId: "obs_1",
+    });
+    localIndex.add("obs_2", "ses_1", EMBEDDING);
+    vectorIndexRemove("obs_2");
+    await flush();
+
+    expect(ok).toBe(true);
+    expect(localIndex.size).toBe(1);
+    expect(store.upsert).not.toHaveBeenCalled();
+    expect(store.deleteByIds).not.toHaveBeenCalled();
+  });
+
+  it("keeps the local add when the store upsert throws", async () => {
+    const store = makeStore();
+    (store.upsert as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("qdrant down"),
+    );
+    setRetrievalStore(store);
+
+    const ok = await vectorIndexAddGuarded("obs_1", "ses_1", "hello", {
+      kind: "observation",
+      logId: "obs_1",
+    });
+
+    // External-store failure must not fail or block the local write.
+    expect(ok).toBe(true);
+    expect(localIndex.size).toBe(1);
+    expect(store.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the local remove when the store delete throws", async () => {
+    const store = makeStore();
+    (store.deleteByIds as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("qdrant down"),
+    );
+    localIndex.add("obs_1", "ses_1", EMBEDDING);
+    setRetrievalStore(store);
+
+    // Must not throw synchronously even though the store rejects.
+    expect(() => vectorIndexRemove("obs_1")).not.toThrow();
+    await flush();
+
+    expect(localIndex.size).toBe(0);
+    expect(store.deleteByIds).toHaveBeenCalledTimes(1);
   });
 });

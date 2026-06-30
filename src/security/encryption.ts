@@ -1,5 +1,11 @@
 import { Buffer } from "node:buffer";
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+  scryptSync,
+} from "node:crypto";
 
 export const LOCAL_JSON_ENCRYPTION_ENVELOPE_VERSION =
   "agentmemory.local-json.v1" as const;
@@ -67,6 +73,14 @@ export interface LocalJsonEncryptionOptions {
   keyRef?: string;
   now?: () => Date;
   scrypt?: Partial<LocalJsonScryptParameters>;
+  /**
+   * Reuse a caller-supplied salt for the scrypt key-wrapping derivation. When
+   * many envelopes share one salt + params, the derived wrapping key is served
+   * from the in-process cache after the first derivation, so a bulk read such
+   * as EncryptedStateKV.list() pays for at most one scrypt invocation instead
+   * of one per item. Omit to keep the legacy per-envelope random-salt behaviour.
+   */
+  salt?: Buffer;
 }
 
 type EnvLike = Record<string, string | undefined>;
@@ -86,6 +100,19 @@ const MAX_SCRYPT_N = 65_536;
 const MAX_SCRYPT_R = 16;
 const MAX_SCRYPT_P = 4;
 
+const WRAPPING_KEY_CACHE_MAX = 64;
+const wrappingKeyCache = new Map<string, Buffer>();
+let lastScryptDerivationCount = 0;
+
+/**
+ * Total scrypt derivations performed since process start. Bulk decrypt paths
+ * (EncryptedStateKV.list) assert this counter does not grow per item, proving
+ * the wrapping-key cache keeps the cost at one scrypt per distinct salt+params.
+ */
+export function localJsonScryptDerivationCount(): number {
+  return lastScryptDerivationCount;
+}
+
 export class LocalJsonEncryptionError extends Error {
   readonly code: LocalJsonEncryptionErrorCode;
 
@@ -103,6 +130,29 @@ export function localJsonEncryptionKeySourceFromEnv(
   return { env, envVar };
 }
 
+/**
+ * Derives a stable, non-secret salt for the scrypt key-wrapping step from a key
+ * source. Reusing one salt across every envelope written by a single adapter
+ * lets the wrapping-key cache serve a bulk decrypt (list()) after a single
+ * scrypt invocation. The salt is a SHA-256 of the passphrase plus a fixed
+ * context label, so it is deterministic across process restarts without
+ * exposing the passphrase. It is not used as cryptographic key material — it
+ * only domain-separates the scrypt derivation, which the random per-item data
+ * key still protects.
+ */
+export function deriveDeterministicLocalJsonSalt(
+  keySource: string | LocalJsonEncryptionKeySource,
+  keyRef?: string,
+): Buffer {
+  const source = resolveKeySource(keySource, keyRef);
+  return createHash("sha256")
+    .update("agentmemory.local-json.kek-salt.v1", "utf8")
+    .update("\0", "utf8")
+    .update(source.passphrase, "utf8")
+    .digest()
+    .subarray(0, SALT_BYTES);
+}
+
 export function encryptLocalJsonPayload(
   payload: unknown,
   keySource: string | LocalJsonEncryptionKeySource,
@@ -111,7 +161,7 @@ export function encryptLocalJsonPayload(
   const plaintext = serializeJsonPayload(payload);
   const source = resolveKeySource(keySource, options.keyRef);
   const scrypt = normalizeScryptParameters(options.scrypt);
-  const salt = randomBytes(SALT_BYTES);
+  const salt = resolveEncryptionSalt(options.salt);
   const dataKey = randomBytes(DATA_KEY_BYTES);
   const wrappingKey = deriveWrappingKey(source.passphrase, salt, scrypt);
 
@@ -283,19 +333,57 @@ function normalizeScryptParameters(
   return params;
 }
 
+function resolveEncryptionSalt(salt: Buffer | undefined): Buffer {
+  if (salt === undefined) return randomBytes(SALT_BYTES);
+  if (!Buffer.isBuffer(salt) || salt.length !== SALT_BYTES) {
+    throw redactedError("INVALID_KEY_DERIVATION");
+  }
+  // Copy so the caller-owned salt is unaffected by the finally fill(0) below.
+  return Buffer.from(salt);
+}
+
+function wrappingKeyCacheKey(
+  passphrase: string,
+  salt: Buffer,
+  params: LocalJsonScryptParameters,
+): string {
+  return `${params.n}:${params.r}:${params.p}:${params.keyLength}:${salt.toString(
+    "base64url",
+  )}:${createHash("sha256").update(passphrase, "utf8").digest("base64url")}`;
+}
+
+// Returns a fresh buffer the caller may safely zero. The cache keeps its own
+// copy so repeated derivations with the same salt+params (the EncryptedStateKV
+// list() path) run scrypt exactly once.
 function deriveWrappingKey(
   passphrase: string,
   salt: Buffer,
   params: LocalJsonScryptParameters,
 ): Buffer {
   const normalized = normalizeScryptParameters(params);
+  const cacheKey = wrappingKeyCacheKey(passphrase, salt, normalized);
+  const cached = wrappingKeyCache.get(cacheKey);
+  if (cached) {
+    // Refresh LRU recency.
+    wrappingKeyCache.delete(cacheKey);
+    wrappingKeyCache.set(cacheKey, cached);
+    return Buffer.from(cached);
+  }
   try {
-    return scryptSync(passphrase, salt, normalized.keyLength, {
+    lastScryptDerivationCount += 1;
+    const derived = scryptSync(passphrase, salt, normalized.keyLength, {
       N: normalized.n,
       r: normalized.r,
       p: normalized.p,
       maxmem: 128 * normalized.n * normalized.r * 2,
     });
+    wrappingKeyCache.set(cacheKey, Buffer.from(derived));
+    while (wrappingKeyCache.size > WRAPPING_KEY_CACHE_MAX) {
+      const oldest = wrappingKeyCache.keys().next().value;
+      if (oldest === undefined) break;
+      wrappingKeyCache.delete(oldest);
+    }
+    return derived;
   } catch {
     throw redactedError("INVALID_KEY_DERIVATION");
   }

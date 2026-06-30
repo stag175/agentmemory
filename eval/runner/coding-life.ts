@@ -1,7 +1,8 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { resolveBenchmarkAdapters } from "./adapters/index.js";
+import { resolveBenchmarkAdapters, runBenchmarkAdapters } from "./adapters/index.js";
+import type { BenchmarkAdapterSkip } from "./adapters/index.js";
 import { aggregate, scoreQuestion } from "./score.js";
 import type { BenchmarkAdapterDescriptor, Question, ScoreRow, Session } from "./types.js";
 
@@ -55,36 +56,60 @@ async function main(): Promise<void> {
   const ndjsonPath = `${outDir}/scores.ndjson`;
   if (existsSync(ndjsonPath)) writeFileSync(ndjsonPath, "");
 
-  const rows: ScoreRow[] = [];
-  for (const descriptor of adapterDescriptors) {
-    const adapter = descriptor.adapter;
-    console.log(`\n== ${adapter.name} ==`);
-    const state = await adapter.init(sessions);
-    try {
-      for (const q of questions) {
-        const t0 = performance.now();
-        const ranked = await adapter.query(q.question, state, k);
-        const latencyMs = performance.now() - t0;
-        const row = scoreQuestion(q, ranked, k, adapter.name, latencyMs);
-        rows.push(row);
-        appendFileSync(ndjsonPath, JSON.stringify(row) + "\n");
-        const mark = row.hit ? "+" : "-";
-        console.log(
-          `  ${mark} ${q.id} [${q.type}] R@${k}=${row.recallAtK.toFixed(2)} (${Math.round(latencyMs)}ms)`,
-        );
-      }
-    } finally {
-      if (adapter.teardown) await adapter.teardown(state);
-    }
-  }
+  const skipsPath = `${outDir}/skips.ndjson`;
+  if (existsSync(skipsPath)) writeFileSync(skipsPath, "");
 
-  const agg = aggregate(rows);
-  writeFileSync(`${outDir}/summary.json`, JSON.stringify(agg, null, 2));
-  console.log("\n=== Summary ===");
-  for (const [adapter, stats] of Object.entries(agg.byAdapter)) {
-    console.log(
-      `  ${adapter.padEnd(22)} P@${k}=${stats.p.toFixed(3)} R@${k}=${stats.r.toFixed(3)} hit=${stats.hit}/${stats.n} p50=${Math.round(stats.latencyP50)}ms`,
-    );
+  const rows: ScoreRow[] = [];
+  const skips: BenchmarkAdapterSkip[] = [];
+  const summaryPath = `${outDir}/summary.json`;
+  try {
+    await runBenchmarkAdapters(adapterDescriptors, {
+      onAdapterStart(descriptor) {
+        console.log(`\n== ${descriptor.adapter.name} ==`);
+      },
+      onRows(_descriptor, adapterRows) {
+        rows.push(...adapterRows);
+      },
+      onSkip(skip) {
+        skips.push(skip);
+        appendFileSync(skipsPath, JSON.stringify(skip) + "\n");
+        console.log(`  ~ skipped ${skip.adapter}: ${skip.skip.message}`);
+      },
+      async evaluate(descriptor) {
+        const adapter = descriptor.adapter;
+        const state = await adapter.init(sessions);
+        const adapterRows: ScoreRow[] = [];
+        try {
+          for (const q of questions) {
+            const t0 = performance.now();
+            const ranked = await adapter.query(q.question, state, k);
+            const latencyMs = performance.now() - t0;
+            const row = scoreQuestion(q, ranked, k, adapter.name, latencyMs);
+            adapterRows.push(row);
+            appendFileSync(ndjsonPath, JSON.stringify(row) + "\n");
+            const mark = row.hit ? "+" : "-";
+            console.log(
+              `  ${mark} ${q.id} [${q.type}] R@${k}=${row.recallAtK.toFixed(2)} (${Math.round(latencyMs)}ms)`,
+            );
+          }
+        } finally {
+          if (adapter.teardown) await adapter.teardown(state);
+        }
+        return adapterRows;
+      },
+    });
+  } finally {
+    const agg = aggregate(rows);
+    writeFileSync(summaryPath, JSON.stringify({ ...agg, skipped: skips }, null, 2));
+    console.log("\n=== Summary ===");
+    for (const [adapter, stats] of Object.entries(agg.byAdapter)) {
+      console.log(
+        `  ${adapter.padEnd(22)} P@${k}=${stats.p.toFixed(3)} R@${k}=${stats.r.toFixed(3)} hit=${stats.hit}/${stats.n} p50=${Math.round(stats.latencyP50)}ms`,
+      );
+    }
+    for (const skip of skips) {
+      console.log(`  ${skip.adapter.padEnd(22)} skipped: ${skip.skip.reason}`);
+    }
   }
 }
 

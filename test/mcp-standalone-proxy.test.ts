@@ -655,6 +655,94 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     ]);
   });
 
+  it("surfaces a 4xx memory_delete rejection and does NOT tombstone the local copy", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    installFetch((url, init) => {
+      const method = init?.method || "GET";
+      if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
+      calls.push({ url, method });
+      if (url.endsWith("/agentmemory/memory/delete")) {
+        return new Response(
+          JSON.stringify({ success: false, error: "memory is governance-locked" }),
+          { status: 403, statusText: "Forbidden", headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    // Seed a local copy that the buggy fallback would silently tombstone.
+    const localKv = new InMemoryKV(undefined);
+    await localKv.set("mem:memories", "mem_local_1", {
+      id: "mem_local_1",
+      content: "do not tombstone me",
+      lifecycleState: "active",
+    });
+
+    await expect(
+      handleToolCall("memory_delete", { memoryId: "mem_local_1" }, localKv),
+    ).rejects.toThrow(/403/);
+
+    // Server was consulted exactly once, and no local mutation happened.
+    expect(calls.filter((c) => c.url.endsWith("/agentmemory/memory/delete"))).toHaveLength(1);
+    const stored = await localKv.get<Record<string, unknown>>("mem:memories", "mem_local_1");
+    expect(stored).not.toBeNull();
+    expect(stored?.["lifecycleState"]).toBe("active");
+    expect(stored?.["deletedAt"]).toBeUndefined();
+    const tombstones = (await localKv.list<Record<string, unknown>>("mem:memories")).filter(
+      (m) => m["lifecycleState"] === "tombstoned",
+    );
+    expect(tombstones).toHaveLength(0);
+  });
+
+  it("surfaces a 5xx memory_delete failure rather than mutating local state", async () => {
+    installFetch((url, init) => {
+      const method = init?.method || "GET";
+      if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
+      if (url.endsWith("/agentmemory/memory/delete") && method === "POST") {
+        return new Response("boom", { status: 500, statusText: "Internal Server Error" });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const localKv = new InMemoryKV(undefined);
+    await localKv.set("mem:memories", "mem_local_2", {
+      id: "mem_local_2",
+      content: "survive the 5xx",
+      lifecycleState: "active",
+    });
+
+    await expect(
+      handleToolCall("memory_delete", { memoryId: "mem_local_2" }, localKv),
+    ).rejects.toThrow(/500/);
+
+    const stored = await localKv.get<Record<string, unknown>>("mem:memories", "mem_local_2");
+    expect(stored?.["lifecycleState"]).toBe("active");
+  });
+
+  it("surfaces a 4xx read rejection instead of serving stale local results", async () => {
+    installFetch((url, init) => {
+      if (url.endsWith("/agentmemory/livez")) return new Response("ok", { status: 200 });
+      if (url.endsWith("/agentmemory/search")) {
+        return new Response(
+          JSON.stringify({ error: "project quota exceeded" }),
+          { status: 400, statusText: "Bad Request", headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const localKv = new InMemoryKV(undefined);
+    await localKv.set("mem:memories", "mem_local_3", {
+      id: "mem_local_3",
+      content: "stale local hit",
+      lifecycleState: "active",
+    });
+
+    await expect(
+      handleToolCall("memory_recall", { query: "stale" }, localKv),
+    ).rejects.toThrow(/400/);
+  });
+
   it("local fallback returns the same shape as proxy for memory_smart_search", async () => {
     installFetch(() => {
       throw new Error("ECONNREFUSED");
@@ -704,8 +792,33 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     const body = JSON.parse(res.content[0].text);
     expect(body.success).toBe(true);
     expect(body.fallback).toBe(true);
+    // The trusted same-user CLI fallback resolves the user's requested root even
+    // though it is outside process.cwd() — it must not be rejected as a
+    // forbidden_root the way the network surface would reject it.
+    expect(body.workspaceRoot).toBe(resolve(root));
     expect(body.rules[0].relativePath).toBe("AGENTS.md");
     expect(body.rules[0]).not.toHaveProperty("content");
+  });
+
+  it("local fallback honors caller includeContent for the requested root (allowCallerOptions)", async () => {
+    installFetch(() => {
+      throw new Error("ECONNREFUSED");
+    });
+    const root = tempDir();
+    write(join(root, "AGENTS.md"), "codex instructions\n");
+
+    const res = await handleToolCall(
+      "memory_rules_resolve",
+      { workspaceRoot: root, includeContent: true },
+      new InMemoryKV(undefined),
+    );
+    const body = JSON.parse(res.content[0].text);
+    expect(body.success).toBe(true);
+    expect(body.includeContent).toBe(true);
+    // includeContent is honored locally (allowCallerOptions:true), so the rule
+    // content is returned rather than stripped to metadata-only.
+    expect(body.rules[0].relativePath).toBe("AGENTS.md");
+    expect(body.rules[0].content).toContain("codex instructions");
   });
 
   it("attaches Bearer token on the proxied tool request, not just the probe", async () => {
@@ -738,7 +851,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     expect(out.results[0].content).toBe("local only");
   });
 
-  it("invalidates the handle on proxy failure, so the next call re-probes", async () => {
+  it("invalidates the handle on a 5xx proxy failure, so the next call re-probes", async () => {
     let probeCount = 0;
     let serverUp = true;
     installFetch((url) => {
@@ -749,10 +862,12 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       return new Response("boom", { status: 500, statusText: "Internal Server Error" });
     });
     const localKv = new InMemoryKV(undefined);
-    await handleToolCall("memory_save", { content: "first fallback" }, localKv);
+    // memory_recall is read-only, so a 5xx degrades to a local read (no throw)
+    // while still invalidating the handle.
+    await handleToolCall("memory_recall", { query: "first fallback" }, localKv);
     expect(probeCount).toBe(1);
     serverUp = false;
-    await handleToolCall("memory_save", { content: "second fallback" }, localKv);
+    await handleToolCall("memory_recall", { query: "second fallback" }, localKv);
     expect(probeCount).toBe(2);
   });
 
@@ -912,6 +1027,15 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       if (url.endsWith("/agentmemory/livez")) {
         probeStarted++;
         return new Response("ok", { status: 200 });
+      }
+      // The probe reports the server is up, so a state-changing tool must reach
+      // the server. Return a successful remember response — a 4xx here would now
+      // (correctly) surface rather than absorb into a local mutation.
+      if (url.endsWith("/agentmemory/remember")) {
+        return new Response(JSON.stringify({ id: "m-1", action: "created" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
       return new Response("not found", { status: 404 });
     });

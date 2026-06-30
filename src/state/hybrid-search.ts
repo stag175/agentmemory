@@ -10,6 +10,7 @@ import type {
 } from "../types.js";
 import { isMemorySearchable, memoryToObservation } from "./memory-utils.js";
 import type { StateKV } from "./kv.js";
+import type { RetrievalRuntimeStore } from "./retrieval-qdrant-adapter.js";
 import { KV } from "./schema.js";
 import {
   GraphRetrieval,
@@ -22,6 +23,12 @@ const RRF_K = 60;
 
 export class HybridSearch {
   private graphRetrieval: GraphRetrieval;
+  // Optional external runtime vector store (e.g. qdrant). When present AND a
+  // healthy embedding provider exists, vector retrieval is routed through the
+  // store instead of the in-process VectorIndex. When null (the default) the
+  // existing in-process VectorIndex path runs unchanged — this is the
+  // byte-for-byte default sqlite behavior.
+  private retrievalStore: RetrievalRuntimeStore | null;
 
   constructor(
     private bm25: SearchIndex,
@@ -32,8 +39,17 @@ export class HybridSearch {
     private vectorWeight = 0.6,
     private graphWeight = 0.3,
     private rerankEnabled = process.env.RERANK_ENABLED === "true",
+    retrievalStore: RetrievalRuntimeStore | null = null,
   ) {
     this.graphRetrieval = new GraphRetrieval(kv);
+    this.retrievalStore = retrievalStore;
+  }
+
+  // Late binding for the external runtime vector store. index.ts wires this
+  // after the async availability probe resolves. Passing null restores the
+  // in-process VectorIndex path.
+  setRetrievalStore(store: RetrievalRuntimeStore | null): void {
+    this.retrievalStore = store;
   }
 
   async search(
@@ -98,7 +114,34 @@ export class HybridSearch {
     }> = [];
     let queryEmbedding: Float32Array | null = null;
 
-    if (this.vector && this.embeddingProvider && this.vector.size > 0) {
+    if (this.retrievalStore && this.embeddingProvider) {
+      // External runtime store path (e.g. qdrant). Only enabled when index.ts
+      // confirmed the backend is available + healthy. Apply candidateFilter
+      // post-hoc since the remote store does not accept it.
+      try {
+        queryEmbedding = await this.embeddingProvider.embed(query);
+        const hits = await this.retrievalStore.searchByVector(
+          Array.from(queryEmbedding),
+          limit * 2,
+        );
+        vectorResults = hits
+          .map((hit) => {
+            const payload = (hit.payload ?? {}) as { sessionId?: unknown };
+            const sessionId =
+              typeof payload.sessionId === "string" ? payload.sessionId : "";
+            return {
+              obsId: String(hit.id),
+              sessionId,
+              score: hit.score,
+            };
+          })
+          .filter(
+            (r) => !candidateFilter || candidateFilter(r.obsId, r.sessionId),
+          );
+      } catch {
+        // fall through to BM25-only
+      }
+    } else if (this.vector && this.embeddingProvider && this.vector.size > 0) {
       try {
         queryEmbedding = await this.embeddingProvider.embed(query);
         vectorResults = this.vector.search(queryEmbedding, limit * 2, candidateFilter);

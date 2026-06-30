@@ -58,7 +58,7 @@
 <p align="center">
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-recall.svg"><img src="../assets/tags/stat-recall.svg" alt="95.2% retrieval R@5" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tokens.svg"><img src="../assets/tags/stat-tokens.svg" alt="92% fewer tokens" height="38" /></picture>
-  <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tools.svg"><img src="../assets/tags/stat-tools.svg" alt="53 MCP tools" height="38" /></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tools.svg"><img src="../assets/tags/stat-tools.svg" alt="74 MCP tools" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-hooks.svg"><img src="../assets/tags/stat-hooks.svg" alt="12 auto hooks" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-deps.svg"><img src="../assets/tags/stat-deps.svg" alt="0 external DBs" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tests.svg"><img src="../assets/tags/stat-tests.svg" alt="950+ tests passing" height="38" /></picture>
@@ -429,7 +429,7 @@ Uygulama detayları `src/cli.ts` içinde (`src/cli.ts:544-595` bölgesi civarın
 ### Claude Code (tek blok, yapıştırın)
 
 ```text
-Install agentmemory: run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server. Then run `/plugin marketplace add rohitg00/agentmemory` and `/plugin install agentmemory` — the plugin registers all 12 hooks, 4 skills, AND auto-wires the `@agentmemory/mcp` stdio server via its `.mcp.json`, so you get 53 MCP tools (memory_smart_search, memory_save, memory_sessions, memory_governance_delete, etc.) without any extra config step. Verify with `curl http://localhost:3111/agentmemory/health`. The real-time viewer is at http://localhost:3113.
+Install agentmemory: run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server. Then run `/plugin marketplace add rohitg00/agentmemory` and `/plugin install agentmemory` — the plugin registers all 12 hooks, 15 skills, AND auto-wires the `@agentmemory/mcp` stdio server via its `.mcp.json`, so you get 74 MCP tools (memory_smart_search, memory_save, memory_sessions, memory_governance_delete, etc.) without any extra config step. Verify with `curl http://localhost:3111/agentmemory/health`. The real-time viewer is at http://localhost:3113.
 ```
 
 #### Eklenti kurulumu olmadan Claude Code (MCP-bağımsız yol)
@@ -458,7 +458,7 @@ codex plugin add agentmemory@agentmemory
 
 Codex eklentisi, Claude Code eklentisiyle aynı `plugin/` dizininden gelir. Şunları kaydeder:
 
-- `@agentmemory/mcp` MCP sunucusu olarak (`AGENTMEMORY_URL` çalışan bir agentmemory sunucusuna işaret ettiğinde tüm 51 tool'u proxy yapar; erişilebilir sunucu yoksa yerel olarak 7 tool'a düşer)
+- `@agentmemory/mcp` MCP sunucusu olarak (`AGENTMEMORY_URL` çalışan bir agentmemory sunucusuna işaret ettiğinde tüm 74 tool'u proxy yapar; erişilebilir sunucu yoksa yerel olarak 7 tool'a düşer)
 - 6 yaşam döngüsü hook'u: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`
 - 4 skill: `/recall`, `/remember`, `/session-history`, `/forget`
 
@@ -480,7 +480,7 @@ Bu, `~/.codex/hooks.json`'a paketli scriptlere mutlak yollarla atıfta bulunan i
 <summary><b>OpenClaw (bu istemi yapıştırın)</b></summary>
 
 ```text
-Install agentmemory for OpenClaw. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to my OpenClaw MCP config so agentmemory is available with all 51 memory tools:
+Install agentmemory for OpenClaw. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to my OpenClaw MCP config so agentmemory is available with all 74 memory tools:
 
 {
   "mcpServers": {
@@ -505,7 +505,7 @@ Tam kılavuz: [`integrations/openclaw/`](../integrations/openclaw/)
 <summary><b>Hermes Agent (bu istemi yapıştırın)</b></summary>
 
 ```text
-Install agentmemory for Hermes. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to ~/.hermes/config.yaml so Hermes can use agentmemory as an MCP server with all 51 memory tools:
+Install agentmemory for Hermes. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to ~/.hermes/config.yaml so Hermes can use agentmemory as an MCP server with all 74 memory tools:
 
 mcp_servers:
   agentmemory:
@@ -550,7 +550,7 @@ agentmemory girdisi, `mcpServers` şeklini kullanan her host'ta (Cursor, Claude 
 | **Gemini CLI** | `~/.gemini/settings.json` | `gemini mcp add agentmemory npx -y @agentmemory/mcp --scope user` (otomatik birleştirir). |
 | **OpenClaw** | OpenClaw MCP yapılandırması | Aynı `mcpServers` bloğu veya daha derin [bellek eklentisi](../integrations/openclaw/) kullanın. |
 | **Codex CLI (yalnız MCP)** | `.codex/config.toml` | TOML şekli: `codex mcp add agentmemory -- npx -y @agentmemory/mcp` veya manuel olarak `[mcp_servers.agentmemory]` ekleyin. |
-| **Codex CLI (tam eklenti)** | Codex eklenti marketplace | `codex plugin marketplace add rohitg00/agentmemory` ardından `codex plugin add agentmemory@agentmemory`. MCP + 6 yaşam döngüsü hook'u (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact, Stop) + 4 skill kaydeder. Codex Desktop'ta, [openai/codex#16430](https://github.com/openai/codex/issues/16430) inene kadar `agentmemory connect codex --with-hooks` da çalıştırın — eklenti hook'ları şu anda orada sessiz. |
+| **Codex CLI (tam eklenti)** | Codex eklenti marketplace | `codex plugin marketplace add rohitg00/agentmemory` ardından `codex plugin add agentmemory@agentmemory`. MCP + 6 yaşam döngüsü hook'u (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact, Stop) + 15 skill kaydeder. Codex Desktop'ta, [openai/codex#16430](https://github.com/openai/codex/issues/16430) inene kadar `agentmemory connect codex --with-hooks` da çalıştırın — eklenti hook'ları şu anda orada sessiz. |
 | **OpenCode (yalnız MCP)** | `opencode.json` | Farklı şekil — üst seviye `mcp` anahtarı, komut dizi olarak: `{"mcp": {"agentmemory": {"type": "local", "command": ["npx", "-y", "@agentmemory/mcp"], "enabled": true}}}`. |
 | **OpenCode (tam eklenti)** | `plugin/opencode/` | Oturum yaşam döngüsü, mesajlar, araçlar, hataları kapsayan 22 otomatik yakalama hook'u. İki slash komut (`/recall`, `/remember`). `plugin/opencode/`'u OpenCode çalışma alanınıza kopyalayın ve eklenti girdisini `opencode.json`'a ekleyin. Tam hook tablosu + gap analizi için [`plugin/opencode/README.md`](../plugin/opencode/README.md) bakın. |
 | **pi** | `~/.pi/agent/extensions/agentmemory` | [`integrations/pi`](../integrations/pi/)'yi kopyalayın ve pi'yi yeniden başlatın. |
@@ -840,11 +840,11 @@ npm install @xenova/transformers
 
 <h2 id="mcp-server"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-mcp.svg"><img src="../assets/tags/section-mcp.svg" alt="MCP Server" height="32" /></picture></h2>
 
-53 tool, 6 kaynak, 3 prompt ve 4 skill — herhangi bir ajan için en kapsamlı MCP bellek toolkit'i.
+74 tool, 6 kaynak, 3 prompt ve 15 skill — herhangi bir ajan için en kapsamlı MCP bellek toolkit'i.
 
-> **MCP shim vs tam sunucu:** yayımlanan `@agentmemory/mcp` paketi ince bir shim'dir. Tam 51-tool yüzeyini **yalnızca `AGENTMEMORY_URL` üzerinden çalışan bir agentmemory sunucusuna erişebildiğinde** açığa çıkarır (proxy modu). Erişilebilir sunucu yoksa, shim 7-tool yerel sete (`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`) düşer. `AGENTMEMORY_TOOLS=core|all` env değişkeni *sunucu tarafı* bir bayraktır — shim'in `env` bloğunda ayarlamak hiçbir etki yapmaz. Cursor / OpenCode / Gemini CLI'da yalnızca 7 tool görüyorsanız, `npx @agentmemory/agentmemory` (veya Docker stack'i) başlatın ve `AGENTMEMORY_URL=http://localhost:3111` ayarlayın.
+> **MCP shim vs tam sunucu:** yayımlanan `@agentmemory/mcp` paketi ince bir shim'dir. Tam 74-tool yüzeyini **yalnızca `AGENTMEMORY_URL` üzerinden çalışan bir agentmemory sunucusuna erişebildiğinde** açığa çıkarır (proxy modu). Erişilebilir sunucu yoksa, shim 7-tool yerel sete (`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`) düşer. `AGENTMEMORY_TOOLS=core|all` env değişkeni *sunucu tarafı* bir bayraktır — shim'in `env` bloğunda ayarlamak hiçbir etki yapmaz. Cursor / OpenCode / Gemini CLI'da yalnızca 7 tool görüyorsanız, `npx @agentmemory/agentmemory` (veya Docker stack'i) başlatın ve `AGENTMEMORY_URL=http://localhost:3111` ayarlayın.
 
-### 51 Tool
+### 74 Tool
 
 <details>
 <summary>Çekirdek tool'lar (her zaman kullanılabilir)</summary>
@@ -866,7 +866,7 @@ npm install @xenova/transformers
 </details>
 
 <details>
-<summary>Genişletilmiş tool'lar (51 toplam — AGENTMEMORY_TOOLS=all ayarla)</summary>
+<summary>Genişletilmiş tool'lar (74 toplam — AGENTMEMORY_TOOLS=all ayarla)</summary>
 
 | Tool | Açıklama |
 |------|-------------|
@@ -904,7 +904,7 @@ npm install @xenova/transformers
 
 </details>
 
-### 6 Kaynak · 3 Prompt · 4 Skill
+### 6 Kaynak · 3 Prompt · 15 Skill
 
 | Tür | İsim | Açıklama |
 |------|------|-------------|
@@ -1328,7 +1328,7 @@ CONSOLIDATION_ENABLED=true
 # USER_ID=
 # TEAM_MODE=private
 
-# Tool visibility: "core" (8 tools) or "all" (51 tools)
+# Tool visibility: "core" (8 tools) or "all" (74 tools)
 # AGENTMEMORY_TOOLS=core
 ```
 

@@ -630,6 +630,78 @@ describe("Export/Import Functions", () => {
     expect(oldSession).toBeNull();
   });
 
+  it("restores existing data and audits intent when replace delete fails mid-pass", async () => {
+    const baseKv = mockKV();
+    let failOnMemoryDelete = false;
+    const failingKv = {
+      ...baseKv,
+      delete: async (scope: string, key: string): Promise<void> => {
+        if (failOnMemoryDelete && scope === KV.memories) {
+          throw new Error("simulated KV delete failure");
+        }
+        return baseKv.delete(scope, key);
+      },
+    };
+    const failingSdk = mockSdk();
+    registerExportImportFunction(failingSdk as never, failingKv as never);
+
+    await baseKv.set(KV.sessions, "ses_1", testSession);
+    await baseKv.set(KV.observations("ses_1"), "obs_1", testObs);
+    await baseKv.set(KV.memories, "mem_1", testMemory);
+    await baseKv.set(KV.summaries, "ses_1", testSummary);
+
+    failOnMemoryDelete = true;
+
+    const newSession: Session = {
+      id: "ses_new",
+      project: "new-project",
+      cwd: "/tmp/new",
+      startedAt: "2026-03-01T00:00:00Z",
+      status: "active",
+      observationCount: 0,
+    };
+    const exportData: ExportData = {
+      version: "0.3.0",
+      exportedAt: new Date().toISOString(),
+      sessions: [newSession],
+      observations: {},
+      memories: [],
+      summaries: [],
+    };
+
+    const result = (await failingSdk.trigger("mem::import", {
+      exportData,
+      strategy: "replace",
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("existing data was restored");
+
+    // Sessions and observations were deleted before the memory delete threw;
+    // rollback must put everything back exactly as it was.
+    expect(await baseKv.get(KV.sessions, "ses_1")).toEqual(testSession);
+    expect(await baseKv.get(KV.observations("ses_1"), "obs_1")).toEqual(
+      testObs,
+    );
+    expect(await baseKv.get(KV.memories, "mem_1")).toEqual(testMemory);
+    expect(await baseKv.get(KV.summaries, "ses_1")).toEqual(testSummary);
+    // The new session must NOT have been written (import never reached writes).
+    expect(await baseKv.get(KV.sessions, "ses_new")).toBeNull();
+
+    // The destructive intent was audited before the delete pass began.
+    const audit = (await baseKv.list(KV.audit)) as Array<{
+      operation: string;
+      details?: { phase?: string };
+    }>;
+    expect(
+      audit.some(
+        (entry) =>
+          entry.operation === "import" &&
+          entry.details?.phase === "replace-pre-delete",
+      ),
+    ).toBe(true);
+  });
+
   it("export then import round-trip preserves data", async () => {
     const exported = (await sdk.trigger("mem::export", {})) as ExportData;
 
@@ -704,7 +776,10 @@ describe("Export/Import Functions", () => {
 
     expect(result.success).toBe(true);
     expect(result.agentEvents).toBe(1);
-    expect(result.skipped).toBe(2);
+    // `skipped` now counts only already-exists skips (item 17): quarantined
+    // events are reported separately under `quarantined` and are no longer
+    // double-counted as skipped.
+    expect(result.skipped).toBe(0);
     expect(result.quarantined).toBe(2);
     expect(result.quarantine.count).toBe(2);
     expect(result.quarantine.entries.map((entry) => entry.reason)).toEqual([

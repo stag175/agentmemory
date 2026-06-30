@@ -1186,6 +1186,7 @@
       ws: null
     };
 
+    // TEXT-CONTEXT ONLY: does not escape quotes. For double-quoted value="..." attributes use attr().
     function esc(s) {
       if (!s) return '';
       var d = document.createElement('div');
@@ -3741,7 +3742,7 @@
         html += '<option value="' + esc(opt) + '"' + ((state.trust.stateFilter || 'all') === opt ? ' selected' : '') + '>' + esc(opt) + '</option>';
       });
       html += '</select>';
-      html += '<input type="text" id="trust-project-filter" placeholder="Project filter" value="' + esc(state.trust.projectFilter) + '">';
+      html += '<input type="text" id="trust-project-filter" placeholder="Project filter" value="' + attr(state.trust.projectFilter) + '">';
       html += '<button class="btn" data-action="trust-apply-filters">Apply</button>';
       html += '<button class="btn" data-action="trust-refresh">Refresh</button>';
       html += '</div>';
@@ -3804,7 +3805,7 @@
       html += '<div class="trust-panel-head"><div class="trust-panel-title">Memory Used</div><div class="trust-panel-sub">/search/explain</div></div>';
       html += '<div class="trust-used-body">';
       html += '<div class="trust-used-form">';
-      html += '<input type="text" id="trust-explain-query" placeholder="Prompt / task" value="' + esc(state.trust.explainQuery) + '">';
+      html += '<input type="text" id="trust-explain-query" placeholder="Prompt / task" value="' + attr(state.trust.explainQuery) + '">';
       html += '<button class="btn btn-primary" data-action="trust-search-explain">Trace</button>';
       html += '</div>';
       if (state.trust.explainLoading) {

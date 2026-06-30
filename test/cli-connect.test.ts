@@ -12,6 +12,8 @@ import type { ConnectAdapter } from "../src/cli/connect/types.js";
 import {
   applyConnectRollbackPlan,
   buildConnectRollbackPlan,
+  buildLatestRollbackablePlan,
+  connectManifestRunsNewestFirst,
   markConnectRollbackResults,
   mergeConnectManifestEntries,
   readConnectManifest,
@@ -353,6 +355,94 @@ describe("agentmemory connect — rollback helpers", () => {
         action: "remove-created-target",
       },
     ]);
+  });
+
+  it("orders runs newest-first by timestamp (#item19 no-op fallback)", () => {
+    const manifest = mergeConnectManifestEntries(null, [
+      {
+        agent: "claude-code",
+        target: join("home", ".claude.json"),
+        timestamp: "2026-06-27T12:00:00.000Z",
+        runId: "older-run",
+        action: "updated",
+        rollback: "restore-backup",
+      },
+      {
+        agent: "cursor",
+        target: join("home", ".cursor", "mcp.json"),
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "newest-run",
+        action: "already-wired",
+        rollback: "none",
+      },
+    ]);
+
+    const runs = connectManifestRunsNewestFirst(manifest);
+    expect(runs).toHaveLength(2);
+    expect(runs[0]?.[0]?.runId).toBe("newest-run");
+    expect(runs[1]?.[0]?.runId).toBe("older-run");
+  });
+
+  it("falls back to the most recent run with rollbackable changes when latest is a no-op (#item19)", () => {
+    const home = join("home");
+    const olderTarget = join(home, ".claude.json");
+    const olderBackup = join(home, ".agentmemory", "backups", "claude.json");
+    const manifest = mergeConnectManifestEntries(null, [
+      // Older run actually changed a file (rollbackable).
+      {
+        agent: "claude-code",
+        target: olderTarget,
+        backupPath: olderBackup,
+        timestamp: "2026-06-27T12:00:00.000Z",
+        runId: "older-run",
+        action: "updated",
+        rollback: "restore-backup",
+      },
+      // Newest run is a pure no-op: already-wired, nothing to undo.
+      {
+        agent: "cursor",
+        target: join(home, ".cursor", "mcp.json"),
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "newest-run",
+        action: "already-wired",
+        rollback: "none",
+      },
+    ]);
+
+    // The latest-run plan is all skips.
+    const latest = buildConnectRollbackPlan(
+      manifest,
+      rollbackOptions(home, new Map([[olderBackup, "file"], [olderTarget, "file"]])),
+    );
+    expect(latest.every((item) => item.action === "skip")).toBe(true);
+
+    // The fallback planner reaches back to the older, rollbackable run.
+    const fallback = buildLatestRollbackablePlan(
+      manifest,
+      rollbackOptions(home, new Map([[olderBackup, "file"], [olderTarget, "file"]])),
+    );
+    expect(fallback).not.toBeNull();
+    expect(fallback!.some((item) => item.action === "restore")).toBe(true);
+    expect(fallback!.find((item) => item.action === "restore")?.runId).toBe(
+      "older-run",
+    );
+  });
+
+  it("returns null from the fallback planner when no run is rollbackable (#item19)", () => {
+    const home = join("home");
+    const manifest = mergeConnectManifestEntries(null, [
+      {
+        agent: "cursor",
+        target: join(home, ".cursor", "mcp.json"),
+        timestamp: "2026-06-28T12:00:00.000Z",
+        runId: "noop-run",
+        action: "already-wired",
+        rollback: "none",
+      },
+    ]);
+    expect(
+      buildLatestRollbackablePlan(manifest, rollbackOptions(home, new Map())),
+    ).toBeNull();
   });
 
   it("skips rollback restore targets outside the user home", () => {
@@ -904,5 +994,79 @@ describe("agentmemory connect — stub adapters log + return stub", () => {
     const { adapter } = await import("../src/cli/connect/pi.js");
     const result = await adapter.install({ dryRun: false, force: false });
     expect(result.kind).toBe("stub");
+  });
+});
+
+// Item 5 (curl|sh RCE) is enforced inside src/cli.ts, which is a top-level
+// executable script (it dispatches a command on import), so we can't import
+// it without side effects. Static source assertions are the established
+// pattern in this repo for cli.ts behaviors (see stop-worker-pidfile.test.ts).
+describe("agentmemory cli — install does not pipe a mutable remote script to sh (item 5)", () => {
+  const cliSrc = readFileSync("src/cli.ts", "utf-8");
+
+  it("never executes the mutable /main/ console install script", () => {
+    // The /main/ script is still PRINTED as a manual hint, but must never be
+    // fed to a shell via runCommand. The old code ran:
+    //   runCommand(shBin, ["-c", III_CONSOLE_INSTALL_CMD], ...)
+    expect(cliSrc).not.toMatch(/runCommand\([^)]*III_CONSOLE_INSTALL_CMD/);
+    expect(cliSrc).not.toMatch(/\[\s*"-c"\s*,\s*III_CONSOLE_INSTALL_CMD\s*\]/);
+    // Console install path prints the hint instead.
+    expect(cliSrc).toMatch(/iiiConsoleInstallHint\(\)/);
+  });
+
+  it("never pipes a remote curl stream into tar/sh for the engine download", () => {
+    // The old engine installer EXECUTED `curl -fsSL "${releaseUrl}" | tar -xz
+    // -C "${binDir}"` via runCommand(shBin, ["-c", installCmd]). That executed
+    // pipe-to-tar (into the managed binDir) must be gone. NOTE: the same
+    // curl|tar form still appears as a copy-paste MANUAL instruction the user
+    // reviews + runs themselves — that's allowed; only auto-execution is not.
+    expect(cliSrc).not.toMatch(/\|\s*tar -xz -C "\$\{binDir\}"/);
+    // The installer no longer constructs a shell `installCmd` to execute.
+    expect(cliSrc).not.toMatch(/const installCmd\s*=/);
+    // It also no longer resolves a shell/curl binary to run the install.
+    expect(cliSrc).not.toMatch(/whichBinary\("sh"\)/);
+  });
+
+  it("verifies a published SHA-256 before extracting the engine (gating)", () => {
+    expect(cliSrc).toMatch(/fetchIiiReleaseChecksum/);
+    expect(cliSrc).toMatch(/downloadAndVerifyIiiAsset/);
+    expect(cliSrc).toMatch(/createHash\("sha256"\)/);
+    // Refuse when no checksum is available.
+    expect(cliSrc).toMatch(/No published SHA-256 checksum/);
+    // .sha256 sidecar convention + env override.
+    expect(cliSrc).toMatch(/\.sha256/);
+    expect(cliSrc).toMatch(/AGENTMEMORY_III_SHA256/);
+    // Extraction reads the LOCAL verified file, not a remote stream.
+    expect(cliSrc).toMatch(/"-xzf",\s*verifiedTarball/);
+  });
+
+  it("gates non-interactive auto-install behind AGENTMEMORY_AUTO_INSTALL_ENGINE=1", () => {
+    expect(cliSrc).toMatch(/AGENTMEMORY_AUTO_INSTALL_ENGINE/);
+    expect(cliSrc).toMatch(/autoInstallEngineOptIn/);
+    // The non-interactive path refuses unless the opt-in is set.
+    expect(cliSrc).toMatch(
+      /!interactive\s*&&\s*!autoInstallEngineOptIn\(\)/,
+    );
+  });
+});
+
+describe("agentmemory cli — rollback safety (item 19)", () => {
+  const cliSrc = readFileSync("src/cli.ts", "utf-8");
+
+  it("requires interactive confirmation before applying a rollback", () => {
+    // Mirrors runRemove: a p.confirm gate that --force bypasses.
+    expect(cliSrc).toMatch(/Apply rollback to/);
+    expect(cliSrc).toMatch(/Cancelled\. No files changed\./);
+  });
+
+  it("restores JSON targets surgically instead of whole-file copy", () => {
+    expect(cliSrc).toMatch(/surgicalJsonRestore/);
+    // Deletes only the agentmemory entry, preserving other keys.
+    expect(cliSrc).toMatch(/delete nextWrapper\["agentmemory"\]/);
+    expect(cliSrc).toMatch(/other keys preserved/);
+  });
+
+  it("falls back to the most recent rollbackable run when latest is a no-op", () => {
+    expect(cliSrc).toMatch(/buildLatestRollbackablePlan/);
   });
 });

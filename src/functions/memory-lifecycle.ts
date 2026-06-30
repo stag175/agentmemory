@@ -193,6 +193,7 @@ type ProposalLike = {
   id: string;
   teamId?: string;
   project?: string;
+  agentId?: string;
   action?: string;
   status?: string;
   title?: string;
@@ -424,6 +425,11 @@ function normalizeLifecycleState(
   if (memory.lifecycleState) return memory.lifecycleState;
   if (memory.isLatest === false) return "superseded";
   return "active";
+}
+
+function isTerminalLifecycleState(memory: Memory): boolean {
+  const state = normalizeLifecycleState(memory);
+  return state === "tombstoned" || state === "deleted";
 }
 
 function timestampMs(value?: string): number | undefined {
@@ -839,7 +845,7 @@ function conceptInMemory(memory: Memory, concept: string): boolean {
 
 async function buildReviewQueue(
   kv: StateKV,
-  opts: { project?: string; limit: number },
+  opts: { project?: string; agentId?: string; limit: number },
 ): Promise<{ rows: ReviewQueueRow[]; total: number }> {
   const [memories, relations] = await Promise.all([
     kv.list<Memory>(KV.memories).catch(() => []),
@@ -849,6 +855,7 @@ async function buildReviewQueue(
   const rows: ReviewQueueRow[] = [];
   for (const memory of memories) {
     if (opts.project && memory.project !== opts.project) continue;
+    if (opts.agentId && memory.agentId !== opts.agentId) continue;
     const access = await getAccessLog(kv, memory.id);
     const reasons = reviewReasons(memory, access.count, nowMs, relations);
     if (!shouldIncludeReviewQueue(memory, reasons, nowMs)) continue;
@@ -881,6 +888,7 @@ function flattenProposalValues(values: unknown[]): ProposalLike[] {
         id,
         teamId: inputString(row.teamId),
         project: inputString(row.project),
+        agentId: inputString(row.agentId),
         action: inputString(row.action),
         status: inputString(row.status),
         title: inputString(row.title),
@@ -898,6 +906,7 @@ function summarizeProposal(proposal: ProposalLike): Record<string, unknown> {
     id: proposal.id,
     teamId: proposal.teamId,
     project: proposal.project,
+    agentId: proposal.agentId,
     action: proposal.action,
     status: proposal.status,
     title: proposal.title,
@@ -1496,6 +1505,9 @@ export function registerMemoryLifecycleFunctions(
       return withKeyedLock(`mem:memory:${data.memoryId}`, async () => {
         const existing = await kv.get<Memory>(KV.memories, data.memoryId);
         if (!existing) return { success: false, error: "memory not found" };
+        if (isTerminalLifecycleState(existing)) {
+          return { success: false, error: "memory is deleted; use restore" };
+        }
         if (data.content !== undefined && typeof data.content !== "string") {
           return { success: false, error: "content must be a string" };
         }
@@ -1508,8 +1520,15 @@ export function registerMemoryLifecycleFunctions(
         if (data.files !== undefined && !Array.isArray(data.files)) {
           return { success: false, error: "files must be an array" };
         }
-        const contentScan =
-          data.content !== undefined ? scanPrivateData(data.content) : undefined;
+        // An empty/whitespace-only content update is treated as "no content
+        // change" rather than wiping the row to "": clearing content is what
+        // tombstoning is for, and a blank update here would silently destroy
+        // the memory body while leaving it active and searchable.
+        const contentProvided =
+          typeof data.content === "string" && data.content.trim().length > 0;
+        const contentScan = contentProvided
+          ? scanPrivateData(data.content as string)
+          : undefined;
         const titleScan =
           data.title !== undefined ? scanPrivateData(data.title) : undefined;
         const conceptRedaction =
@@ -1593,7 +1612,7 @@ export function registerMemoryLifecycleFunctions(
           ...existing,
           updatedAt: now,
           title: titleScan?.redacted ?? data.title ?? existing.title,
-          content: contentScan?.redacted ?? data.content ?? existing.content,
+          content: contentScan?.redacted ?? existing.content,
           concepts: conceptRedaction?.values ?? existing.concepts,
           files: fileRedaction?.values ?? existing.files,
           strength:
@@ -1703,12 +1722,25 @@ export function registerMemoryLifecycleFunctions(
           existing,
           nowMs,
         );
+        // Never silently re-admit sensitive content on restore: a memory that
+        // was redacted/quarantined must come back quarantined (and pending
+        // review), not active. Re-scan the restored body as a defensive check
+        // so a snapshot that still carries a secret is caught even when the
+        // stored flag was lost.
+        const restoreScan = scanPrivateData(`${base.title} ${base.content}`);
+        const restoreQuarantined =
+          base.redactionApplied === true ||
+          base.lifecycleState === "quarantined" ||
+          restoreScan.redactionApplied;
         const restored: Memory = {
           ...base,
           updatedAt: now,
           restoredAt: now,
-          lifecycleState: "active",
-          reviewState: base.reviewState ?? "needs_review",
+          lifecycleState: restoreQuarantined ? "quarantined" : "active",
+          reviewState: restoreQuarantined
+            ? "needs_review"
+            : base.reviewState ?? "needs_review",
+          redactionApplied: restoreQuarantined ? true : base.redactionApplied,
           lane: base.lane ?? defaultMemoryLane(base.type),
           isLatest: true,
           forgetAfter: undefined,
@@ -1816,7 +1848,7 @@ export function registerMemoryLifecycleFunctions(
         scopedObservationRows(kv, window.value, scope),
         kv.list<Memory>(KV.memories).catch(() => []),
         kv.list<unknown>(KV.state).catch(() => []),
-        buildReviewQueue(kv, { project, limit: limit.value ?? 25 }),
+        buildReviewQueue(kv, { project, agentId, limit: limit.value ?? 25 }),
       ]);
       const reviewRows = reviewQueue.rows;
       const scopedMemories = memories
@@ -1858,6 +1890,10 @@ export function registerMemoryLifecycleFunctions(
       const proposedConsolidations = flattenProposalValues(stateValues)
         .filter((proposal) => proposal.status === "pending")
         .filter((proposal) => scopeMatchesProject(proposal.project, project))
+        // Agent isolation: a proposal explicitly stamped for another agent must
+        // not surface in this agent's inbox. Team-scoped proposals (no agentId)
+        // still pass so shared consolidation suggestions remain visible.
+        .filter((proposal) => !agentId || !proposal.agentId || proposal.agentId === agentId)
         .filter((proposal) =>
           timestampInWindow(proposal.proposedAt, window.value) ||
           timestampInWindow(proposal.updatedAt, window.value),
@@ -2104,14 +2140,29 @@ async function lifecycleStateChange(
   return withKeyedLock(`mem:memory:${data.memoryId}`, async () => {
     const existing = await kv.get<Memory>(KV.memories, data.memoryId);
     if (!existing) return { success: false, error: "memory not found" };
+    if (isTerminalLifecycleState(existing)) {
+      return { success: false, error: "memory is deleted; use restore" };
+    }
     const meta = redactLifecycleMetadata(data);
     if (meta.error) return { success: false, error: meta.error };
-    const now = new Date().toISOString();
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+    // A future expiry is a scheduled expiration, not an immediate one: keep the
+    // memory active (and searchable) until expiresAt, only stamping the validity
+    // window. Only flip to "expired" when expiresAt is absent or already due.
+    const expiresAtMs = timestampMs(meta.expiresAt);
+    const futureExpiry =
+      action === "expire" &&
+      expiresAtMs !== undefined &&
+      expiresAtMs > nowMs;
+    const effectiveState: MemoryLifecycleState = futureExpiry
+      ? existing.lifecycleState ?? "active"
+      : state;
     const updated: Memory = {
       ...existing,
       updatedAt: now,
-      lifecycleState: state,
-      isLatest: false,
+      lifecycleState: effectiveState,
+      isLatest: futureExpiry ? existing.isLatest : false,
       ...(state === "expired" && {
         forgetAfter: meta.expiresAt ?? now,
         validUntil: meta.expiresAt ?? now,
@@ -2126,7 +2177,7 @@ async function lifecycleStateChange(
     await safeAudit(kv, "memory_lifecycle", `mem::memory-${action}`, [updated.id], {
       action,
       reason: meta.reason,
-      state,
+      state: effectiveState,
     });
     await safeRecordAgentEvent(kv, {
       type: action === "expire" ? "memory_expired" : "memory_archived",
@@ -2139,7 +2190,7 @@ async function lifecycleStateChange(
       metadata: {
         actor: meta.actor,
         reason: meta.reason,
-        lifecycleState: state,
+        lifecycleState: effectiveState,
         expiresAt: meta.expiresAt,
       },
     });

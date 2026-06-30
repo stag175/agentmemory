@@ -1,7 +1,14 @@
-import type { AuditEntry } from "../types.js";
+import type { AuditChainHead, AuditEntry } from "../types.js";
 import { KV, generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
+import { withKeyedLock } from "../state/keyed-mutex.js";
 import { logger } from "../logger.js";
+import {
+  AUDIT_CHAIN_GENESIS_HASH,
+  AUDIT_CHAIN_HEAD_KEY,
+  computeAuditChainHash,
+  computeAuditEntryHash,
+} from "./audit-integrity.js";
 
 // Audit coverage policy (issue #125).
 //
@@ -40,18 +47,49 @@ export async function recordAudit(
   qualityScore?: number,
   userId?: string,
 ): Promise<AuditEntry> {
-  const entry: AuditEntry = {
-    id: generateId("aud"),
-    timestamp: new Date().toISOString(),
-    operation,
-    userId,
-    functionId,
-    targetIds,
-    details,
-    qualityScore,
-  };
-  await kv.set(KV.audit, entry.id, entry);
-  return entry;
+  const now = new Date().toISOString();
+  // Serialize the head read/write so seq stays strictly monotonic and the
+  // persisted chainHash links every append to the prior head. Without the
+  // lock two concurrent appends could read the same prior head and produce
+  // a duplicate seq / forked chain.
+  return withKeyedLock(KV.auditChainHead, async () => {
+    const head = await kv.get<AuditChainHead>(
+      KV.auditChainHead,
+      AUDIT_CHAIN_HEAD_KEY,
+    );
+    const prevSeq = head?.seq ?? 0;
+    const prevChainHash = head?.chainHash ?? AUDIT_CHAIN_GENESIS_HASH;
+    const seq = prevSeq + 1;
+
+    const entry: AuditEntry = {
+      id: generateId("aud"),
+      timestamp: now,
+      operation,
+      userId,
+      functionId,
+      targetIds,
+      details,
+      qualityScore,
+      seq,
+    };
+    // entryHash covers the entry content (seq included, chainHash excluded);
+    // chainHash links it to the prior head. Both are persisted on the row.
+    const entryHash = computeAuditEntryHash(entry);
+    const chainHash = computeAuditChainHash(prevChainHash, entryHash, seq);
+    entry.chainHash = chainHash;
+
+    await kv.set(KV.audit, entry.id, entry);
+    const nextHead: AuditChainHead = {
+      seq,
+      chainHash,
+      entryId: entry.id,
+      entryHash,
+      count: (head?.count ?? 0) + 1,
+      updatedAt: now,
+    };
+    await kv.set(KV.auditChainHead, AUDIT_CHAIN_HEAD_KEY, nextHead);
+    return entry;
+  });
 }
 
 export async function safeAudit(

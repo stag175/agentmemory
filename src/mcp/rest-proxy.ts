@@ -15,6 +15,26 @@ function forceProxy(): boolean {
   return raw === "1" || raw === "true";
 }
 
+/**
+ * Thrown by {@link ProxyHandle.call} when the server answers with a non-2xx
+ * status. Carries the parsed HTTP status and body so callers can distinguish a
+ * business rejection (4xx) — which must NOT trigger a silent local-KV mutation
+ * — from a transient network/timeout/5xx failure that local fallback can
+ * legitimately absorb. Network/timeout failures surface as the underlying
+ * (non-{@link ProxyHttpError}) error instead.
+ */
+export class ProxyHttpError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(message: string, status: number, body: unknown) {
+    super(message);
+    this.name = "ProxyHttpError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
 export interface ProxyHandle {
   mode: "proxy";
   baseUrl: string;
@@ -147,8 +167,19 @@ export async function resolveHandle(): Promise<Handle> {
             signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
           });
           if (!res.ok) {
-            throw new Error(
+            const errText = await res.text();
+            let parsed: unknown = errText || undefined;
+            if (errText) {
+              try {
+                parsed = JSON.parse(errText);
+              } catch {
+                parsed = errText;
+              }
+            }
+            throw new ProxyHttpError(
               `${init?.method || "GET"} ${path} -> ${res.status} ${res.statusText}`,
+              res.status,
+              parsed,
             );
           }
           const text = await res.text();

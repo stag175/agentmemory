@@ -154,6 +154,19 @@ export function isMemorySearchable(memory: Memory): boolean {
   ) {
     return false;
   }
+  // Close the write-gate fail-open: memories the gate flagged
+  // ("needs_review") or a reviewer rejected ("rejected") must not be
+  // BM25/vector-recalled until a human/lifecycle pass clears them. The
+  // gate runs in advisory "review" mode by default, but advisory must
+  // still mean "not yet trusted for recall" — otherwise a flagged
+  // near-duplicate or low-quality write is recalled exactly like a
+  // passing one, which is the fail-open admission bug. Clearing review
+  // (reviewState -> reviewed/trusted/unreviewed) re-admits the memory on
+  // the next reindex, consistent across rebuild, candidate scoping,
+  // enrichment fallback, and lifecycle reindex.
+  if (memory.reviewState === "needs_review" || memory.reviewState === "rejected") {
+    return false;
+  }
   if (memory.forgetAfter) {
     const expires = timestampMs(memory.forgetAfter);
     if (expires !== undefined && expires <= Date.now()) return false;

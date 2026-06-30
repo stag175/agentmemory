@@ -60,7 +60,10 @@ const ORIGINAL_AGENT_SCOPE = process.env["AGENTMEMORY_AGENT_SCOPE"];
 describe("Tools Registry", () => {
   it("getAllTools returns all tools with unique names", () => {
     const tools = getAllTools();
-    expect(tools.length).toBeGreaterThanOrEqual(41);
+    // 74 after the governance/control-plane + proposal tools were wired in
+    // (was 65). Asserted exactly so a missing/duplicate registry entry fails
+    // loudly instead of silently drifting from the dispatch switch.
+    expect(tools.length).toBe(74);
     const names = new Set(tools.map((t) => t.name));
     expect(names.size).toBe(tools.length);
     for (const required of [
@@ -71,6 +74,17 @@ describe("Tools Registry", () => {
       "memory_save",
       "memory_create",
       "memory_recall",
+      // Governance / control-plane surfaces (item 1, 3, 6, 11).
+      "memory_audit_chain",
+      "memory_audit_chain_verify",
+      "memory_sync_peer_set_status",
+      "memory_agent_event_prune",
+      // Team memory proposal queue (item 2).
+      "memory_proposal_create",
+      "memory_proposal_list",
+      "memory_proposal_approve",
+      "memory_proposal_reject",
+      "memory_proposal_apply",
     ]) {
       expect(tools.some((t) => t.name === required)).toBe(true);
     }

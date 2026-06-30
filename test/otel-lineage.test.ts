@@ -113,6 +113,67 @@ describe("otel lineage export/import foundation", () => {
     });
   });
 
+  it("strips nested raw-payload keys from exported metadata", async () => {
+    const traceId = "0123456789abcdef0123456789abcdef";
+    const nestedPrompt = "nested prompt body that must never leave agentmemory";
+    const nestedContent = "nested message content that must never leave agentmemory";
+    const event: AgentEvent = {
+      id: "agevt_nested",
+      timestamp: "2026-06-28T10:00:00Z",
+      type: "tool_completed",
+      traceId,
+      nativeId: "3333333333333333",
+      project: "billing",
+      sessionId: "ses_1",
+      agentId: "codex",
+      functionId: "tool::Read",
+      status: "ok",
+      targetIds: ["tool_1"],
+      metadata: {
+        context: {
+          prompt: nestedPrompt,
+          label: "safe nested label",
+          inner: {
+            message: nestedContent,
+            note: "deep safe note",
+          },
+        },
+        items: [{ content: "array-nested content leak", keep: "array safe value" }],
+        safe: "top-level safe value",
+      },
+    };
+    await kv.set(KV.agentEvents, event.id, event);
+
+    const result = (await sdk.trigger("mem::otel-lineage-export", {
+      project: "billing",
+    })) as OtelLineageExportResult;
+
+    expect(result.success).toBe(true);
+    expect(result.spans).toHaveLength(1);
+    const span = result.spans[0];
+    const spanJson = JSON.stringify(span);
+
+    expect(spanJson).not.toContain(nestedPrompt);
+    expect(spanJson).not.toContain(nestedContent);
+    expect(spanJson).not.toContain("array-nested content leak");
+
+    const contextAttr = span.attributes["agentmemory.metadata.context"];
+    expect(typeof contextAttr).toBe("string");
+    const context = JSON.parse(contextAttr as string) as Record<string, unknown>;
+    expect(context).not.toHaveProperty("prompt");
+    expect(context.label).toBe("safe nested label");
+    expect((context.inner as Record<string, unknown>)).not.toHaveProperty("message");
+    expect((context.inner as Record<string, unknown>).note).toBe("deep safe note");
+
+    const itemsAttr = span.attributes["agentmemory.metadata.items"];
+    expect(typeof itemsAttr).toBe("string");
+    const items = JSON.parse(itemsAttr as string) as Array<Record<string, unknown>>;
+    expect(items[0]).not.toHaveProperty("content");
+    expect(items[0].keep).toBe("array safe value");
+
+    expect(span.attributes["agentmemory.metadata.safe"]).toBe("top-level safe value");
+  });
+
   it("imports sanitized spans into staging while preserving ids, hashes, and provenance", async () => {
     const event: AgentEvent = {
       id: "agevt_external",

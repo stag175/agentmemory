@@ -3,10 +3,37 @@ export type McpToolDef = {
   description: string;
   inputSchema: {
     type: "object";
-    properties: Record<string, { type: string; description: string }>;
+    properties: Record<
+      string,
+      {
+        type: string;
+        description: string;
+        // Optional JSON-schema enum constraint so MCP clients can surface the
+        // allowed values for tiered/scoped fields (memoryTier, privacyScope).
+        enum?: readonly string[];
+      }
+    >;
     required?: string[];
   };
 };
+
+// Single source of truth for the smart-search tier/scope enums so the
+// memory_smart_search and memory_search_explain schemas stay in lockstep with
+// the mem::smart-search validator.
+export const MEMORY_TIER_ENUM = [
+  "episode",
+  "semantic_fact",
+  "procedure",
+  "reflection",
+  "artifact_index",
+] as const;
+export const PRIVACY_SCOPE_ENUM = [
+  "user",
+  "project",
+  "team",
+  "agent",
+  "temporary",
+] as const;
 
 export const CORE_TOOLS: McpToolDef[] = [
   {
@@ -139,8 +166,8 @@ export const CORE_TOOLS: McpToolDef[] = [
         filePath: { type: "string", description: "Single file path filter alias" },
         branch: { type: "string", description: "Branch metadata filter" },
         commit: { type: "string", description: "Commit metadata filter" },
-        memoryTier: { type: "string", description: "episode, semantic_fact, procedure, reflection, or artifact_index" },
-        privacyScope: { type: "string", description: "user, project, team, agent, or temporary" },
+        memoryTier: { type: "string", enum: MEMORY_TIER_ENUM, description: "episode, semantic_fact, procedure, reflection, or artifact_index" },
+        privacyScope: { type: "string", enum: PRIVACY_SCOPE_ENUM, description: "user, project, team, agent, or temporary" },
         asOf: { type: "string", description: "ISO timestamp for temporal/as_of replay filters" },
         validAt: { type: "string", description: "ISO timestamp alias for temporal validity filtering" },
         agentId: { type: "string", description: "Agent scope filter; pass * to opt out when supported" },
@@ -1025,8 +1052,8 @@ export const ROADMAP_TOOLS: McpToolDef[] = [
         filePath: { type: "string", description: "Single file path filter alias" },
         branch: { type: "string", description: "Branch metadata filter" },
         commit: { type: "string", description: "Commit metadata filter" },
-        memoryTier: { type: "string", description: "episode, semantic_fact, procedure, reflection, or artifact_index" },
-        privacyScope: { type: "string", description: "user, project, team, agent, or temporary" },
+        memoryTier: { type: "string", enum: MEMORY_TIER_ENUM, description: "episode, semantic_fact, procedure, reflection, or artifact_index" },
+        privacyScope: { type: "string", enum: PRIVACY_SCOPE_ENUM, description: "user, project, team, agent, or temporary" },
         asOf: { type: "string", description: "ISO timestamp for temporal/as_of replay filters" },
         validAt: { type: "string", description: "ISO timestamp alias for temporal validity filtering" },
         agentId: { type: "string", description: "Agent scope filter; pass * to opt out when supported" },
@@ -1066,7 +1093,7 @@ export const ROADMAP_TOOLS: McpToolDef[] = [
         type: { type: "string", description: "Memory type filter" },
         lane: { type: "string", description: "Memory lane filter" },
         reviewState: { type: "string", description: "Review state filter" },
-        includeSourceCards: { type: "string", description: "Set to true to include source cards" },
+        includeSourceCards: { type: "boolean", description: "Set true to include source cards" },
         limit: { type: "number", description: "Max rows (default 100)" },
         offset: { type: "number", description: "Pagination offset" },
       },
@@ -1158,6 +1185,169 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
   },
 ];
 
+// Governance / control-plane surfaces (audit hash chain, sync peer status,
+// agent-event retention). These mirror REST/iii functions added in the
+// roadmap waves. They are intentionally kept OUT of the lean ESSENTIAL_TOOLS
+// core set — they are operator/governance tools, not day-to-day recall.
+export const GOVERNANCE_TOOLS: McpToolDef[] = [
+  {
+    name: "memory_audit_chain",
+    description:
+      "Build the tamper-evident audit hash chain over recorded audit entries. Returns the recomputed head hash, the persisted head pointer, per-link hashes (optional), and any row integrity issues.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        offset: { type: "number", description: "Pagination offset into the filtered chain (default 0)" },
+        limit: { type: "number", description: "Max links to return in the window (default 1000, max 10000)" },
+        includeLinks: { type: "boolean", description: "Include the per-link hash chain in the response (default true)" },
+        operation: { type: "string", description: "Filter to a single audit operation" },
+        functionId: { type: "string", description: "Filter to a single function id" },
+        dateFrom: { type: "string", description: "ISO date lower bound (inclusive)" },
+        dateTo: { type: "string", description: "ISO date upper bound (inclusive)" },
+      },
+    },
+  },
+  {
+    name: "memory_audit_chain_verify",
+    description:
+      "Verify the audit hash chain against caller-supplied or persisted anchors (expected head hash, count, first/last entry id, or a provided chain). Returns valid plus the exact mismatches and which integrity properties were checked.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        offset: { type: "number", description: "Pagination offset into the filtered chain (default 0)" },
+        limit: { type: "number", description: "Max links per window (default 1000, max 10000)" },
+        includeLinks: { type: "boolean", description: "Include the recomputed link chain in the response (default false)" },
+        operation: { type: "string", description: "Filter to a single audit operation" },
+        functionId: { type: "string", description: "Filter to a single function id" },
+        dateFrom: { type: "string", description: "ISO date lower bound (inclusive)" },
+        dateTo: { type: "string", description: "ISO date upper bound (inclusive)" },
+        expectedHeadHash: { type: "string", description: "SHA-256 hex digest the recomputed head must equal" },
+        expectedCount: { type: "number", description: "Audit entry count the chain must equal" },
+        expectedFirstEntryId: { type: "string", description: "Entry id the first link must equal" },
+        expectedLastEntryId: { type: "string", description: "Entry id the last link must equal" },
+        allowUnanchored: { type: "boolean", description: "Compute the chain without an external/persisted anchor (no integrity proof)" },
+      },
+    },
+  },
+  {
+    name: "memory_sync_peer_set_status",
+    description:
+      "Enable or disable a registered sync peer. Recomputes peer health from config alone, clearing run-derived block reasons so a peer an untrusted run marked blocked can recover.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        peerId: { type: "string", description: "Registered sync peer id" },
+        enabled: { type: "boolean", description: "true to enable the peer, false to disable (default true)" },
+      },
+      required: ["peerId"],
+    },
+  },
+  {
+    name: "memory_agent_event_prune",
+    description:
+      "Prune the agent event log by age and/or count in bounded batches. Returns how many events were removed (or would be removed in dry-run mode) split by age and count reasons.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        maxAgeDays: { type: "number", description: "Remove events older than this many days (0 disables the age rule)" },
+        maxCount: { type: "number", description: "Keep at most this many newest events (0 disables the count rule)" },
+        batch: { type: "number", description: "Max events removed per invocation (bounded by the retention batch cap)" },
+        dryRun: { type: "boolean", description: "Report prune candidates without deleting" },
+      },
+    },
+  },
+];
+
+// Team memory proposal queue. Authorization is resolved SERVER-SIDE in the
+// MCP dispatch (see src/mcp/server.ts): the trusted operator permission set is
+// attached as data.principal. actorId is an identity label only; callers never
+// supply permissions/roles. Operator/governance tools — kept out of the core
+// set.
+export const MEMORY_PROPOSAL_TOOLS: McpToolDef[] = [
+  {
+    name: "memory_proposal_create",
+    description:
+      "Propose a memory lifecycle change (create/update/expire/archive/restore/delete) for team review instead of applying it directly. Requires project:write.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        teamId: { type: "string", description: "Team scope for the proposal queue (default local)" },
+        project: { type: "string", description: "Project the proposal targets" },
+        action: { type: "string", enum: ["create", "update", "expire", "archive", "restore", "delete"], description: "Lifecycle action to propose" },
+        title: { type: "string", description: "Short proposal title" },
+        reason: { type: "string", description: "Why the change is proposed" },
+        change: { type: "object", description: "The whitelisted change payload for the chosen action" },
+        provenance: { type: "object", description: "Optional provenance metadata to attach" },
+        actorId: { type: "string", description: "Identity label for audit/separation-of-duties (server resolves permissions)" },
+      },
+      required: ["action", "change"],
+    },
+  },
+  {
+    name: "memory_proposal_list",
+    description:
+      "List team memory proposals with optional project/action/status/target filters and pagination. Requires project:read.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        teamId: { type: "string", description: "Team scope (default local)" },
+        project: { type: "string", description: "Filter by project" },
+        action: { type: "string", enum: ["create", "update", "expire", "archive", "restore", "delete"], description: "Filter by action" },
+        status: { type: "string", enum: ["pending", "approved", "rejected", "applied"], description: "Filter by status" },
+        targetMemoryId: { type: "string", description: "Filter to proposals targeting one memory" },
+        limit: { type: "number", description: "Max rows (default 50, max 200)" },
+        offset: { type: "number", description: "Pagination offset" },
+        actorId: { type: "string", description: "Identity label for audit (server resolves permissions)" },
+      },
+    },
+  },
+  {
+    name: "memory_proposal_approve",
+    description:
+      "Approve a pending proposal. Requires the proposal's required permissions; self-approval is blocked unless the deployment opts in via AGENTMEMORY_ALLOW_SELF_APPROVAL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        teamId: { type: "string", description: "Team scope (default local)" },
+        proposalId: { type: "string", description: "Proposal id to approve" },
+        reason: { type: "string", description: "Review note" },
+        actorId: { type: "string", description: "Reviewer identity label for audit/separation-of-duties" },
+      },
+      required: ["proposalId"],
+    },
+  },
+  {
+    name: "memory_proposal_reject",
+    description:
+      "Reject a pending proposal. Requires the same governance the proposal needs so a non-governance actor cannot veto a governance-gated delete.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        teamId: { type: "string", description: "Team scope (default local)" },
+        proposalId: { type: "string", description: "Proposal id to reject" },
+        reason: { type: "string", description: "Review note" },
+        actorId: { type: "string", description: "Reviewer identity label for audit" },
+      },
+      required: ["proposalId"],
+    },
+  },
+  {
+    name: "memory_proposal_apply",
+    description:
+      "Apply an approved proposal by invoking the underlying lifecycle function and recording the application in the audit trail.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        teamId: { type: "string", description: "Team scope (default local)" },
+        proposalId: { type: "string", description: "Approved proposal id to apply" },
+        reason: { type: "string", description: "Apply note" },
+        actorId: { type: "string", description: "Applier identity label for audit" },
+      },
+      required: ["proposalId"],
+    },
+  },
+];
+
 export const ESSENTIAL_TOOLS = new Set([
   "memory_save",
   "memory_recall",
@@ -1180,6 +1370,8 @@ export function getAllTools(): McpToolDef[] {
     ...V073_TOOLS,
     ...ROADMAP_TOOLS,
     ...V010_SLOTS_TOOLS,
+    ...GOVERNANCE_TOOLS,
+    ...MEMORY_PROPOSAL_TOOLS,
   ];
 }
 

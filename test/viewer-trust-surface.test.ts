@@ -83,4 +83,109 @@ describe("viewer Trust surface", () => {
     expect(viewer).toContain("runTrustProposalAction('apply'");
     expect(viewer).toContain("Apply this approved memory proposal?");
   });
+
+  it("renders the trust-filter inputs through attr(), not the text-only esc()", () => {
+    expect(viewer).toContain(
+      "id=\"trust-project-filter\" placeholder=\"Project filter\" value=\"' + attr(state.trust.projectFilter) + '\"",
+    );
+    expect(viewer).toContain(
+      "id=\"trust-explain-query\" placeholder=\"Prompt / task\" value=\"' + attr(state.trust.explainQuery) + '\"",
+    );
+    expect(viewer).not.toContain("value=\"' + esc(state.trust.projectFilter) + '\"");
+    expect(viewer).not.toContain("value=\"' + esc(state.trust.explainQuery) + '\"");
+    // esc() must be documented as text-context-only so quotes-in-attributes mistakes are not repeated.
+    expect(viewer).toContain("TEXT-CONTEXT ONLY");
+  });
+
+  it("attr() encodes the double quotes that esc() leaves intact", () => {
+    const escSource = extractFunctionBody(viewer, "esc");
+    const attrSource = extractFunctionBody(viewer, "attr");
+    // esc() leans on document/createElement; provide a minimal text-context shim that mirrors it.
+    const esc = (s: string) =>
+      s ? String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : "";
+    const attr = new Function(`${attrSource}\nreturn attr;`)() as (s: string) => string;
+
+    const hostile = 'p" onmouseover="alert(1)';
+    // The latent self-XSS: esc() never escapes the closing quote, so it breaks out of value="...".
+    expect(esc(hostile)).toContain('"');
+    // attr() neutralizes the quote (and the apostrophe) so the value attribute cannot be escaped.
+    expect(attr(hostile)).not.toContain('"');
+    expect(attr(hostile)).toContain("&quot;");
+    expect(attr("a'b")).toContain("&#39;");
+    expect(attr("a&b<c>")).toBe("a&amp;b&lt;c&gt;");
+    // Sanity: the shipped esc() really is the quote-blind text-context helper documented above.
+    expect(escSource).toContain("textContent");
+  });
 });
+
+describe("notification hook redaction", () => {
+  const bundle = readFileSync("plugin/scripts/notification.mjs", "utf-8");
+
+  it("routes permission-prompt title and message through safeString before sending", () => {
+    expect(bundle).toContain("title: safeString(data.title)");
+    expect(bundle).toContain("message: safeString(data.message)");
+    expect(bundle).not.toContain("title: data.title");
+    expect(bundle).not.toContain("message: data.message");
+  });
+
+  it("safeString actually redacts secrets in transit", () => {
+    const safeString = loadBundleHelper(bundle, ["SECRET_VALUE_PATTERNS", "redactString", "safeString"]) as (
+      value: unknown,
+      max?: number,
+    ) => string | undefined;
+
+    expect(safeString("ghp_" + "a".repeat(30))).toBe("[redacted]");
+    expect(safeString("Authorization: Bearer " + "x".repeat(40))).toContain("[redacted]");
+    expect(safeString("token=" + "y".repeat(24))).toBe("token=[redacted]");
+    expect(safeString("approve git push to origin?")).toBe("approve git push to origin?");
+    expect(safeString("")).toBeUndefined();
+    expect(safeString(undefined)).toBeUndefined();
+  });
+});
+
+function loadBundleHelper(source: string, names: string[]): unknown {
+  const decls = names
+    .map((name) => {
+      if (name === "SECRET_VALUE_PATTERNS") return extractConst(source, name);
+      return extractFunctionBody(source, name);
+    })
+    .join("\n");
+  const last = names[names.length - 1];
+  return new Function(`${decls}\nreturn ${last};`)();
+}
+
+function extractConst(source: string, name: string): string {
+  const start = source.indexOf(`const ${name} = [`);
+  if (start === -1) throw new Error(`const ${name} not found`);
+  let depth = 0;
+  let seenBracket = false;
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === "[") {
+      depth++;
+      seenBracket = true;
+    } else if (ch === "]") {
+      depth--;
+      if (seenBracket && depth === 0) return source.slice(start, i + 1) + ";";
+    }
+  }
+  throw new Error(`const ${name} not balanced`);
+}
+
+function extractFunctionBody(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  if (start === -1) throw new Error(`function ${name} not found`);
+  let depth = 0;
+  let seenBrace = false;
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === "{") {
+      depth++;
+      seenBrace = true;
+    } else if (ch === "}") {
+      depth--;
+      if (seenBrace && depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error(`function ${name} body not balanced`);
+}

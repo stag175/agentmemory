@@ -26,6 +26,15 @@ function findGitAncestor(dir) {
 	}
 }
 
+function resolveProject(cwd) {
+	const explicit = process.env["AGENTMEMORY_PROJECT_NAME"];
+	if (explicit && explicit.trim()) return explicit.trim();
+	const dir = cwd && cwd.trim() ? cwd : process.cwd();
+	const ancestor = findGitAncestor(dir);
+	if (ancestor) return basename(ancestor);
+	return basename(dir);
+}
+
 const SECRET_KEY_RE = /(?:^|[_-])(?:authorization|auth|cookie|secret|token|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|refresh[_-]?token|session[_-]?token)(?:$|[_-])/i;
 const SECRET_VALUE_PATTERNS = [
 	/\bgh[opsu]_[A-Za-z0-9_]{20,}\b/g,
@@ -35,15 +44,6 @@ const SECRET_VALUE_PATTERNS = [
 	/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/gi,
 	/-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----/g
 ];
-
-function resolveProjectName(cwd) {
-	const explicit = process.env["AGENTMEMORY_PROJECT_NAME"];
-	if (explicit && explicit.trim()) return explicit.trim();
-	const dir = cwd && cwd.trim() ? cwd : process.cwd();
-	const ancestor = findGitAncestor(dir);
-	if (ancestor) return basename(ancestor);
-	return basename(dir);
-}
 
 export function redactString(value) {
 	let redacted = value;
@@ -127,25 +127,23 @@ function detectFramework(data) {
 }
 
 export function buildLineage(data, hookType, overrides = {}) {
-	const record = data && typeof data === "object" && !Array.isArray(data) ? data : {};
-	const rawCwd = typeof overrides.cwd === "string" ? overrides.cwd : typeof record.cwd === "string" ? record.cwd : process.env["AGENTMEMORY_CWD"] || process.cwd();
-	const cwd = safeString(rawCwd, 1024) || process.cwd();
-	const sessionId = safeString(overrides.sessionId) || firstString(record.session_id, record.sessionId, process.env["AGENTMEMORY_SESSION_ID"]) || "unknown";
-	const project = safeString(overrides.project) || firstString(record.project) || resolveProjectName(cwd);
+	const rawCwd = safeString(overrides.cwd, 1024) ?? safeString(data.cwd, 1024) ?? process.env["AGENTMEMORY_CWD"] ?? process.cwd();
+	const sessionId = safeString(overrides.sessionId) ?? firstString(data.session_id, data.sessionId, process.env["AGENTMEMORY_SESSION_ID"]) ?? "unknown";
+	const project = safeString(overrides.project) ?? firstString(data.project) ?? resolveProject(rawCwd);
 	return compactObject({
 		sessionId,
 		project,
-		cwd,
-		agentId: safeString(overrides.agentId) || firstString(record.agent_id, record.agentId, record.agentName, record.teammate_name, process.env["AGENTMEMORY_AGENT_ID"], process.env["AGENT_ID"]),
-		framework: safeString(overrides.framework) || detectFramework(record),
-		nativeId: safeString(overrides.nativeId) || firstString(record.native_id, record.nativeId, record.agent_native_id, record.agentNativeId, record.conversation_id, record.conversationId, record.thread_id, record.threadId),
-		traceId: safeString(overrides.traceId) || firstString(record.trace_id, record.traceId, record.request_id, record.requestId),
-		runId: safeString(overrides.runId) || firstString(record.run_id, record.runId),
-		teamId: safeString(overrides.teamId) || firstString(record.team_id, record.teamId, record.team_name, record.teamName),
-		taskId: safeString(overrides.taskId) || firstString(record.task_id, record.taskId),
-		toolCallId: safeString(overrides.toolCallId) || firstString(record.tool_call_id, record.toolCallId, record.call_id, record.callId),
-		parentEventId: safeString(overrides.parentEventId) || firstString(record.parent_event_id, record.parentEventId),
-		correlationId: safeString(overrides.correlationId) || firstString(record.correlation_id, record.correlationId),
+		cwd: rawCwd,
+		agentId: safeString(overrides.agentId) ?? firstString(data.agent_id, data.agentId, data.agentName, data.teammate_name, process.env["AGENTMEMORY_AGENT_ID"], process.env["AGENT_ID"]),
+		framework: safeString(overrides.framework) ?? detectFramework(data),
+		nativeId: safeString(overrides.nativeId) ?? firstString(data.native_id, data.nativeId, data.agent_native_id, data.agentNativeId, data.conversation_id, data.conversationId, data.thread_id, data.threadId),
+		traceId: safeString(overrides.traceId) ?? firstString(data.trace_id, data.traceId, data.request_id, data.requestId),
+		runId: safeString(overrides.runId) ?? firstString(data.run_id, data.runId),
+		teamId: safeString(overrides.teamId) ?? firstString(data.team_id, data.teamId, data.team_name, data.teamName),
+		taskId: safeString(overrides.taskId) ?? firstString(data.task_id, data.taskId),
+		toolCallId: safeString(overrides.toolCallId) ?? firstString(data.tool_call_id, data.toolCallId, data.call_id, data.callId),
+		parentEventId: safeString(overrides.parentEventId) ?? firstString(data.parent_event_id, data.parentEventId),
+		correlationId: safeString(overrides.correlationId) ?? firstString(data.correlation_id, data.correlationId),
 		hookType
 	});
 }
@@ -179,9 +177,17 @@ export function targetIdsFor(...values) {
 }
 
 export function sendAgentEvent(restUrl, headers, event, timeoutMs = 1200) {
+	const safeEventMetadata = event.metadata === void 0 ? void 0 : safeMetadata(event.metadata);
+	const metadata = safeEventMetadata && typeof safeEventMetadata === "object" && !Array.isArray(safeEventMetadata) ? {
+		captureSource: "automatic_hook",
+		...safeEventMetadata
+	} : {
+		captureSource: "automatic_hook",
+		value: safeEventMetadata
+	};
 	const body = compactObject({
 		...event,
-		metadata: event.metadata === void 0 ? void 0 : safeMetadata(event.metadata)
+		metadata
 	});
 	fetch(`${restUrl}/agentmemory/agent-events`, {
 		method: "POST",

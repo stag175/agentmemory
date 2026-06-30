@@ -58,7 +58,7 @@
 <p align="center">
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-recall.svg"><img src="../assets/tags/stat-recall.svg" alt="95.2% retrieval R@5" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tokens.svg"><img src="../assets/tags/stat-tokens.svg" alt="92% fewer tokens" height="38" /></picture>
-  <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tools.svg"><img src="../assets/tags/stat-tools.svg" alt="53 MCP tools" height="38" /></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tools.svg"><img src="../assets/tags/stat-tools.svg" alt="74 MCP tools" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-hooks.svg"><img src="../assets/tags/stat-hooks.svg" alt="12 auto hooks" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-deps.svg"><img src="../assets/tags/stat-deps.svg" alt="0 external DBs" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/stat-tests.svg"><img src="../assets/tags/stat-tests.svg" alt="950+ tests passing" height="38" /></picture>
@@ -429,7 +429,7 @@ Los detalles de implementación están en `src/cli.ts` (ver `runUpgrade` en torn
 ### Claude Code (un bloque, pégalo)
 
 ```text
-Install agentmemory: run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server. Then run `/plugin marketplace add rohitg00/agentmemory` and `/plugin install agentmemory` — the plugin registers all 12 hooks, 4 skills, AND auto-wires the `@agentmemory/mcp` stdio server via its `.mcp.json`, so you get 53 MCP tools (memory_smart_search, memory_save, memory_sessions, memory_governance_delete, etc.) without any extra config step. Verify with `curl http://localhost:3111/agentmemory/health`. The real-time viewer is at http://localhost:3113.
+Install agentmemory: run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server. Then run `/plugin marketplace add rohitg00/agentmemory` and `/plugin install agentmemory` — the plugin registers all 12 hooks, 15 skills, AND auto-wires the `@agentmemory/mcp` stdio server via its `.mcp.json`, so you get 74 MCP tools (memory_smart_search, memory_save, memory_sessions, memory_governance_delete, etc.) without any extra config step. Verify with `curl http://localhost:3111/agentmemory/health`. The real-time viewer is at http://localhost:3113.
 ```
 
 #### Claude Code sin instalar el plugin (ruta MCP standalone)
@@ -458,7 +458,7 @@ codex plugin add agentmemory@agentmemory
 
 El plugin de Codex se sirve desde el mismo directorio `plugin/` que el de Claude Code. Registra:
 
-- `@agentmemory/mcp` como servidor MCP (hace de proxy a las 51 tools cuando `AGENTMEMORY_URL` apunta a un servidor agentmemory en ejecución; cae a 7 tools en local cuando no hay servidor accesible)
+- `@agentmemory/mcp` como servidor MCP (hace de proxy a las 74 tools cuando `AGENTMEMORY_URL` apunta a un servidor agentmemory en ejecución; cae a 7 tools en local cuando no hay servidor accesible)
 - 6 hooks de ciclo de vida: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`
 - 4 skills: `/recall`, `/remember`, `/session-history`, `/forget`
 
@@ -480,7 +480,7 @@ Esto añade un bloque idempotente a `~/.codex/hooks.json` que referencia rutas a
 <summary><b>OpenClaw (pega este prompt)</b></summary>
 
 ```text
-Install agentmemory for OpenClaw. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to my OpenClaw MCP config so agentmemory is available with all 51 memory tools:
+Install agentmemory for OpenClaw. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to my OpenClaw MCP config so agentmemory is available with all 74 memory tools:
 
 {
   "mcpServers": {
@@ -505,7 +505,7 @@ Guía completa: [`integrations/openclaw/`](../integrations/openclaw/)
 <summary><b>Hermes Agent (pega este prompt)</b></summary>
 
 ```text
-Install agentmemory for Hermes. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to ~/.hermes/config.yaml so Hermes can use agentmemory as an MCP server with all 51 memory tools:
+Install agentmemory for Hermes. Run `npx @agentmemory/agentmemory` in a separate terminal to start the memory server on localhost:3111. Then add this to ~/.hermes/config.yaml so Hermes can use agentmemory as an MCP server with all 74 memory tools:
 
 mcp_servers:
   agentmemory:
@@ -550,7 +550,7 @@ La entrada de agentmemory es el **mismo bloque de servidor MCP** en cada host qu
 | **Gemini CLI** | `~/.gemini/settings.json` | `gemini mcp add agentmemory npx -y @agentmemory/mcp --scope user` (fusión automática). |
 | **OpenClaw** | Configuración MCP de OpenClaw | Mismo bloque `mcpServers`, o usa el [memory plugin](../integrations/openclaw/) más profundo. |
 | **Codex CLI (solo MCP)** | `.codex/config.toml` | Forma TOML: `codex mcp add agentmemory -- npx -y @agentmemory/mcp`, o añade `[mcp_servers.agentmemory]` a mano. |
-| **Codex CLI (plugin completo)** | Marketplace de plugins Codex | `codex plugin marketplace add rohitg00/agentmemory` y luego `codex plugin add agentmemory@agentmemory`. Registra MCP + 6 hooks de ciclo de vida (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact, Stop) + 4 skills. En Codex Desktop, ejecuta también `agentmemory connect codex --with-hooks` hasta que se mergee [openai/codex#16430](https://github.com/openai/codex/issues/16430) — los hooks de plugin están silenciados allí. |
+| **Codex CLI (plugin completo)** | Marketplace de plugins Codex | `codex plugin marketplace add rohitg00/agentmemory` y luego `codex plugin add agentmemory@agentmemory`. Registra MCP + 6 hooks de ciclo de vida (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact, Stop) + 15 skills. En Codex Desktop, ejecuta también `agentmemory connect codex --with-hooks` hasta que se mergee [openai/codex#16430](https://github.com/openai/codex/issues/16430) — los hooks de plugin están silenciados allí. |
 | **OpenCode (solo MCP)** | `opencode.json` | Forma distinta — clave `mcp` en el nivel superior, comando como array: `{"mcp": {"agentmemory": {"type": "local", "command": ["npx", "-y", "@agentmemory/mcp"], "enabled": true}}}`. |
 | **OpenCode (plugin completo)** | `plugin/opencode/` | 22 hooks de captura automática que cubren ciclo de vida de sesión, mensajes, tools y errores. Dos comandos slash (`/recall`, `/remember`). Copia `plugin/opencode/` a tu workspace de OpenCode y añade la entrada del plugin a `opencode.json`. Tabla completa de hooks + análisis de gaps en [`plugin/opencode/README.md`](../plugin/opencode/README.md). |
 | **pi** | `~/.pi/agent/extensions/agentmemory` | Copia [`integrations/pi`](../integrations/pi/) y reinicia pi. |
@@ -829,11 +829,11 @@ npm install @xenova/transformers
 
 <h2 id="mcp-server"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-mcp.svg"><img src="../assets/tags/section-mcp.svg" alt="Servidor MCP" height="32" /></picture></h2>
 
-53 tools, 6 recursos, 3 prompts y 4 skills — el toolkit MCP de memoria más completo para cualquier agente.
+74 tools, 6 recursos, 3 prompts y 15 skills — el toolkit MCP de memoria más completo para cualquier agente.
 
-> **Shim MCP vs servidor completo:** el paquete publicado `@agentmemory/mcp` es un shim ligero. Expone la superficie completa de 51 tools **solo cuando puede alcanzar un servidor agentmemory en ejecución** vía `AGENTMEMORY_URL` (modo proxy). Sin servidor accesible, el shim cae a un set local de 7 tools (`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`). La variable de entorno `AGENTMEMORY_TOOLS=core|all` es un flag *del lado del servidor* — definirla en el bloque `env` del shim no tiene efecto. Si ves solo 7 tools en Cursor / OpenCode / Gemini CLI, arranca `npx @agentmemory/agentmemory` (o la stack Docker) y define `AGENTMEMORY_URL=http://localhost:3111`.
+> **Shim MCP vs servidor completo:** el paquete publicado `@agentmemory/mcp` es un shim ligero. Expone la superficie completa de 74 tools **solo cuando puede alcanzar un servidor agentmemory en ejecución** vía `AGENTMEMORY_URL` (modo proxy). Sin servidor accesible, el shim cae a un set local de 7 tools (`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`). La variable de entorno `AGENTMEMORY_TOOLS=core|all` es un flag *del lado del servidor* — definirla en el bloque `env` del shim no tiene efecto. Si ves solo 7 tools en Cursor / OpenCode / Gemini CLI, arranca `npx @agentmemory/agentmemory` (o la stack Docker) y define `AGENTMEMORY_URL=http://localhost:3111`.
 
-### 51 Tools
+### 74 Tools
 
 <details>
 <summary>Tools principales (siempre disponibles)</summary>
@@ -855,7 +855,7 @@ npm install @xenova/transformers
 </details>
 
 <details>
-<summary>Tools extendidas (51 en total — define AGENTMEMORY_TOOLS=all)</summary>
+<summary>Tools extendidas (74 en total — define AGENTMEMORY_TOOLS=all)</summary>
 
 | Tool | Descripción |
 |------|-------------|
@@ -893,7 +893,7 @@ npm install @xenova/transformers
 
 </details>
 
-### 6 Recursos · 3 Prompts · 4 Skills
+### 6 Recursos · 3 Prompts · 15 Skills
 
 | Tipo | Nombre | Descripción |
 |------|------|-------------|
@@ -1317,7 +1317,7 @@ Crea `~/.agentmemory/.env`:
 # USER_ID=
 # TEAM_MODE=private
 
-# Tool visibility: "core" (8 tools) or "all" (51 tools)
+# Tool visibility: "core" (8 tools) or "all" (74 tools)
 # AGENTMEMORY_TOOLS=core
 ```
 

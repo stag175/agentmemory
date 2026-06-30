@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ import { mockKV, mockSdk } from "./helpers/mocks.js";
 const tempRoots: string[] = [];
 
 function tempDir(): string {
-  const root = mkdtempSync(join(tmpdir(), "agentmemory-compliance-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "agentmemory-compliance-")));
   tempRoots.push(root);
   return root;
 }
@@ -33,7 +33,7 @@ describe("mem::compliance-evidence", () => {
 
     const sdk = mockSdk();
     const kv = mockKV();
-    registerComplianceEvidenceFunction(sdk as never, kv as never);
+    registerComplianceEvidenceFunction(sdk as never, kv as never, { allowedRoots: [root] });
 
     await kv.set(KV.memories, "mem_1", {
       id: "mem_1",
@@ -117,6 +117,26 @@ describe("mem::compliance-evidence", () => {
     expect(serialized).not.toContain("rule body should stay hashed");
     expect(result.evidenceRefs.some((ref) => ref.id === "memory:mem_1")).toBe(true);
     expect(result.evidenceRefs.some((ref) => ref.id === "team-shared:shared_1")).toBe(true);
+  });
+
+  it("refuses to scan a workspaceRoot outside the configured allowed roots", async () => {
+    const allowed = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "AGENTS.md"), "host instructions outside allowed root\n");
+
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerComplianceEvidenceFunction(sdk as never, kv as never, { allowedRoots: [allowed] });
+
+    const result = (await sdk.trigger("mem::compliance-evidence", {
+      workspaceRoot: outside,
+      includeRuleContent: true,
+    })) as ComplianceEvidenceReport;
+
+    expect(result.findings.map((finding) => finding.id)).toContain("rules_resolution_failed");
+    const rulesControl = result.controls.find((control) => control.id === "rules-provenance");
+    expect(rulesControl?.metrics.total).toBe(0);
+    expect(JSON.stringify(result)).not.toContain("host instructions outside allowed root");
   });
 
   it("marks missing policy and failed release gates as findings", async () => {

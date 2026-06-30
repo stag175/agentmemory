@@ -319,4 +319,147 @@ describe("release preflight", () => {
     expect(preflight.needsCmdShim("C:\\Program Files\\nodejs\\node.exe", "win32")).toBe(false);
     expect(preflight.needsCmdShim("git.exe", "win32")).toBe(false);
   });
+
+  it("fails the success path when a targeted-evidence file is missing", async () => {
+    const scriptPath = join(ROOT, "scripts", "release-preflight.mjs");
+    const preflight = await import(pathToFileURL(scriptPath).href);
+    const summary = preflight.createPreflightSummary({
+      allowDirty: false,
+      startedAt: "2026-06-28T00:00:00.000Z",
+      retrievalArenaEnabled: false,
+    });
+    for (const key of [
+      "versionLockstep",
+      "distributionMetadata",
+      "initialCleanTree",
+      "build",
+      "test",
+      "docs",
+      "packSmoke",
+      "finalCleanTree",
+    ]) {
+      summary.steps[key] = {
+        status: "pass",
+        label: key,
+        optional: false,
+        evidence: [key],
+        failures: [],
+        blockers: [],
+        warnings: [],
+        exitCode: null,
+      };
+    }
+
+    const missingTargeted = "remember-forget-audit.test.ts";
+    const fileExists = (path: string) =>
+      !path.replace(/\\/g, "/").endsWith(missingTargeted);
+
+    const previousExitCode = process.exitCode;
+    const originalLog = console.log;
+    const originalError = console.error;
+    console.log = () => {};
+    console.error = () => {};
+    let returnedExit: number | undefined;
+    try {
+      returnedExit = preflight.finish(summary, "pass", 0, {
+        root: ROOT,
+        fileExists,
+      });
+    } finally {
+      console.log = originalLog;
+      console.error = originalError;
+    }
+
+    // A missing targeted-evidence file leaves the gate not_run, which must not
+    // report success: status flips to fail and the process exits non-zero.
+    expect(summary.releaseGate.redactionForget.status).toBe("not_run");
+    expect(
+      preflight.releaseGateOverallForPreflight(summary.releaseGate),
+    ).toBe("not_run");
+    expect(summary.status).toBe("fail");
+    expect(returnedExit).not.toBe(0);
+    expect(process.exitCode).not.toBe(0);
+
+    process.exitCode = previousExitCode;
+  });
+
+  it("keeps a passing gate exiting zero through finish", async () => {
+    const scriptPath = join(ROOT, "scripts", "release-preflight.mjs");
+    const preflight = await import(pathToFileURL(scriptPath).href);
+    const summary = preflight.createPreflightSummary({
+      allowDirty: false,
+      startedAt: "2026-06-28T00:00:00.000Z",
+      retrievalArenaEnabled: false,
+    });
+    for (const key of [
+      "versionLockstep",
+      "distributionMetadata",
+      "initialCleanTree",
+      "build",
+      "test",
+      "docs",
+      "packSmoke",
+      "finalCleanTree",
+    ]) {
+      summary.steps[key] = {
+        status: "pass",
+        label: key,
+        optional: false,
+        evidence: [key],
+        failures: [],
+        blockers: [],
+        warnings: [],
+        exitCode: null,
+      };
+    }
+
+    const previousExitCode = process.exitCode;
+    const originalLog = console.log;
+    console.log = () => {};
+    let returnedExit: number | undefined;
+    try {
+      returnedExit = preflight.finish(summary, "pass", 0, {
+        root: ROOT,
+        fileExists: () => true,
+      });
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(preflight.releaseGateOverallForPreflight(summary.releaseGate)).toBe(
+      "pass",
+    );
+    expect(summary.status).toBe("pass");
+    expect(returnedExit).toBe(0);
+
+    process.exitCode = previousExitCode;
+  });
+
+  it("asserts the Homebrew formula ships dist/cli.mjs from a prebuilt tarball", async () => {
+    const scriptPath = join(ROOT, "scripts", "release-preflight.mjs");
+    const preflight = await import(pathToFileURL(scriptPath).href);
+
+    const result = preflight.validateDistributionMetadata();
+    expect(result.failures).toEqual([]);
+
+    const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+    // The formula symlinks libexec/"dist/cli.mjs"; the npm-pack tarball must
+    // actually ship that path (dist/ is gitignored, so a source tarball would
+    // not contain it).
+    expect(pkg.bin.agentmemory).toBe("dist/cli.mjs");
+    expect(pkg.files).toContain("dist/");
+
+    const formula = readFileSync(
+      join(ROOT, "packaging", "homebrew", "agentmemory.rb.template"),
+      "utf8",
+    );
+    const readme = readFileSync(
+      join(ROOT, "packaging", "homebrew", "README.md"),
+      "utf8",
+    );
+    expect(formula).toContain('libexec/"dist/cli.mjs"');
+    expect(formula).toContain("prebuilt artifact");
+    expect(readme).toContain("prebuilt artifact");
+    expect(readme).toContain("dist/cli.mjs");
+  });
 });

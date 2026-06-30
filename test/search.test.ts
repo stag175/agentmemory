@@ -273,6 +273,54 @@ describe("mem::search", () => {
     expect(result.results.map((r) => r.obsId)).toEqual(["mem_agent_a"]);
   });
 
+  it("excludes gate-flagged needs_review memories from recall (#fail-open)", async () => {
+    const passing: Memory = {
+      id: "mem_recallable",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      type: "fact",
+      title: "Quokka recall policy",
+      content: "Quokka recall policy is trusted and recallable.",
+      concepts: ["quokka", "policy"],
+      files: [],
+      sessionIds: [],
+      strength: 8,
+      version: 1,
+      isLatest: true,
+      lifecycleState: "active",
+      reviewState: "unreviewed",
+    };
+    const flagged: Memory = {
+      ...passing,
+      id: "mem_flagged",
+      title: "Quokka recall flagged",
+      content: "Quokka recall flagged write awaiting review.",
+      reviewState: "needs_review",
+    };
+    const rejected: Memory = {
+      ...passing,
+      id: "mem_rejected",
+      title: "Quokka recall rejected",
+      content: "Quokka recall rejected write.",
+      reviewState: "rejected",
+    };
+
+    for (const memory of [passing, flagged, rejected]) {
+      await kv.set(KV.memories, memory.id, memory);
+    }
+    await rebuildIndex(kv as never);
+
+    const result = (await sdk.trigger("mem::search", {
+      query: "quokka recall policy",
+      format: "compact",
+    })) as { results: Array<{ obsId: string }> };
+
+    const ids = result.results.map((r) => r.obsId);
+    expect(ids).toContain("mem_recallable");
+    expect(ids).not.toContain("mem_flagged");
+    expect(ids).not.toContain("mem_rejected");
+  });
+
   it("rebuildIndex populates the vector index", async () => {
     const mockEmbedder = {
       name: "test",

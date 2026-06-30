@@ -198,12 +198,23 @@ export function inspectJsonEntry(
       `${config.wrapperKey}.agentmemory matches the expected agentmemory MCP block.`,
     );
   }
-  const status = entryReferencesAgentmemory(entry) ? "stale" : "stale";
+  // If the entry references @agentmemory/mcp it's a stale-but-ours block we
+  // can safely refresh. If it does NOT, an unrelated server is parked under
+  // the `agentmemory` key — repairing/--force would clobber config we don't
+  // own, so mark it "foreign" with repairSafe=false (#item19).
+  if (entryReferencesAgentmemory(entry)) {
+    return result(
+      config,
+      "stale",
+      true,
+      `${config.wrapperKey}.agentmemory exists but does not match the current expected block.`,
+    );
+  }
   return result(
     config,
-    status,
-    true,
-    `${config.wrapperKey}.agentmemory exists but does not match the current expected block.`,
+    "foreign",
+    false,
+    `${config.wrapperKey}.agentmemory exists but does not reference @agentmemory/mcp; refusing to overwrite an unrelated entry.`,
   );
 }
 
@@ -316,7 +327,8 @@ function inspectContinue(adapter: ConnectAdapter): ConnectInspection {
   if (entryReferencesAgentmemory(entry)) {
     return result(base, "healthy", true, "mcpServers[agentmemory] references @agentmemory/mcp.");
   }
-  return result(base, "stale", true, "mcpServers[agentmemory] exists but points elsewhere.");
+  // Unrelated server parked under the agentmemory name; do not auto-repair.
+  return result(base, "foreign", false, "mcpServers[agentmemory] exists but points elsewhere.");
 }
 
 function inspectOpencode(adapter: ConnectAdapter): ConnectInspection {

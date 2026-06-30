@@ -496,4 +496,205 @@ describe("managed sync control plane", () => {
     expect(snapshot.payload.content).toBe("second");
     expect(snapshot.previousDigest).toBe(blocked.apply.conflicts[0]?.existingDigest);
   });
+
+  it("heals a peer after a failed run so a later local apply is allowed again", async () => {
+    const peer = (await sdk.trigger("mem::sync-peer-register", {
+      name: "Local peer",
+    })) as { peer: { id: string } };
+    const workspace = (await sdk.trigger("mem::sync-workspace-register", {
+      name: "Workspace",
+      allowedScopes: ["memories"],
+    })) as { workspace: { id: string } };
+
+    // A single forgeable failed run must not permanently brick the peer.
+    const failed = (await sdk.trigger("mem::sync-run-record", {
+      peerId: peer.peer.id,
+      workspaceId: workspace.workspace.id,
+      direction: "pull",
+      status: "failed",
+      itemCounts: { memories: 1 },
+    })) as { success: boolean };
+    expect(failed.success).toBe(true);
+
+    const afterFail = (await sdk.trigger("mem::sync-status", {
+      peerId: peer.peer.id,
+    })) as { status: { peers: Array<{ status: string; statusReasons: string[] }> } };
+    expect(afterFail.status.peers[0]?.status).toBe("blocked");
+    expect(afterFail.status.peers[0]?.statusReasons).toContain("last run failed");
+
+    // A blocked peer cannot apply locally.
+    const blockedApply = (await sdk.trigger("mem::sync-local-apply", {
+      peerId: peer.peer.id,
+      workspaceId: workspace.workspace.id,
+      direction: "pull",
+      scopes: ["memories"],
+      dryRun: false,
+      approved: true,
+      exportData: {
+        memories: [{ id: "mem_a", content: "x", updatedAt: "2026-06-29T12:00:00.000Z" }],
+      },
+    })) as { success: boolean; error?: string; reasons?: string[] };
+    expect(blockedApply.success).toBe(false);
+    expect(blockedApply.reasons).toContain("last run failed");
+
+    // A subsequent succeeded run heals the peer (run status is untrusted ledger input).
+    const healed = (await sdk.trigger("mem::sync-run-record", {
+      peerId: peer.peer.id,
+      workspaceId: workspace.workspace.id,
+      direction: "pull",
+      status: "succeeded",
+      itemCounts: { memories: 1 },
+    })) as { success: boolean };
+    expect(healed.success).toBe(true);
+
+    const afterHeal = (await sdk.trigger("mem::sync-status", {
+      peerId: peer.peer.id,
+    })) as { status: { peers: Array<{ status: string; statusReasons: string[] }> } };
+    expect(afterHeal.status.peers[0]?.status).toBe("ready");
+    expect(afterHeal.status.peers[0]?.statusReasons).not.toContain("last run failed");
+
+    // The healed peer can now apply locally.
+    const applied = (await sdk.trigger("mem::sync-local-apply", {
+      peerId: peer.peer.id,
+      workspaceId: workspace.workspace.id,
+      direction: "pull",
+      scopes: ["memories"],
+      dryRun: false,
+      approved: true,
+      exportData: {
+        memories: [{ id: "mem_a", content: "x", updatedAt: "2026-06-29T12:00:00.000Z" }],
+      },
+    })) as { success: boolean; apply?: { status: string } };
+    expect(applied.success).toBe(true);
+    expect(applied.apply?.status).toBe("applied");
+  });
+
+  it("clears a blocked peer through the explicit set-status path", async () => {
+    const peer = (await sdk.trigger("mem::sync-peer-register", {
+      name: "Local peer",
+    })) as { peer: { id: string } };
+    const workspace = (await sdk.trigger("mem::sync-workspace-register", {
+      name: "Workspace",
+      allowedScopes: ["memories"],
+    })) as { workspace: { id: string } };
+
+    await sdk.trigger("mem::sync-run-record", {
+      peerId: peer.peer.id,
+      workspaceId: workspace.workspace.id,
+      direction: "pull",
+      status: "failed",
+      itemCounts: { memories: 1 },
+    });
+
+    const cleared = (await sdk.trigger("mem::sync-peer-set-status", {
+      peerId: peer.peer.id,
+    })) as { success: boolean; peer: { status: string; statusReasons: string[] } };
+    expect(cleared.success).toBe(true);
+    expect(cleared.peer.status).toBe("ready");
+    expect(cleared.peer.statusReasons).not.toContain("last run failed");
+
+    const disabled = (await sdk.trigger("mem::sync-peer-set-status", {
+      peerId: peer.peer.id,
+      enabled: false,
+    })) as { success: boolean; peer: { status: string } };
+    expect(disabled.success).toBe(true);
+    expect(disabled.peer.status).toBe("disabled");
+  });
+
+  it("rejects spoofed loopback hostnames and accepts genuine loopback addresses", async () => {
+    const spoofed = (await sdk.trigger("mem::sync-peer-register", {
+      name: "Spoofed loopback",
+      mode: "local",
+      endpoint: "http://127.0.0.1.evil.com/",
+    })) as { success: boolean; error?: string };
+    expect(spoofed.success).toBe(false);
+    expect(spoofed.error).toContain("remote endpoints require mode remote");
+
+    const genuine = (await sdk.trigger("mem::sync-peer-register", {
+      name: "Genuine loopback",
+      mode: "local",
+      endpoint: "http://127.0.0.1:4000/",
+    })) as { success: boolean; peer: { loopback: boolean; endpointHost: string } };
+    expect(genuine.success).toBe(true);
+    expect(genuine.peer.loopback).toBe(true);
+    expect(genuine.peer.endpointHost).toBe("127.0.0.1");
+
+    // A spoofed loopback hostname is correctly classified as non-loopback, so it can
+    // only register as a remote peer (and never satisfies local-apply loopback checks).
+    const asRemote = (await sdk.trigger("mem::sync-peer-register", {
+      name: "Spoofed as remote",
+      mode: "remote",
+      endpoint: "http://127.0.0.1.evil.com/",
+      authPolicy: { kind: "bearer", tokenEnv: "TOK" },
+      scopePolicy: { allowedScopes: ["memories"], direction: "pull", remoteModeApproved: true },
+    })) as { success: boolean; peer: { loopback: boolean } };
+    expect(asRemote.success).toBe(true);
+    expect(asRemote.peer.loopback).toBe(false);
+  });
+
+  it("skips merge writes whose incoming row is older than the stored snapshot", async () => {
+    const peer = (await sdk.trigger("mem::sync-peer-register", {
+      name: "Local peer",
+    })) as { peer: { id: string } };
+    const workspace = (await sdk.trigger("mem::sync-workspace-register", {
+      name: "Workspace",
+      allowedScopes: ["memories"],
+    })) as { workspace: { id: string } };
+
+    const newer = (await sdk.trigger("mem::sync-local-apply", {
+      peerId: peer.peer.id,
+      workspaceId: workspace.workspace.id,
+      direction: "pull",
+      scopes: ["memories"],
+      dryRun: false,
+      approved: true,
+      exportData: {
+        memories: [{ id: "mem_a", content: "newer", updatedAt: "2026-06-29T12:05:00.000Z" }],
+      },
+    })) as { apply: { snapshotIds: string[] } };
+
+    const stale = (await sdk.trigger("mem::sync-local-apply", {
+      peerId: peer.peer.id,
+      workspaceId: workspace.workspace.id,
+      direction: "pull",
+      scopes: ["memories"],
+      dryRun: false,
+      approved: true,
+      conflictPolicy: "merge",
+      exportData: {
+        // Older incoming row must not overwrite the newer stored snapshot.
+        memories: [{ id: "mem_a", content: "older", updatedAt: "2026-06-29T12:00:00.000Z" }],
+      },
+    })) as {
+      success: boolean;
+      apply: {
+        status: string;
+        conflictCount: number;
+        staleCount: number;
+        appliedCounts: Record<string, number>;
+        snapshotIds: string[];
+        staleSkips: Array<{
+          reason: string;
+          snapshotId: string;
+          incomingUpdatedAt?: string;
+          existingUpdatedAt?: string;
+        }>;
+      };
+    };
+
+    expect(stale.success).toBe(true);
+    expect(stale.apply.conflictCount).toBe(1);
+    expect(stale.apply.staleCount).toBe(1);
+    expect(stale.apply.appliedCounts.memories).toBe(0);
+    expect(stale.apply.snapshotIds).toHaveLength(0);
+    expect(stale.apply.staleSkips[0]?.reason).toBe("incoming_not_newer");
+    expect(stale.apply.staleSkips[0]?.snapshotId).toBe(newer.apply.snapshotIds[0]);
+
+    // The stored snapshot still holds the newer content.
+    const state = await kv.list<Record<string, unknown>>(KV.state);
+    const snapshot = state.find(
+      (entry) => entry.kind === "sync-snapshot" && entry.id === newer.apply.snapshotIds[0],
+    ) as { payload: { content: string } };
+    expect(snapshot.payload.content).toBe("newer");
+  });
 });

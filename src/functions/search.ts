@@ -11,6 +11,7 @@ import { KV } from '../state/schema.js'
 import { StateKV } from '../state/kv.js'
 import { SearchIndex } from '../state/search-index.js'
 import { VectorIndex } from '../state/vector-index.js'
+import type { RetrievalRuntimeStore } from '../state/retrieval-qdrant-adapter.js'
 import type { EmbeddingProvider } from '../types.js'
 import {
   isMemorySearchable,
@@ -26,6 +27,12 @@ import { getAgentId, getEnvVar, isAgentScopeIsolated } from "../config.js";
 let index: SearchIndex | null = null
 let vectorIndex: VectorIndex | null = null
 let currentEmbeddingProvider: EmbeddingProvider | null = null
+// Optional external retrieval store (e.g. qdrant). When set, the vector
+// write-path dual-writes to it so reads routed through the same store (see
+// HybridSearch) stay consistent with the in-process VectorIndex. Wired by
+// src/index.ts after the backend availability probe; null until then, which
+// keeps the in-process-only path unchanged.
+let retrievalStore: RetrievalRuntimeStore | null = null
 
 export function getSearchIndex(): SearchIndex {
   if (!index) index = new SearchIndex()
@@ -48,8 +55,32 @@ export function getEmbeddingProvider(): EmbeddingProvider | null {
   return currentEmbeddingProvider
 }
 
+// Bind (or clear) the external retrieval store used for vector dual-writes.
+// Pass the adapter's store only when the backend is 'available'; otherwise
+// pass null so writes stay in-process and never touch a reserved/unavailable
+// external backend.
+export function setRetrievalStore(store: RetrievalRuntimeStore | null): void {
+  retrievalStore = store
+}
+
+export function getRetrievalStore(): RetrievalRuntimeStore | null {
+  return retrievalStore
+}
+
 export function vectorIndexRemove(id: string): void {
   vectorIndex?.remove(id);
+  // Dual-delete from the external store when one is configured. Guarded and
+  // fire-and-forget: a downed external store must never block the local
+  // delete (the in-process index is the source of truth here).
+  const store = retrievalStore;
+  if (store) {
+    void Promise.resolve(store.deleteByIds([id])).catch((err) => {
+      logger.warn("retrieval store delete failed — local remove kept", {
+        id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
 }
 
 // Persistence sync hook. Without this, index removals only live in
@@ -126,6 +157,25 @@ export async function vectorIndexAddGuarded(
       return false
     }
     vi.add(id, sessionId, embedding)
+    // Dual-write to the external retrieval store using the SAME embedding the
+    // local index just consumed (no second embed call). Guarded so an
+    // external-store failure never blocks or fails the local write — the local
+    // VectorIndex.add already succeeded above. The payload mirrors the read
+    // side (HybridSearch maps hit.id -> obsId and payload.sessionId).
+    const store = retrievalStore
+    if (store) {
+      try {
+        await store.upsert([
+          { id, vector: Array.from(embedding), payload: { sessionId } },
+        ])
+      } catch (err) {
+        logger.warn("retrieval store upsert failed — local add kept", {
+          kind: context.kind,
+          id: context.logId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
     return true
   } catch (err) {
     logger.warn("vector-index add: embed failed — skipping", {

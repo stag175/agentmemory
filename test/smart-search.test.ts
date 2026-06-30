@@ -796,6 +796,131 @@ describe("Smart Search Function", () => {
     expect(result.explain.candidates.filteredOut).toBe(3);
   });
 
+  it("rejects an invalid memoryTier instead of silently emptying results", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      memoryTier: "not-a-real-lane",
+    })) as { mode: string; results: CompactSearchResult[]; error?: string };
+
+    // A typo must surface as a validation error, not a zero-hit search.
+    expect(result.mode).toBe("compact");
+    expect(result.results).toEqual([]);
+    expect(result.error).toMatch(/memoryTier/);
+    expect(result.error).toMatch(/semantic_fact/);
+    // The bad filter must never reach the backend as a hard filter.
+    expect(searchOptions.length).toBe(0);
+  });
+
+  it("rejects an invalid privacyScope instead of silently emptying results", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      privacyScope: "public",
+    })) as { mode: string; results: CompactSearchResult[]; error?: string };
+
+    expect(result.mode).toBe("compact");
+    expect(result.results).toEqual([]);
+    expect(result.error).toMatch(/privacyScope/);
+    expect(result.error).toMatch(/project/);
+    expect(searchOptions.length).toBe(0);
+  });
+
+  it("reports an invalid memoryTier as an expanded-mode error for expandIds calls", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      expandIds: ["obs_1"],
+      memoryTier: "bogus",
+    })) as { mode: string; results: unknown[]; error?: string };
+
+    expect(result.mode).toBe("expanded");
+    expect(result.results).toEqual([]);
+    expect(result.error).toMatch(/memoryTier/);
+  });
+
+  it("still searches normally for a valid memoryTier", async () => {
+    const savedMemory: Memory = {
+      id: "mem_proc",
+      createdAt: "2026-02-01T00:00:00Z",
+      updatedAt: "2026-02-01T00:00:00Z",
+      type: "workflow",
+      lane: "procedure",
+      lifecycleState: "active",
+      title: "Deploy procedure",
+      content: "Run the deploy script after tests pass.",
+      concepts: ["deploy"],
+      files: ["scripts/deploy.sh"],
+      sessionIds: [],
+      strength: 7,
+      version: 1,
+      isLatest: true,
+      project: "my-project",
+    };
+    await kv.set("mem:memories", savedMemory.id, savedMemory);
+    searchResults = [
+      {
+        observation: makeObs({
+          id: savedMemory.id,
+          sessionId: "memory",
+          title: savedMemory.title,
+        }),
+        bm25Score: 0.9,
+        vectorScore: 0,
+        graphScore: 0,
+        combinedScore: 0.9,
+        sessionId: "memory",
+      },
+    ];
+
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "deploy",
+      memoryTier: "procedure",
+    })) as { mode: string; results: CompactSearchResult[]; error?: string };
+
+    expect(result.error).toBeUndefined();
+    expect(result.results.map((r) => r.obsId)).toEqual(["mem_proc"]);
+    // A valid filter is treated as a hard filter, so the backend runs.
+    expect(searchOptions.length).toBe(1);
+  });
+
+  it("ignores an empty-string privacyScope rather than erroring or filtering", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      privacyScope: "",
+    })) as { mode: string; results: CompactSearchResult[]; error?: string };
+
+    expect(result.error).toBeUndefined();
+    expect(result.results.map((r) => r.obsId)).toEqual(["obs_1", "obs_2"]);
+  });
+
+  it("warns in the normal response when as_of mode is requested without an anchor", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      retrievalMode: "as_of",
+      includeLessons: false,
+    })) as {
+      mode: string;
+      results: CompactSearchResult[];
+      warnings?: string[];
+      explain?: unknown;
+    };
+
+    // No explain requested — the warning must still surface.
+    expect(result.explain).toBeUndefined();
+    expect(result.results.length).toBe(2);
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings!.join(" ")).toMatch(/as_of/);
+    expect(result.warnings!.join(" ")).toMatch(/asOf or validAt/);
+  });
+
+  it("omits the as_of warning once a validAt anchor is supplied", async () => {
+    const result = (await sdk.trigger("mem::smart-search", {
+      query: "auth",
+      retrievalMode: "as_of",
+      validAt: "2026-02-01T00:00:00.000Z",
+      includeLessons: false,
+    })) as { warnings?: string[] };
+
+    expect(result.warnings).toBeUndefined();
+  });
+
   it("expand returns empty for nonexistent observation IDs", async () => {
     const result = (await sdk.trigger("mem::smart-search", {
       expandIds: ["obs_nonexistent_ses_xxx"],

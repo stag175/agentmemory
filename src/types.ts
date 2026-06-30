@@ -896,6 +896,29 @@ export interface AuditEntry {
   targetIds: string[];
   details: Record<string, unknown>;
   qualityScore?: number;
+  // Tamper-evidence persisted at append time (see src/functions/audit.ts
+  // recordAudit and src/functions/audit-integrity.ts). seq is a strictly
+  // monotonic append-order counter; chainHash =
+  // sha256(prevChainHash || entryHash || seq) where entryHash is the
+  // SHA-256 of the entry with chainHash omitted. Both are optional so
+  // audit rows written before this field existed still typecheck; the
+  // verifier flags such legacy rows as integrity violations.
+  seq?: number;
+  chainHash?: string;
+}
+
+// Single-row pointer to the head (most recent appended entry) of the
+// audit hash chain. Persisted in a separate KV scope so it can be updated
+// atomically alongside each appended AuditEntry; verification compares the
+// recomputed head against this stored value to detect a fully rewritten
+// log. Key is the fixed string "current".
+export interface AuditChainHead {
+  seq: number;
+  chainHash: string;
+  entryId: string;
+  entryHash: string;
+  count: number;
+  updatedAt: string;
 }
 
 export type AgentEventType =

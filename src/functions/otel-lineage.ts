@@ -210,6 +210,27 @@ function safeString(value: string, maxChars = MAX_ATTRIBUTE_STRING_CHARS): strin
   return scanPrivateData(value).redacted.slice(0, maxChars);
 }
 
+const MAX_NESTED_SANITIZE_DEPTH = 6;
+
+function stripRawPayloadSubtrees(value: unknown, depth = 0): unknown {
+  if (Array.isArray(value)) {
+    if (depth >= MAX_NESTED_SANITIZE_DEPTH) return "[truncated]";
+    return value
+      .slice(0, MAX_ATTRIBUTE_ARRAY_VALUES)
+      .map((item) => stripRawPayloadSubtrees(item, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    if (depth >= MAX_NESTED_SANITIZE_DEPTH) return "[truncated]";
+    const result: Record<string, unknown> = {};
+    for (const [key, entryValue] of Object.entries(value as Record<string, unknown>)) {
+      if (isRawPayloadKey(key)) continue;
+      result[key] = stripRawPayloadSubtrees(entryValue, depth + 1);
+    }
+    return result;
+  }
+  return value;
+}
+
 function cleanExportAttributeValue(
   value: unknown,
 ): OtelLineageAttributeValue | undefined {
@@ -225,9 +246,11 @@ function cleanExportAttributeValue(
       return items as number[];
     }
     if (items.every((item) => typeof item === "boolean")) return items as boolean[];
-    return safeString(stableJson(items));
+    return safeString(stableJson(stripRawPayloadSubtrees(items)));
   }
-  if (value && typeof value === "object") return safeString(stableJson(value));
+  if (value && typeof value === "object") {
+    return safeString(stableJson(stripRawPayloadSubtrees(value)));
+  }
   return undefined;
 }
 

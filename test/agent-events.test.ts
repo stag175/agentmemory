@@ -15,8 +15,10 @@ import {
   listAgentEvents,
   registerAgentEventFunctions,
   recordAgentEvent,
+  pruneAgentEvents,
   type AgentEventOtelSpan,
 } from "../src/functions/agent-events.js";
+import type { AuditEntry } from "../src/types.js";
 import { registerObserveFunction } from "../src/functions/observe.js";
 import { registerRememberFunction } from "../src/functions/remember.js";
 import { registerMemoryLifecycleFunctions } from "../src/functions/memory-lifecycle.js";
@@ -586,5 +588,210 @@ describe("agent event lineage ledger", () => {
 
     expect(rejected.status_code).toBe(400);
     expect(rejected.body.error).toBe("targetIds must be an array of strings");
+  });
+
+  it("writes bounded sharded index rows instead of one growing array", async () => {
+    const first = await recordAgentEvent(kv as never, {
+      type: "memory_written",
+      timestamp: "2026-06-28T10:00:00Z",
+      project: "billing",
+      agentId: "codex",
+      memoryIds: ["mem_shared"],
+    });
+    const second = await recordAgentEvent(kv as never, {
+      type: "memory_updated",
+      timestamp: "2026-06-28T10:05:00Z",
+      project: "billing",
+      agentId: "codex",
+      memoryIds: ["mem_shared"],
+    });
+
+    const indexRows = await kv.list<Record<string, unknown>>(
+      KV.agentEventIndexes,
+    );
+
+    // No legacy aggregate row should exist: every index row is a
+    // self-describing shard or time-bucket row, none of which carry an
+    // unbounded eventIds array.
+    expect(
+      indexRows.some((row) => Array.isArray((row as { eventIds?: unknown }).eventIds)),
+    ).toBe(false);
+
+    const memoryShards = indexRows.filter(
+      (row) =>
+        row.kind === "agent-event-index-shard" &&
+        row.field === "memoryId" &&
+        row.value === "mem_shared",
+    );
+    // One shard per (field,value,eventId): the shared memory id maps to two
+    // distinct rows, so a third write would not rewrite either existing row.
+    expect(memoryShards.map((row) => row.eventId).sort()).toEqual(
+      [first.id, second.id].sort(),
+    );
+
+    const listed = await listAgentEvents(kv as never, { memoryId: "mem_shared" });
+    expect(listed.total).toBe(2);
+    expect(listed.events.map((event) => event.id).sort()).toEqual(
+      [first.id, second.id].sort(),
+    );
+  });
+
+  it("uses time-bucket rows for date-range queries without scanning events", async () => {
+    const inWindow = await recordAgentEvent(kv as never, {
+      type: "custom",
+      timestamp: "2026-06-28T12:00:00Z",
+      project: "billing",
+    });
+    await recordAgentEvent(kv as never, {
+      type: "custom",
+      timestamp: "2026-06-20T12:00:00Z",
+      project: "billing",
+    });
+    await recordAgentEvent(kv as never, {
+      type: "custom",
+      timestamp: "2026-07-05T12:00:00Z",
+      project: "billing",
+    });
+
+    const listSpy = vi.spyOn(kv, "list");
+    const listed = await listAgentEvents(kv as never, {
+      dateFrom: "2026-06-27T00:00:00Z",
+      dateTo: "2026-06-29T00:00:00Z",
+    });
+
+    expect(listed.events.map((event) => event.id)).toEqual([inWindow.id]);
+    expect(
+      listSpy.mock.calls.some(([scope]) => scope === KV.agentEvents),
+    ).toBe(false);
+  });
+
+  it("prunes agent events past the max-age cutoff and removes their index rows", async () => {
+    const now = Date.now();
+    const old = await recordAgentEvent(kv as never, {
+      type: "custom",
+      timestamp: new Date(now - 100 * 24 * 60 * 60 * 1000).toISOString(),
+      project: "billing",
+      memoryIds: ["mem_old"],
+    });
+    const fresh = await recordAgentEvent(kv as never, {
+      type: "custom",
+      timestamp: new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString(),
+      project: "billing",
+      memoryIds: ["mem_fresh"],
+    });
+
+    const result = await pruneAgentEvents(kv as never, { maxAgeDays: 90 });
+
+    expect(result.pruned).toBe(1);
+    expect(result.byAge).toBe(1);
+    expect(result.candidateIds).toEqual([old.id]);
+
+    expect(await kv.get<AgentEvent>(KV.agentEvents, old.id)).toBeNull();
+    expect(await kv.get<AgentEvent>(KV.agentEvents, fresh.id)).not.toBeNull();
+
+    // The pruned event's shard rows are gone; the surviving event keeps its
+    // own shard so it still lists.
+    const indexRows = await kv.list<Record<string, unknown>>(
+      KV.agentEventIndexes,
+    );
+    expect(
+      indexRows.some(
+        (row) =>
+          row.kind === "agent-event-index-shard" && row.value === "mem_old",
+      ),
+    ).toBe(false);
+
+    const survivors = await listAgentEvents(kv as never, { memoryId: "mem_fresh" });
+    expect(survivors.events.map((event) => event.id)).toEqual([fresh.id]);
+
+    const audits = await kv.list<AuditEntry>(KV.audit);
+    const pruneAudit = audits.find(
+      (entry) => entry.functionId === "mem::agent-event-prune",
+    );
+    expect(pruneAudit?.operation).toBe("delete");
+    expect(pruneAudit?.targetIds).toEqual([old.id]);
+  });
+
+  it("prunes the oldest events beyond the max-count cap in bounded batches", async () => {
+    const created: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const event = await recordAgentEvent(kv as never, {
+        type: "custom",
+        timestamp: `2026-06-28T10:0${i}:00Z`,
+        project: "billing",
+      });
+      created.push(event.id);
+    }
+
+    // Keep only the 2 newest; the 3 oldest are over the cap. Cap the batch at 2
+    // so a single sweep drains part of the backlog without an unbounded delete.
+    const firstSweep = await pruneAgentEvents(kv as never, {
+      maxAgeDays: 0,
+      maxCount: 2,
+      batch: 2,
+    });
+    expect(firstSweep.pruned).toBe(2);
+    expect(firstSweep.byCount).toBe(2);
+
+    const secondSweep = await pruneAgentEvents(kv as never, {
+      maxAgeDays: 0,
+      maxCount: 2,
+      batch: 2,
+    });
+    expect(secondSweep.pruned).toBe(1);
+
+    const remaining = await kv.list<AgentEvent>(KV.agentEvents);
+    // The 2 newest survive (created[3], created[4]).
+    expect(remaining.map((event) => event.id).sort()).toEqual(
+      created.slice(3).sort(),
+    );
+
+    const noop = await pruneAgentEvents(kv as never, {
+      maxAgeDays: 0,
+      maxCount: 2,
+      batch: 2,
+    });
+    expect(noop.pruned).toBe(0);
+  });
+
+  it("reports prune candidates without deleting on dryRun", async () => {
+    const now = Date.now();
+    const old = await recordAgentEvent(kv as never, {
+      type: "custom",
+      timestamp: new Date(now - 200 * 24 * 60 * 60 * 1000).toISOString(),
+      project: "billing",
+    });
+
+    const result = await pruneAgentEvents(kv as never, {
+      maxAgeDays: 90,
+      dryRun: true,
+    });
+
+    expect(result.pruned).toBe(0);
+    expect(result.candidateIds).toEqual([old.id]);
+    expect(await kv.get<AgentEvent>(KV.agentEvents, old.id)).not.toBeNull();
+  });
+
+  it("redacts a secret that straddles the metadata truncation boundary", async () => {
+    const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+    // Position the token so its characters span the 12,000-char cut. Truncating
+    // before scanning would split it below the github-token pattern length and
+    // store each half unredacted; scanning first replaces it wholesale.
+    const serializedPrefix = '{"pad":"'.length;
+    const padLength = 12_000 - serializedPrefix - 20;
+    const event = await recordAgentEvent(kv as never, {
+      type: "custom",
+      project: "billing",
+      metadata: { pad: "x".repeat(padLength), token: secret },
+    });
+
+    expect(event.redactionApplied).toBe(true);
+    expect(event.sensitivityLabels).toContain("github_token");
+    const metadata = event.metadata as { truncated?: boolean; preview?: string };
+    expect(metadata.truncated).toBe(true);
+    expect(JSON.stringify(event)).not.toContain(secret);
+    expect(metadata.preview).not.toContain(secret);
+    // No partial fragment of the token survives the cut either.
+    expect(metadata.preview).not.toContain("ghp_ABCDEFGHIJ");
   });
 });

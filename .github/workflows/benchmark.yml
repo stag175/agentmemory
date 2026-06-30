@@ -1,0 +1,121 @@
+name: Benchmark (LongMemEval R@5 regression gate)
+
+# Keeps the headline 95.2% R@5 recall number honest across releases.
+# On every release tag (v*) — and on demand via workflow_dispatch — this job
+# re-runs the LongMemEval-S retrieval benchmark and FAILS if the agentmemory
+# adapter's R@5 drops below a configured floor (default 0.90).
+#
+# The LongMemEval-S dataset (~278MB) and the vector adapter's OPENAI_API_KEY
+# are not always available in CI. Mirroring the eval adapters' skip-not-crash
+# contract, this job DEGRADES GRACEFULLY: if the dataset/secret are missing it
+# skips with a clear message instead of silently passing (or crashing). A real
+# regression — R@5 below the floor on a run that actually executed — fails hard.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      r5_floor:
+        description: "R@5 floor — job fails if measured recall drops below this"
+        required: false
+        default: "0.90"
+
+# Only checkout is needed. No package publishing or repo writes happen here.
+permissions:
+  contents: read
+
+# Don't run two benchmark jobs for the same ref at once; they share the
+# eval/reports output dir and OpenAI spend.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  longmemeval:
+    runs-on: ubuntu-latest
+    env:
+      # Floor comes from the dispatch input when present, else the 0.90 default.
+      # The published headline is 95.2% R@5; 0.90 leaves headroom for embedding
+      # nondeterminism while still catching a real regression.
+      R5_FLOOR: ${{ github.event.inputs.r5_floor || '0.90' }}
+      # Dataset path + OpenAI key are surfaced as env for the eval runner.
+      # Both may be empty in CI — the gate step handles that gracefully.
+      LONGMEMEVAL_PATH: ${{ secrets.LONGMEMEVAL_PATH }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      # Two-step install: generate a lockfile in-runner with
+      # --package-lock-only, then install from it with `npm ci`.
+      # Lockfiles are gitignored at the repo level (mirrors CI / publish).
+      - run: npm install --package-lock-only --legacy-peer-deps --no-audit --no-fund
+      - run: npm ci --legacy-peer-deps --no-audit --no-fund
+
+      # Resolve the dataset. Prefer LONGMEMEVAL_PATH (a path baked into the
+      # runner image / cache). Otherwise this is a CI without the 278MB corpus
+      # — skip the whole job with a clear message rather than fail or fake it.
+      - name: Resolve LongMemEval dataset
+        id: dataset
+        run: |
+          if [ -n "$LONGMEMEVAL_PATH" ] && [ -f "$LONGMEMEVAL_PATH" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Using dataset at $LONGMEMEVAL_PATH"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Benchmark skipped::LongMemEval-S dataset unavailable (set the LONGMEMEVAL_PATH secret to a runner-local copy of longmemeval_s.json). Skipping the R@5 regression gate."
+          fi
+
+      # Run the public LongMemEval retrieval benchmark. Only the agentmemory
+      # adapter is needed for the R@5 gate; it requires no API key. The vector
+      # adapter (OPENAI_API_KEY) and unavailable competitors skip themselves
+      # via the runner's BENCHMARK_ADAPTER_UNAVAILABLE contract.
+      - name: Run LongMemEval benchmark
+        if: steps.dataset.outputs.available == 'true'
+        run: npm run eval:longmemeval -- --adapters agentmemory --k 5
+
+      # Parse R@5 from the runner's summary.json and enforce the floor.
+      # summary.json shape (see eval/runner/score.ts aggregate): byAdapter is
+      # keyed by adapter name; the hybrid agentmemory adapter reports as
+      # "agentmemory-hybrid" with `.r` = mean recall@k. We read whichever
+      # agentmemory-* adapter actually produced rows so a future rename does
+      # not silently turn the gate into a no-op.
+      - name: Enforce R@5 floor
+        if: steps.dataset.outputs.available == 'true'
+        run: |
+          SUMMARY="eval/reports/longmemeval/summary.json"
+          if [ ! -f "$SUMMARY" ]; then
+            echo "::error title=Benchmark gate failed::expected $SUMMARY but the eval produced none"
+            exit 1
+          fi
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const floor = Number(process.env.R5_FLOOR);
+            if (!Number.isFinite(floor)) {
+              console.error(`::error::invalid R5_FLOOR: ${process.env.R5_FLOOR}`);
+              process.exit(1);
+            }
+            const summary = JSON.parse(readFileSync("eval/reports/longmemeval/summary.json", "utf8"));
+            const byAdapter = summary.byAdapter ?? {};
+            const name = Object.keys(byAdapter).find((a) => a.startsWith("agentmemory"));
+            if (!name) {
+              console.error("::error title=Benchmark gate failed::no agentmemory adapter rows in summary.json — the adapter likely skipped (server unavailable). Refusing to pass silently.");
+              process.exit(1);
+            }
+            const r5 = byAdapter[name].r;
+            if (typeof r5 !== "number" || !Number.isFinite(r5)) {
+              console.error(`::error title=Benchmark gate failed::adapter ${name} has no numeric R@5`);
+              process.exit(1);
+            }
+            const pct = (r5 * 100).toFixed(1);
+            const floorPct = (floor * 100).toFixed(1);
+            if (r5 < floor) {
+              console.error(`::error title=R@5 regression::${name} R@5=${pct}% is below the floor of ${floorPct}%`);
+              process.exit(1);
+            }
+            console.log(`${name} R@5=${pct}% meets the ${floorPct}% floor`);
+          '

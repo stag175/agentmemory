@@ -28,6 +28,8 @@ import {
   defaultMemoryLane,
   isMemorySearchable,
   isMemoryTemporallyCompatible,
+  normalizeMemoryLane,
+  normalizeMemoryPrivacyScope,
   normalizeTemporalValidityFilter,
   temporalValidityHardFilter,
   type TemporalValidityFilter,
@@ -97,6 +99,25 @@ export function resetFollowupStatsForTests(): void {
 // Compact mode trims each lesson's content for at-a-glance display. The
 // full content is fetched via memory_lesson_recall when the caller needs it.
 const LESSON_CONTENT_PREVIEW_CHARS = 240;
+
+// Accepted values for the memoryTier / privacyScope filters, used only
+// to build the validation-error message. normalizeMemoryLane() and
+// normalizeMemoryPrivacyScope() remain the source of truth for what is
+// actually accepted; these lists are kept in sync with them.
+const MEMORY_LANE_VALUES: MemoryLane[] = [
+  "episode",
+  "semantic_fact",
+  "procedure",
+  "reflection",
+  "artifact_index",
+];
+const MEMORY_PRIVACY_SCOPE_VALUES: MemoryPrivacyScope[] = [
+  "user",
+  "project",
+  "team",
+  "agent",
+  "temporary",
+];
 
 type SmartSearchFilters = {
   agentId?: string;
@@ -690,6 +711,32 @@ export function registerSmartSearchFunction(
       const tokenBudget = normalizeTokenBudget(data.tokenBudget);
       const includeStructuredReport =
         data.explain === true || data.includeReport === true || tokenBudget !== undefined;
+      // Validate enum filters up front so a typo can't silently empty
+      // the result set. matchesFilters() compares the raw value with
+      // strict equality, so an unrecognized memoryTier/privacyScope
+      // would otherwise count as a hard filter that nothing satisfies.
+      // We mirror the temporal path: a non-empty invalid value returns
+      // a validation error instead of zero hits.
+      const memoryTierRaw = asNonEmptyString(data.memoryTier);
+      const memoryTier = normalizeMemoryLane(memoryTierRaw);
+      if (memoryTierRaw && !memoryTier) {
+        return {
+          mode: data.expandIds && data.expandIds.length > 0 ? "expanded" : "compact",
+          results: [],
+          error:
+            `memoryTier must be one of: ${MEMORY_LANE_VALUES.join(", ")}`,
+        };
+      }
+      const privacyScopeRaw = asNonEmptyString(data.privacyScope);
+      const privacyScope = normalizeMemoryPrivacyScope(privacyScopeRaw);
+      if (privacyScopeRaw && !privacyScope) {
+        return {
+          mode: data.expandIds && data.expandIds.length > 0 ? "expanded" : "compact",
+          results: [],
+          error:
+            `privacyScope must be one of: ${MEMORY_PRIVACY_SCOPE_VALUES.join(", ")}`,
+        };
+      }
       const filters: SmartSearchFilters = {
         agentId: filterAgentId,
         project: asNonEmptyString(data.project),
@@ -701,8 +748,8 @@ export function registerSmartSearchFunction(
           ...parseStringList(data.file),
           ...parseStringList(data.filePath),
         ],
-        memoryTier: data.memoryTier,
-        privacyScope: data.privacyScope,
+        memoryTier,
+        privacyScope,
       };
       const temporal = normalizeTemporalValidityFilter({
         asOf: data.asOf,
@@ -952,8 +999,18 @@ export function registerSmartSearchFunction(
         context?: string;
         tokens?: number;
         truncated?: boolean;
+        warnings?: string[];
       } = { mode: "compact", results: compact };
       if (includeLessons) response.lessons = lessons;
+      // as_of retrieval mode only takes effect when an asOf/validAt
+      // anchor is supplied. Without one it silently behaves like a plain
+      // search, so surface that in the normal response — not just inside
+      // explain — to keep the report-only modes honest.
+      if (retrievalMode === "as_of" && !filters.temporal) {
+        response.warnings = [
+          "as_of retrieval mode requires asOf or validAt; none was provided, so no temporal filter was applied",
+        ];
+      }
       if (includeStructuredReport) {
         const driftEvidence = retrievalMode === "drift"
           ? await buildDriftEvidence(kv, {

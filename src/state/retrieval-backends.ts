@@ -1,3 +1,10 @@
+import {
+  createQdrantRetrievalStore,
+  type QdrantHealthResult,
+  type FetchLike,
+  type RetrievalRuntimeStore,
+} from "./retrieval-qdrant-adapter.js";
+
 export const SUPPORTED_RETRIEVAL_BACKENDS = [
   "sqlite",
   "lancedb",
@@ -8,6 +15,13 @@ export const SUPPORTED_RETRIEVAL_BACKENDS = [
 
 export type RetrievalBackendKind =
   (typeof SUPPORTED_RETRIEVAL_BACKENDS)[number];
+
+// Backends with a real runtime adapter behind `createRetrievalBackendAdapter`.
+// sqlite is served by the iii-engine StateModule boundary; qdrant ships an
+// HTTP adapter (retrieval-qdrant-adapter.ts). Any backend NOT in this set is
+// config-only: it can be parsed and validated, but never reports 'available'.
+export const IMPLEMENTED_RUNTIME_BACKENDS: ReadonlySet<RetrievalBackendKind> =
+  new Set<RetrievalBackendKind>(["sqlite", "qdrant"]);
 
 export type RetrievalBackendConnection =
   | {
@@ -65,6 +79,7 @@ export type RetrievalBackendConfigResult =
 
 export type RetrievalBackendAvailabilityStatus =
   | "available"
+  | "reserved"
   | "unavailable"
   | "invalid";
 
@@ -73,6 +88,12 @@ export type RetrievalBackendAvailability = {
   reason: string;
   explicitConfigRequired: boolean;
   explicitlyConfigured: boolean;
+  // True only when a real runtime adapter exists behind the boundary. A
+  // backend can be valid + configured yet have no implementation (reserved).
+  runtimeImplemented: boolean;
+  // Result of the caller-owned health probe, when one has been run. The sync
+  // factory leaves this undefined; evaluateRetrievalBackendAvailability fills it.
+  healthChecked: boolean;
 };
 
 export type RetrievalBackendHealthCheck = {
@@ -107,6 +128,12 @@ export interface RetrievalBackendAdapter {
   availability: RetrievalBackendAvailability;
   capabilities: RetrievalBackendCapabilities;
   connectsDuringFactory: false;
+  // Runtime vector-store binding, present only for implemented external
+  // backends (currently qdrant) once they are explicitly configured.
+  store: RetrievalRuntimeStore | null;
+  // Caller-owned network probe. No-op (returns null) for backends that do not
+  // require a connectivity check. The factory itself never invokes this.
+  checkHealth: () => Promise<QdrantHealthResult | null>;
   planHealthCheck: () => RetrievalBackendHealthPlan;
 }
 
@@ -116,6 +143,8 @@ export interface InvalidRetrievalBackendAdapter {
   availability: RetrievalBackendAvailability;
   capabilities: RetrievalBackendCapabilities;
   connectsDuringFactory: false;
+  store: null;
+  checkHealth: () => Promise<QdrantHealthResult | null>;
   planHealthCheck: () => RetrievalBackendHealthPlan;
 }
 
@@ -300,11 +329,22 @@ export function resolveRetrievalBackendConfig(
   };
 }
 
+export type RetrievalBackendFactoryOptions = {
+  env?: EnvMap;
+  fetchImpl?: FetchLike;
+  timeoutMs?: number;
+};
+
 export function createRetrievalBackendAdapter(
-  env: EnvMap = process.env,
+  envOrOptions: EnvMap | RetrievalBackendFactoryOptions = process.env,
 ): RetrievalBackendAdapterResult {
-  const config = resolveRetrievalBackendConfig(env);
-  const adapter = buildAdapter(config.descriptor, config.errors);
+  const options = normalizeFactoryOptions(envOrOptions);
+  const config = resolveRetrievalBackendConfig(options.env);
+  const adapter = buildAdapter(config.descriptor, config.errors, {
+    env: options.env,
+    fetchImpl: options.fetchImpl,
+    timeoutMs: options.timeoutMs,
+  });
 
   if (config.ok) {
     return { ok: true, adapter: adapter as RetrievalBackendAdapter, errors: [] };
@@ -313,18 +353,80 @@ export function createRetrievalBackendAdapter(
   return { ok: false, adapter, errors: config.errors };
 }
 
+// Async companion to the sync factory: builds the adapter, runs the
+// caller-owned health probe (qdrant only), and returns an availability that
+// reflects the probe result. qdrant flips from 'reserved' to 'available' only
+// when the health check passes; a failed probe stays 'unavailable'.
+export async function evaluateRetrievalBackendAvailability(
+  envOrOptions: EnvMap | RetrievalBackendFactoryOptions = process.env,
+): Promise<{
+  adapter: RetrievalBackendAdapter | InvalidRetrievalBackendAdapter;
+  availability: RetrievalBackendAvailability;
+  health: QdrantHealthResult | null;
+  errors: string[];
+}> {
+  const result = createRetrievalBackendAdapter(envOrOptions);
+  const adapter = result.adapter;
+  let health: QdrantHealthResult | null = null;
+
+  if (adapter.backend !== "invalid" && adapter.store) {
+    health = await adapter.checkHealth();
+  }
+
+  const availability =
+    adapter.backend === "invalid"
+      ? adapter.availability
+      : describeAvailability(adapter.descriptor, result.errors, health);
+
+  return {
+    adapter,
+    availability,
+    health,
+    errors: result.errors,
+  };
+}
+
+function normalizeFactoryOptions(
+  envOrOptions: EnvMap | RetrievalBackendFactoryOptions,
+): { env: EnvMap; fetchImpl?: FetchLike; timeoutMs?: number } {
+  if (isFactoryOptions(envOrOptions)) {
+    return {
+      env: envOrOptions.env ?? process.env,
+      fetchImpl: envOrOptions.fetchImpl,
+      timeoutMs: envOrOptions.timeoutMs,
+    };
+  }
+  return { env: envOrOptions };
+}
+
+function isFactoryOptions(
+  value: EnvMap | RetrievalBackendFactoryOptions,
+): value is RetrievalBackendFactoryOptions {
+  const candidate = value as RetrievalBackendFactoryOptions;
+  return (
+    typeof candidate.fetchImpl === "function" ||
+    typeof candidate.timeoutMs === "number" ||
+    (typeof candidate.env === "object" && candidate.env !== null)
+  );
+}
+
 export function createRetrievalBackendHealthPlan(
   descriptor: RetrievalBackendDescriptor | InvalidRetrievalBackendDescriptor,
   errors: readonly string[] = [],
 ): RetrievalBackendHealthPlan {
   const availability = describeAvailability(descriptor, errors);
   const capabilities = BACKEND_CAPABILITIES[descriptor.backend];
+  // A valid configuration is one that parsed and (for external backends) is
+  // explicitly configured — i.e. 'available' or 'reserved'. 'unavailable' and
+  // 'invalid' mean the config itself is broken and the check blocks.
+  const configValid =
+    availability.status === "available" || availability.status === "reserved";
   const checks: RetrievalBackendHealthCheck[] = [
     {
       id: "config",
-      status: availability.status === "available" ? "pass" : "fail",
+      status: configValid ? "pass" : "fail",
       mode: "static",
-      blocking: availability.status !== "available",
+      blocking: !configValid,
       summary: availability.reason,
     },
   ];
@@ -677,6 +779,7 @@ function result(
 function buildAdapter(
   descriptor: RetrievalBackendDescriptor | InvalidRetrievalBackendDescriptor,
   errors: readonly string[],
+  options: { env?: EnvMap; fetchImpl?: FetchLike; timeoutMs?: number } = {},
 ): RetrievalBackendAdapter | InvalidRetrievalBackendAdapter {
   const availability = describeAvailability(descriptor, errors);
   const capabilities = BACKEND_CAPABILITIES[descriptor.backend];
@@ -688,9 +791,13 @@ function buildAdapter(
       availability,
       capabilities,
       connectsDuringFactory: false,
+      store: null,
+      checkHealth: async () => null,
       planHealthCheck: () => createRetrievalBackendHealthPlan(descriptor, errors),
     };
   }
+
+  const store = buildRuntimeStore(descriptor, options);
 
   return {
     backend: descriptor.backend,
@@ -698,13 +805,47 @@ function buildAdapter(
     availability,
     capabilities,
     connectsDuringFactory: false,
+    store,
+    checkHealth: store ? () => store.healthCheck() : async () => null,
     planHealthCheck: () => createRetrievalBackendHealthPlan(descriptor, errors),
   };
+}
+
+function buildRuntimeStore(
+  descriptor: RetrievalBackendDescriptor,
+  options: { env?: EnvMap; fetchImpl?: FetchLike; timeoutMs?: number },
+): RetrievalRuntimeStore | null {
+  // Only build a runtime store for an implemented + enabled + configured
+  // external backend. sqlite is served by the StateModule boundary, not a
+  // standalone store; reserved backends (lancedb/weaviate/chroma) have none.
+  if (descriptor.backend !== "qdrant") return null;
+  if (!descriptor.enabled) return null;
+  if (descriptor.connection.kind !== "http") return null;
+
+  return createQdrantRetrievalStore(descriptor, {
+    fetchImpl: options.fetchImpl,
+    timeoutMs: options.timeoutMs,
+    apiKey: readQdrantApiKey(descriptor, options.env ?? process.env),
+  });
+}
+
+function readQdrantApiKey(
+  descriptor: RetrievalBackendDescriptor,
+  env: EnvMap,
+): string | undefined {
+  if (descriptor.connection.kind !== "http") return undefined;
+  const envVar = descriptor.connection.apiKeyEnvVar;
+  if (!envVar) return undefined;
+  const value = env[envVar];
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : undefined;
 }
 
 function describeAvailability(
   descriptor: RetrievalBackendDescriptor | InvalidRetrievalBackendDescriptor,
   errors: readonly string[],
+  health?: QdrantHealthResult | null,
 ): RetrievalBackendAvailability {
   if (descriptor.backend === "invalid") {
     return {
@@ -712,12 +853,18 @@ function describeAvailability(
       reason: errors[0] || "Unsupported retrieval backend.",
       explicitConfigRequired: true,
       explicitlyConfigured: descriptor.explicit,
+      runtimeImplemented: false,
+      healthChecked: false,
     };
   }
 
   const explicitConfigRequired = descriptor.backend !== "sqlite";
   const explicitlyConfigured =
     descriptor.explicit && descriptor.connection.kind !== "none";
+  const runtimeImplemented = IMPLEMENTED_RUNTIME_BACKENDS.has(
+    descriptor.backend,
+  );
+  const healthChecked = health !== undefined && health !== null;
 
   if (!descriptor.enabled) {
     return {
@@ -727,6 +874,8 @@ function describeAvailability(
         `${descriptor.backend} retrieval backend is not available with the current configuration.`,
       explicitConfigRequired,
       explicitlyConfigured,
+      runtimeImplemented,
+      healthChecked,
     };
   }
 
@@ -736,17 +885,72 @@ function describeAvailability(
       reason: `${descriptor.backend} retrieval backend requires explicit adapter configuration before it can be used.`,
       explicitConfigRequired,
       explicitlyConfigured,
+      runtimeImplemented,
+      healthChecked,
+    };
+  }
+
+  // Honesty gate: a configured backend without a real runtime adapter is
+  // 'reserved', never 'available'. Documented env vars are accepted, but the
+  // backend cannot actually serve vector operations yet.
+  if (!runtimeImplemented) {
+    return {
+      status: "reserved",
+      reason: `${descriptor.backend} retrieval backend has no runtime adapter yet; configuration is recognized but reserved and cannot serve vector operations.`,
+      explicitConfigRequired,
+      explicitlyConfigured,
+      runtimeImplemented,
+      healthChecked,
+    };
+  }
+
+  // sqlite is served by the in-process StateModule boundary: available with no
+  // network probe required.
+  if (descriptor.backend === "sqlite") {
+    return {
+      status: "available",
+      reason:
+        "sqlite retrieval uses the iii-engine StateModule boundary without opening a database during factory creation.",
+      explicitConfigRequired,
+      explicitlyConfigured,
+      runtimeImplemented,
+      healthChecked,
+    };
+  }
+
+  // Implemented external backend (qdrant): the runtime adapter exists, but the
+  // backend is only 'available' once a health probe confirms reachability.
+  // Until then it is 'reserved' (sync factory), and a failed probe is
+  // 'unavailable'.
+  if (health === undefined || health === null) {
+    return {
+      status: "reserved",
+      reason: `${descriptor.backend} retrieval adapter is configured; run a health check to confirm reachability before it reports available.`,
+      explicitConfigRequired,
+      explicitlyConfigured,
+      runtimeImplemented,
+      healthChecked,
+    };
+  }
+
+  if (health.reachable) {
+    return {
+      status: "available",
+      reason: `${descriptor.backend} retrieval adapter passed its health check and is ready to serve vector operations.`,
+      explicitConfigRequired,
+      explicitlyConfigured,
+      runtimeImplemented,
+      healthChecked,
     };
   }
 
   return {
-    status: "available",
-    reason:
-      descriptor.backend === "sqlite"
-        ? "sqlite retrieval uses the iii-engine StateModule boundary without opening a database during factory creation."
-        : `${descriptor.backend} retrieval adapter is configured; runtime health checks remain explicit and caller-owned.`,
+    status: "unavailable",
+    reason: health.detail,
     explicitConfigRequired,
     explicitlyConfigured,
+    runtimeImplemented,
+    healthChecked,
   };
 }
 
@@ -762,7 +966,7 @@ function nextHealthSteps(
     ];
   }
 
-  if (availability.status !== "available") {
+  if (availability.status === "unavailable") {
     return errors.length > 0
       ? [...errors]
       : [`Configure ${descriptor.backend} before selecting it as the retrieval backend.`];
@@ -774,16 +978,33 @@ function nextHealthSteps(
     ];
   }
 
-  if (descriptor.backend === "lancedb") {
+  // Reserved backends with no runtime adapter: be explicit that the
+  // configuration is recognized but cannot serve reads yet.
+  if (!availability.runtimeImplemented) {
+    if (descriptor.backend === "lancedb") {
+      return [
+        "lancedb is reserved: no runtime adapter is implemented yet, so it cannot serve vector operations.",
+        "Install and wire a LanceDB adapter behind this boundary before enabling reads.",
+        "Run an explicit local path and schema health check outside the config factory.",
+      ];
+    }
     return [
-      "Install and wire a LanceDB adapter behind this boundary before enabling reads.",
-      "Run an explicit local path and schema health check outside the config factory.",
+      `${descriptor.backend} is reserved: no runtime adapter is implemented yet, so it cannot serve vector operations.`,
+      `Install and wire a ${descriptor.backend} adapter behind this boundary before enabling reads.`,
+      "Verify embedding model, vector dimension, collection, and auth settings before read cutover.",
+    ];
+  }
+
+  // Implemented external backend (qdrant) that is configured. If a health
+  // probe has not yet run, prompt for one; otherwise it is available.
+  if (availability.status === "reserved") {
+    return [
+      `${descriptor.backend} adapter is configured; run evaluateRetrievalBackendAvailability (a health probe) to confirm reachability before read cutover.`,
+      "Verify embedding model, vector dimension, collection, and auth settings before read cutover.",
     ];
   }
 
   return [
-    `Install and wire a ${descriptor.backend} adapter behind this boundary before enabling reads.`,
-    "Run an explicit network health probe only from caller-owned operational code.",
-    "Verify embedding model, vector dimension, collection, and auth settings before read cutover.",
+    `${descriptor.backend} adapter passed its health check; verify embedding model, vector dimension, and collection before read cutover.`,
   ];
 }

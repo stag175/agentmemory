@@ -1,9 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createRetrievalBackendAdapter,
+  evaluateRetrievalBackendAvailability,
   resolveRetrievalBackendConfig,
   SUPPORTED_RETRIEVAL_BACKENDS,
 } from "../src/state/retrieval-backends.js";
+import {
+  QdrantHttpError,
+  QdrantRetrievalStore,
+} from "../src/state/retrieval-qdrant-adapter.js";
 
 describe("resolveRetrievalBackendConfig", () => {
   it("defaults to sqlite without opening a database", () => {
@@ -250,8 +255,8 @@ describe("createRetrievalBackendAdapter", () => {
     }
   });
 
-  it("represents configured external backends without importing clients or probing health", () => {
-    const configured = [
+  it("reports backends with no runtime adapter as reserved, never available", () => {
+    const reserved = [
       {
         backend: "lancedb",
         env: {
@@ -259,14 +264,6 @@ describe("createRetrievalBackendAdapter", () => {
           AGENTMEMORY_LANCEDB_PATH: "./data/lancedb",
         },
         requiresNetwork: false,
-      },
-      {
-        backend: "qdrant",
-        env: {
-          AGENTMEMORY_RETRIEVAL_BACKEND: "qdrant",
-          QDRANT_URL: "http://127.0.0.1:6333",
-        },
-        requiresNetwork: true,
       },
       {
         backend: "weaviate",
@@ -286,47 +283,282 @@ describe("createRetrievalBackendAdapter", () => {
       },
     ] as const;
 
-    for (const { backend, env, requiresNetwork } of configured) {
+    for (const { backend, env, requiresNetwork } of reserved) {
       const result = createRetrievalBackendAdapter(env);
 
       expect(result.ok, backend).toBe(true);
       expect(result.adapter.backend, backend).toBe(backend);
+      expect(result.adapter.availability.status, backend).not.toBe("available");
       expect(result.adapter.availability, backend).toMatchObject({
-        status: "available",
+        status: "reserved",
         explicitConfigRequired: true,
         explicitlyConfigured: true,
+        runtimeImplemented: false,
       });
-      expect(result.adapter.capabilities.requiresVendorClient, backend).toBe(
-        true,
-      );
+      // No runtime store is built for a backend that has no implementation.
+      expect(result.adapter.store, backend).toBeNull();
+      expect(result.adapter.connectsDuringFactory, backend).toBe(false);
       expect(result.adapter.capabilities.requiresNetwork, backend).toBe(
         requiresNetwork,
       );
-      expect(result.adapter.connectsDuringFactory, backend).toBe(false);
 
       const plan = result.adapter.planHealthCheck();
-      expect(plan.checks, backend).toContainEqual(
-        expect.objectContaining({
-          id: "dependency",
-          status: "not-run",
-          mode: "manual",
-          blocking: false,
-        }),
-      );
-      if (requiresNetwork) {
-        expect(plan.checks, backend).toContainEqual(
-          expect.objectContaining({
-            id: "connectivity",
-            status: "not-run",
-            mode: "manual",
-            blocking: false,
-          }),
-        );
-      } else {
-        expect(plan.checks.some((check) => check.id === "connectivity")).toBe(
-          false,
-        );
-      }
+      // Config parsed cleanly, so the config check passes even though the
+      // backend is reserved.
+      expect(plan.checks[0], backend).toMatchObject({
+        id: "config",
+        status: "pass",
+        mode: "static",
+      });
+      expect(plan.nextSteps.join(" "), backend).toContain("reserved");
     }
+  });
+
+  it("treats configured qdrant as reserved until a health check runs", () => {
+    const result = createRetrievalBackendAdapter({
+      AGENTMEMORY_RETRIEVAL_BACKEND: "qdrant",
+      QDRANT_URL: "http://127.0.0.1:6333",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.adapter.backend).toBe("qdrant");
+    expect(result.adapter.availability.status).toBe("reserved");
+    expect(result.adapter.availability).toMatchObject({
+      status: "reserved",
+      explicitConfigRequired: true,
+      explicitlyConfigured: true,
+      runtimeImplemented: true,
+      healthChecked: false,
+    });
+    // qdrant has a real runtime store even before the probe runs.
+    expect(result.adapter.store).not.toBeNull();
+    expect(result.adapter.connectsDuringFactory).toBe(false);
+
+    const plan = result.adapter.planHealthCheck();
+    expect(plan.checks[0]).toMatchObject({ id: "config", status: "pass" });
+    expect(plan.checks).toContainEqual(
+      expect.objectContaining({ id: "connectivity", status: "not-run" }),
+    );
+  });
+});
+
+describe("evaluateRetrievalBackendAvailability", () => {
+  it("marks qdrant available only when the health check passes", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      expect(url).toBe("http://127.0.0.1:6333/healthz");
+      return new Response("healthz check passed", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const evaluation = await evaluateRetrievalBackendAvailability({
+      env: {
+        AGENTMEMORY_RETRIEVAL_BACKEND: "qdrant",
+        QDRANT_URL: "http://127.0.0.1:6333",
+      },
+      fetchImpl,
+    });
+
+    expect(evaluation.adapter.backend).toBe("qdrant");
+    expect(evaluation.health?.reachable).toBe(true);
+    expect(evaluation.availability).toMatchObject({
+      status: "available",
+      runtimeImplemented: true,
+      healthChecked: true,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps qdrant unavailable when the health check fails", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return new Response("service unavailable", {
+        status: 503,
+        statusText: "Service Unavailable",
+      });
+    }) as unknown as typeof fetch;
+
+    const evaluation = await evaluateRetrievalBackendAvailability({
+      env: {
+        AGENTMEMORY_RETRIEVAL_BACKEND: "qdrant",
+        QDRANT_URL: "http://127.0.0.1:6333",
+      },
+      fetchImpl,
+    });
+
+    expect(evaluation.health?.reachable).toBe(false);
+    expect(evaluation.availability.status).toBe("unavailable");
+    expect(evaluation.availability.healthChecked).toBe(true);
+    expect(evaluation.availability.reason).toContain("503");
+  });
+
+  it("never probes a reserved backend with no runtime adapter", async () => {
+    const fetchImpl = vi.fn(async () => new Response("", { status: 200 }));
+
+    const evaluation = await evaluateRetrievalBackendAvailability({
+      env: {
+        AGENTMEMORY_RETRIEVAL_BACKEND: "weaviate",
+        WEAVIATE_URL: "http://127.0.0.1:8080",
+      },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(evaluation.availability.status).toBe("reserved");
+    expect(evaluation.health).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("QdrantRetrievalStore", () => {
+  it("upserts points via PUT to the collection points endpoint", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(input), init: init ?? {} });
+        return new Response(JSON.stringify({ result: { status: "ok" } }), {
+          status: 200,
+        });
+      },
+    ) as unknown as typeof fetch;
+
+    const store = new QdrantRetrievalStore({
+      url: "http://127.0.0.1:6333/",
+      collection: "agentmemory",
+      apiKey: "secret-key",
+      fetchImpl,
+    });
+
+    await store.upsert([
+      { id: "obs-1", vector: [0.1, 0.2], payload: { sessionId: "s1" } },
+    ]);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(
+      "http://127.0.0.1:6333/collections/agentmemory/points",
+    );
+    expect(calls[0].init.method).toBe("PUT");
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers["api-key"]).toBe("secret-key");
+    expect(headers["Content-Type"]).toBe("application/json");
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.points[0]).toMatchObject({
+      id: "obs-1",
+      vector: [0.1, 0.2],
+      payload: { sessionId: "s1" },
+    });
+  });
+
+  it("searches by vector via POST and maps hits", async () => {
+    let captured: { url: string; init: RequestInit } | null = null;
+    const fetchImpl = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        captured = { url: String(input), init: init ?? {} };
+        return new Response(
+          JSON.stringify({
+            result: [
+              { id: "obs-7", score: 0.91, payload: { sessionId: "s9" } },
+              { id: "obs-8", score: 0.42 },
+            ],
+          }),
+          { status: 200 },
+        );
+      },
+    ) as unknown as typeof fetch;
+
+    const store = new QdrantRetrievalStore({
+      url: "http://127.0.0.1:6333",
+      collection: "memories",
+      fetchImpl,
+    });
+
+    const hits = await store.searchByVector([0.5, 0.5], 5);
+
+    expect(captured).not.toBeNull();
+    expect(captured!.url).toBe(
+      "http://127.0.0.1:6333/collections/memories/points/search",
+    );
+    expect(captured!.init.method).toBe("POST");
+    const body = JSON.parse(String(captured!.init.body));
+    expect(body).toMatchObject({ vector: [0.5, 0.5], limit: 5, with_payload: true });
+    expect(hits).toEqual([
+      { id: "obs-7", score: 0.91, payload: { sessionId: "s9" } },
+      { id: "obs-8", score: 0.42, payload: undefined },
+    ]);
+  });
+
+  it("deletes points by id via POST", async () => {
+    let captured: { url: string; init: RequestInit } | null = null;
+    const fetchImpl = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        captured = { url: String(input), init: init ?? {} };
+        return new Response(JSON.stringify({ result: { status: "ok" } }), {
+          status: 200,
+        });
+      },
+    ) as unknown as typeof fetch;
+
+    const store = new QdrantRetrievalStore({
+      url: "http://127.0.0.1:6333",
+      collection: "agentmemory",
+      fetchImpl,
+    });
+
+    await store.deleteByIds(["obs-1", "obs-2"]);
+
+    expect(captured).not.toBeNull();
+    expect(captured!.url).toBe(
+      "http://127.0.0.1:6333/collections/agentmemory/points/delete",
+    );
+    expect(captured!.init.method).toBe("POST");
+    const body = JSON.parse(String(captured!.init.body));
+    expect(body).toEqual({ points: ["obs-1", "obs-2"] });
+  });
+
+  it("reports a reachable health check on 200", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("ok", { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const store = new QdrantRetrievalStore({
+      url: "http://127.0.0.1:6333",
+      collection: "agentmemory",
+      fetchImpl,
+    });
+
+    const health = await store.healthCheck();
+    expect(health.reachable).toBe(true);
+    expect(health.status).toBe(200);
+  });
+
+  it("reports an unreachable health check when fetch throws", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("connection refused");
+    }) as unknown as typeof fetch;
+
+    const store = new QdrantRetrievalStore({
+      url: "http://127.0.0.1:6333",
+      collection: "agentmemory",
+      fetchImpl,
+    });
+
+    const health = await store.healthCheck();
+    expect(health.reachable).toBe(false);
+    expect(health.status).toBeNull();
+    expect(health.detail).toContain("connection refused");
+  });
+
+  it("raises a QdrantHttpError on non-2xx data operations", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response("nope", { status: 500, statusText: "Server Error" }),
+    ) as unknown as typeof fetch;
+
+    const store = new QdrantRetrievalStore({
+      url: "http://127.0.0.1:6333",
+      collection: "agentmemory",
+      fetchImpl,
+    });
+
+    await expect(store.upsert([{ id: "x", vector: [1] }])).rejects.toThrow(
+      QdrantHttpError,
+    );
   });
 });

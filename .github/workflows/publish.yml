@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       packages:
-        description: "Packages to publish (comma-separated: agentmemory,mcp,fs-watcher)"
+        description: "Packages to publish (comma-separated: agentmemory,mcp,fs-watcher,github-watcher)"
         required: false
-        default: "agentmemory,mcp,fs-watcher"
+        default: "agentmemory,mcp,fs-watcher,github-watcher"
 
 # Workflow-level permissions stay minimal — only `contents: read`
 # is required to check out the repo. `id-token: write` is granted on
@@ -121,4 +121,34 @@ jobs:
             sleep 5
           done
           echo "ERROR: fs-watcher never propagated after 2 minutes" >&2
+          exit 1
+
+      # github-watcher mirrors the fs-watcher connector: a standalone workspace
+      # package published from its own integrations/ subdirectory with the same
+      # idempotent "skip if version already on the registry" guard.
+      - name: Publish @agentmemory/github-watcher connector
+        working-directory: integrations/github-watcher
+        run: |
+          GHW_VERSION=$(node -p "require('./package.json').version")
+          if npm view "@agentmemory/github-watcher@$GHW_VERSION" version >/dev/null 2>&1; then
+            echo "github-watcher version already published, skipping"
+          else
+            npm publish --provenance --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Wait for @agentmemory/github-watcher registry propagation
+        working-directory: integrations/github-watcher
+        run: |
+          GHW_VERSION=$(node -p "require('./package.json').version")
+          for i in $(seq 1 24); do
+            if npm view "@agentmemory/github-watcher@$GHW_VERSION" version >/dev/null 2>&1; then
+              echo "github-watcher propagated after ${i} attempt(s)"
+              exit 0
+            fi
+            echo "Attempt $i: not yet available, sleeping 5s..."
+            sleep 5
+          done
+          echo "ERROR: github-watcher never propagated after 2 minutes" >&2
           exit 1

@@ -998,4 +998,242 @@ describe("memory lifecycle roadmap surface", () => {
       result.suggestions.some((row) => row.normalizedConcept === "retry"),
     ).toBe(false);
   });
+
+  it("rejects updates to a tombstoned memory and points the caller at restore", async () => {
+    const created = (await sdk.trigger("mem::remember", {
+      content: "A memory that will be deleted before an update attempt",
+      type: "fact",
+    })) as { memory: Memory };
+
+    await sdk.trigger("mem::memory-delete", {
+      memoryId: created.memory.id,
+      reason: "user requested removal",
+    });
+
+    const result = (await sdk.trigger("mem::memory-update", {
+      memoryId: created.memory.id,
+      content: "Trying to resurrect deleted content through update",
+    })) as { success: boolean; error: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("memory is deleted; use restore");
+
+    const stored = await kv.get<Memory>("mem:memories", created.memory.id);
+    expect(stored?.lifecycleState).toBe("tombstoned");
+    expect(stored?.content).toBe("");
+  });
+
+  it("rejects expire and archive on a tombstoned memory", async () => {
+    const created = (await sdk.trigger("mem::remember", {
+      content: "A memory that is tombstoned before lifecycle transitions",
+      type: "fact",
+    })) as { memory: Memory };
+
+    await sdk.trigger("mem::memory-delete", {
+      memoryId: created.memory.id,
+      reason: "user requested removal",
+    });
+
+    const expired = (await sdk.trigger("mem::memory-expire", {
+      memoryId: created.memory.id,
+    })) as { success: boolean; error: string };
+    const archived = (await sdk.trigger("mem::memory-archive", {
+      memoryId: created.memory.id,
+    })) as { success: boolean; error: string };
+
+    expect(expired.success).toBe(false);
+    expect(expired.error).toBe("memory is deleted; use restore");
+    expect(archived.success).toBe(false);
+    expect(archived.error).toBe("memory is deleted; use restore");
+
+    const stored = await kv.get<Memory>("mem:memories", created.memory.id);
+    expect(stored?.lifecycleState).toBe("tombstoned");
+  });
+
+  it("schedules a future expiration without expiring or de-indexing the memory", async () => {
+    const created = (await sdk.trigger("mem::remember", {
+      content: "Guidance that should remain active until a future cutoff",
+      type: "fact",
+    })) as { memory: Memory };
+    expect(getSearchIndex().has(created.memory.id)).toBe(true);
+
+    const expiresAt = new Date(Date.now() + 86_400_000).toISOString();
+    const result = (await sdk.trigger("mem::memory-expire", {
+      memoryId: created.memory.id,
+      expiresAt,
+      reason: "schedule expiry for tomorrow",
+    })) as { success: boolean; memory: Memory };
+
+    expect(result.success).toBe(true);
+    expect(result.memory.lifecycleState).toBe("active");
+    expect(result.memory.validUntil).toBe(expiresAt);
+    expect(result.memory.forgetAfter).toBe(expiresAt);
+    // Future-dated expiry keeps the memory retrievable until the cutoff.
+    expect(getSearchIndex().has(created.memory.id)).toBe(true);
+
+    const inspected = (await sdk.trigger("mem::memory-inspect", {
+      memoryId: created.memory.id,
+    })) as { searchable: boolean; review: { temporalStatus: string } };
+    expect(inspected.searchable).toBe(true);
+    expect(inspected.review.temporalStatus).toBe("current");
+  });
+
+  it("expires immediately when expiresAt is in the past or absent", async () => {
+    const created = (await sdk.trigger("mem::remember", {
+      content: "Guidance that is past its useful life",
+      type: "fact",
+    })) as { memory: Memory };
+
+    const expiresAt = new Date(Date.now() - 60_000).toISOString();
+    const result = (await sdk.trigger("mem::memory-expire", {
+      memoryId: created.memory.id,
+      expiresAt,
+    })) as { success: boolean; memory: Memory };
+
+    expect(result.success).toBe(true);
+    expect(result.memory.lifecycleState).toBe("expired");
+    expect(result.memory.isLatest).toBe(false);
+    expect(result.memory.validUntil).toBe(expiresAt);
+    expect(getSearchIndex().has(created.memory.id)).toBe(false);
+  });
+
+  it("restores a quarantined sensitive memory back into quarantine, not active", async () => {
+    const secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJ";
+    const created = (await sdk.trigger("mem::remember", {
+      content: `Quarantined secret ${secret}`,
+      type: "fact",
+    })) as { memory: Memory };
+    expect(created.memory.lifecycleState).toBe("quarantined");
+
+    await sdk.trigger("mem::memory-archive", {
+      memoryId: created.memory.id,
+      reason: "park the quarantined row",
+    });
+
+    const restored = (await sdk.trigger("mem::memory-restore", {
+      memoryId: created.memory.id,
+      reason: "reviewer requested restore",
+    })) as { success: boolean; memory: Memory };
+
+    expect(restored.success).toBe(true);
+    expect(restored.memory.lifecycleState).toBe("quarantined");
+    expect(restored.memory.reviewState).toBe("needs_review");
+    expect(restored.memory.redactionApplied).toBe(true);
+    // A restored sensitive memory must not silently re-enter recall.
+    expect(getSearchIndex().has(created.memory.id)).toBe(false);
+  });
+
+  it("treats a blank content update as no change instead of wiping the body", async () => {
+    const created = (await sdk.trigger("mem::remember", {
+      content: "Original durable content that must survive a blank update",
+      type: "fact",
+    })) as { memory: Memory };
+
+    const updated = (await sdk.trigger("mem::memory-update", {
+      memoryId: created.memory.id,
+      content: "   ",
+      reason: "operator submitted an empty body",
+    })) as { success: boolean; memory: Memory };
+
+    expect(updated.success).toBe(true);
+    expect(updated.memory.content).toBe(
+      "Original durable content that must survive a blank update",
+    );
+
+    const stored = await kv.get<Memory>("mem:memories", created.memory.id);
+    expect(stored?.content).toBe(
+      "Original durable content that must survive a blank update",
+    );
+  });
+
+  it("isolates today-in-memory review and proposal surfaces per agent", async () => {
+    await kv.set("mem:sessions", "ses_iso", {
+      id: "ses_iso",
+      project: "iso",
+      cwd: "/repo/iso",
+      startedAt: "2026-06-29T08:00:00Z",
+      status: "completed",
+      observationCount: 0,
+      agentId: "agent-a",
+    });
+
+    const baseMemory = (id: string, agentId: string): Memory => ({
+      id,
+      createdAt: "2026-06-29T09:00:00Z",
+      updatedAt: "2026-06-29T09:00:00Z",
+      type: "fact",
+      lane: "semantic_fact",
+      lifecycleState: "active",
+      // unreviewed (not needs_review) keeps the row searchable so it lands in
+      // the review queue via the low_confidence / missing_source_evidence
+      // signals rather than being filtered out as non-searchable.
+      reviewState: "unreviewed",
+      title: `Claim ${id}`,
+      content: `Low confidence claim for ${agentId}`,
+      concepts: ["iso"],
+      files: ["src/iso.ts"],
+      sessionIds: ["ses_iso"],
+      strength: 5,
+      confidence: 0.3,
+      version: 1,
+      sourceObservationIds: [],
+      isLatest: true,
+      project: "iso",
+      agentId,
+    });
+
+    await kv.set("mem:memories", "mem_iso_a", baseMemory("mem_iso_a", "agent-a"));
+    await kv.set("mem:memories", "mem_iso_b", baseMemory("mem_iso_b", "agent-b"));
+    await kv.set("mem:state", "team-memory-proposals:team_iso", [
+      {
+        id: "prop_iso_a",
+        teamId: "team_iso",
+        project: "iso",
+        agentId: "agent-a",
+        action: "create",
+        status: "pending",
+        title: "Agent A proposal",
+        proposedAt: "2026-06-29T13:00:00Z",
+        updatedAt: "2026-06-29T13:00:00Z",
+      },
+      {
+        id: "prop_iso_b",
+        teamId: "team_iso",
+        project: "iso",
+        agentId: "agent-b",
+        action: "create",
+        status: "pending",
+        title: "Agent B proposal",
+        proposedAt: "2026-06-29T13:00:00Z",
+        updatedAt: "2026-06-29T13:00:00Z",
+      },
+    ]);
+
+    const inbox = (await sdk.trigger("mem::today-in-memory", {
+      date: "2026-06-29",
+      project: "iso",
+      agentId: "agent-a",
+      limit: 25,
+    })) as {
+      success: boolean;
+      reviewQueue: Array<{ memory: { id: string; agentId?: string } }>;
+      unresolvedClaims: Array<{ memory?: { id: string } }>;
+      proposedConsolidations: Array<{ id: string }>;
+    };
+
+    expect(inbox.success).toBe(true);
+    const reviewIds = inbox.reviewQueue.map((row) => row.memory.id);
+    expect(reviewIds).toContain("mem_iso_a");
+    expect(reviewIds).not.toContain("mem_iso_b");
+
+    const claimIds = inbox.unresolvedClaims
+      .map((row) => row.memory?.id)
+      .filter((id): id is string => typeof id === "string");
+    expect(claimIds).toContain("mem_iso_a");
+    expect(claimIds).not.toContain("mem_iso_b");
+
+    const proposalIds = inbox.proposedConsolidations.map((row) => row.id);
+    expect(proposalIds).toContain("prop_iso_a");
+    expect(proposalIds).not.toContain("prop_iso_b");
+  });
 });

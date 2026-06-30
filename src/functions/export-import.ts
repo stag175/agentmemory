@@ -39,7 +39,11 @@ import {
 } from "../state/memory-utils.js";
 import { VERSION } from "../version.js";
 import { recordAudit } from "./audit.js";
-import { recordAgentEvent, type AgentEventInput } from "./agent-events.js";
+import {
+  recordAgentEvent,
+  AGENT_EVENT_TYPES,
+  type AgentEventInput,
+} from "./agent-events.js";
 import {
   encryptLocalJsonPayload,
   type LocalJsonEncryptionEnvelope,
@@ -185,34 +189,6 @@ const EXPORT_SECTION_NAMES = [
   ...OPTIONAL_EXPORT_SECTIONS,
 ] as const;
 
-const AGENT_EVENT_TYPES: AgentEventType[] = [
-  "session_started",
-  "session_ended",
-  "observation_recorded",
-  "memory_written",
-  "memory_superseded",
-  "memory_updated",
-  "memory_expired",
-  "memory_archived",
-  "memory_restored",
-  "memory_tombstoned",
-  "memory_deleted",
-  "memory_forgotten",
-  "signal_sent",
-  "signal_read",
-  "handoff_sent",
-  "tool_requested",
-  "tool_completed",
-  "tool_failed",
-  "handoff_accepted",
-  "handoff_rejected",
-  "handoff_completed",
-  "checkpoint_created",
-  "checkpoint_resolved",
-  "eval_recorded",
-  "custom",
-];
-
 const AGENT_EVENT_TYPE_SET = new Set<AgentEventType>(AGENT_EVENT_TYPES);
 const MEMORY_TYPES = new Set<Memory["type"]>([
   "pattern",
@@ -325,6 +301,22 @@ type ImportStats = {
   accessLogs: number;
   memoryHistory: number;
   agentEvents: number;
+  profiles: number;
+  graphNodes: number;
+  graphEdges: number;
+  semanticMemories: number;
+  proceduralMemories: number;
+  actions: number;
+  actionEdges: number;
+  routines: number;
+  signals: number;
+  checkpoints: number;
+  sentinels: number;
+  sketches: number;
+  crystals: number;
+  facets: number;
+  lessons: number;
+  insights: number;
   skipped: number;
   quarantined: number;
 };
@@ -1610,8 +1602,252 @@ function buildImportPlan(
   };
 }
 
+type ReplaceSnapshot = {
+  sessions: Session[];
+  observations: Map<string, CompressedObservation[]>;
+  memories: Memory[];
+  summaries: SessionSummary[];
+  actions: Action[];
+  actionEdges: ActionEdge[];
+  routines: Routine[];
+  signals: Signal[];
+  checkpoints: Checkpoint[];
+  sentinels: Sentinel[];
+  sketches: Sketch[];
+  crystals: Crystal[];
+  facets: Facet[];
+  lessons: Lesson[];
+  insights: Insight[];
+  graphNodes: GraphNode[];
+  graphEdges: GraphEdge[];
+  semantic: SemanticMemory[];
+  procedural: ProceduralMemory[];
+  profiles: ProjectProfile[];
+  accessLog: AccessLogExport[];
+  memoryHistory: MemoryRevision[];
+  agentEvents: AgentEvent[];
+};
+
+// Observation buckets live in per-session KV scopes (mem:obs:<id>) with no
+// registry of bucket names. Enumerate the candidate session-id universe from
+// every listable source keyed by sessionId — the sessions list AND the
+// summaries list — so an orphaned bucket whose session record was already
+// removed (but whose summary or bucket survives) is still cleared on replace.
+function observationBucketSessionIds(
+  sessions: Session[],
+  summaries: SessionSummary[],
+): string[] {
+  const ids = new Set<string>();
+  for (const session of sessions) {
+    if (session?.id) ids.add(session.id);
+  }
+  for (const summary of summaries) {
+    if (summary?.sessionId) ids.add(summary.sessionId);
+  }
+  return [...ids];
+}
+
+async function snapshotExistingState(
+  kv: StateKV,
+  sessions: Session[],
+  summaries: SessionSummary[],
+): Promise<ReplaceSnapshot> {
+  const observations = new Map<string, CompressedObservation[]>();
+  for (const sessionId of observationBucketSessionIds(sessions, summaries)) {
+    const bucket = await kv
+      .list<CompressedObservation>(KV.observations(sessionId))
+      .catch(() => []);
+    if (bucket.length > 0) observations.set(sessionId, bucket);
+  }
+  return {
+    sessions,
+    observations,
+    memories: await kv.list<Memory>(KV.memories).catch(() => []),
+    summaries,
+    actions: await kv.list<Action>(KV.actions).catch(() => []),
+    actionEdges: await kv.list<ActionEdge>(KV.actionEdges).catch(() => []),
+    routines: await kv.list<Routine>(KV.routines).catch(() => []),
+    signals: await kv.list<Signal>(KV.signals).catch(() => []),
+    checkpoints: await kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
+    sentinels: await kv.list<Sentinel>(KV.sentinels).catch(() => []),
+    sketches: await kv.list<Sketch>(KV.sketches).catch(() => []),
+    crystals: await kv.list<Crystal>(KV.crystals).catch(() => []),
+    facets: await kv.list<Facet>(KV.facets).catch(() => []),
+    lessons: await kv.list<Lesson>(KV.lessons).catch(() => []),
+    insights: await kv.list<Insight>(KV.insights).catch(() => []),
+    graphNodes: await kv.list<GraphNode>(KV.graphNodes).catch(() => []),
+    graphEdges: await kv.list<GraphEdge>(KV.graphEdges).catch(() => []),
+    semantic: await kv.list<SemanticMemory>(KV.semantic).catch(() => []),
+    procedural: await kv.list<ProceduralMemory>(KV.procedural).catch(() => []),
+    profiles: await kv.list<ProjectProfile>(KV.profiles).catch(() => []),
+    accessLog: await kv.list<AccessLogExport>(KV.accessLog).catch(() => []),
+    memoryHistory: await kv
+      .list<MemoryRevision>(KV.memoryHistory)
+      .catch(() => []),
+    agentEvents: await kv.list<AgentEvent>(KV.agentEvents).catch(() => []),
+  };
+}
+
+async function deleteSnapshotState(
+  kv: StateKV,
+  snapshot: ReplaceSnapshot,
+): Promise<void> {
+  for (const session of snapshot.sessions) {
+    await kv.delete(KV.sessions, session.id);
+  }
+  for (const [sessionId, bucket] of snapshot.observations) {
+    for (const obs of bucket) {
+      await kv.delete(KV.observations(sessionId), obs.id);
+    }
+  }
+  for (const memory of snapshot.memories) {
+    await kv.delete(KV.memories, memory.id);
+  }
+  for (const summary of snapshot.summaries) {
+    await kv.delete(KV.summaries, summary.sessionId);
+  }
+  for (const action of snapshot.actions) await kv.delete(KV.actions, action.id);
+  for (const edge of snapshot.actionEdges) {
+    await kv.delete(KV.actionEdges, edge.id);
+  }
+  for (const routine of snapshot.routines) {
+    await kv.delete(KV.routines, routine.id);
+  }
+  for (const signal of snapshot.signals) await kv.delete(KV.signals, signal.id);
+  for (const checkpoint of snapshot.checkpoints) {
+    await kv.delete(KV.checkpoints, checkpoint.id);
+  }
+  for (const sentinel of snapshot.sentinels) {
+    await kv.delete(KV.sentinels, sentinel.id);
+  }
+  for (const sketch of snapshot.sketches) await kv.delete(KV.sketches, sketch.id);
+  for (const crystal of snapshot.crystals) {
+    await kv.delete(KV.crystals, crystal.id);
+  }
+  for (const facet of snapshot.facets) await kv.delete(KV.facets, facet.id);
+  for (const lesson of snapshot.lessons) await kv.delete(KV.lessons, lesson.id);
+  for (const insight of snapshot.insights) {
+    await kv.delete(KV.insights, insight.id);
+  }
+  for (const node of snapshot.graphNodes) await kv.delete(KV.graphNodes, node.id);
+  for (const edge of snapshot.graphEdges) {
+    await kv.delete(KV.graphEdges, edge.id);
+  }
+  for (const sem of snapshot.semantic) await kv.delete(KV.semantic, sem.id);
+  for (const proc of snapshot.procedural) {
+    await kv.delete(KV.procedural, proc.id);
+  }
+  for (const profile of snapshot.profiles) {
+    await kv.delete(KV.profiles, profile.project);
+  }
+  for (const log of snapshot.accessLog) {
+    await kv.delete(KV.accessLog, log.memoryId);
+  }
+  for (const revision of snapshot.memoryHistory) {
+    await kv.delete(KV.memoryHistory, revision.id);
+  }
+  for (const event of snapshot.agentEvents) {
+    await kv.delete(KV.agentEvents, event.id);
+    await Promise.all(
+      agentEventIndexKeys(event).map((key) =>
+        kv.delete(KV.agentEventIndexes, key).catch(() => undefined),
+      ),
+    );
+  }
+}
+
+async function restoreSnapshotState(
+  kv: StateKV,
+  snapshot: ReplaceSnapshot,
+): Promise<void> {
+  for (const session of snapshot.sessions) {
+    await kv.set(KV.sessions, session.id, session);
+  }
+  for (const [sessionId, bucket] of snapshot.observations) {
+    for (const obs of bucket) {
+      await kv.set(KV.observations(sessionId), obs.id, obs);
+    }
+  }
+  for (const memory of snapshot.memories) {
+    await kv.set(KV.memories, memory.id, memory);
+  }
+  for (const summary of snapshot.summaries) {
+    await kv.set(KV.summaries, summary.sessionId, summary);
+  }
+  for (const action of snapshot.actions) {
+    await kv.set(KV.actions, action.id, action);
+  }
+  for (const edge of snapshot.actionEdges) {
+    await kv.set(KV.actionEdges, edge.id, edge);
+  }
+  for (const routine of snapshot.routines) {
+    await kv.set(KV.routines, routine.id, routine);
+  }
+  for (const signal of snapshot.signals) {
+    await kv.set(KV.signals, signal.id, signal);
+  }
+  for (const checkpoint of snapshot.checkpoints) {
+    await kv.set(KV.checkpoints, checkpoint.id, checkpoint);
+  }
+  for (const sentinel of snapshot.sentinels) {
+    await kv.set(KV.sentinels, sentinel.id, sentinel);
+  }
+  for (const sketch of snapshot.sketches) {
+    await kv.set(KV.sketches, sketch.id, sketch);
+  }
+  for (const crystal of snapshot.crystals) {
+    await kv.set(KV.crystals, crystal.id, crystal);
+  }
+  for (const facet of snapshot.facets) {
+    await kv.set(KV.facets, facet.id, facet);
+  }
+  for (const lesson of snapshot.lessons) {
+    await kv.set(KV.lessons, lesson.id, lesson);
+  }
+  for (const insight of snapshot.insights) {
+    await kv.set(KV.insights, insight.id, insight);
+  }
+  for (const node of snapshot.graphNodes) {
+    await kv.set(KV.graphNodes, node.id, node);
+  }
+  for (const edge of snapshot.graphEdges) {
+    await kv.set(KV.graphEdges, edge.id, edge);
+  }
+  for (const sem of snapshot.semantic) {
+    await kv.set(KV.semantic, sem.id, sem);
+  }
+  for (const proc of snapshot.procedural) {
+    await kv.set(KV.procedural, proc.id, proc);
+  }
+  for (const profile of snapshot.profiles) {
+    await kv.set(KV.profiles, profile.project, profile);
+  }
+  for (const log of snapshot.accessLog) {
+    await kv.set(KV.accessLog, log.memoryId, log);
+  }
+  for (const revision of snapshot.memoryHistory) {
+    await kv.set(KV.memoryHistory, revision.id, revision);
+  }
+  for (const event of snapshot.agentEvents) {
+    await kv.set(KV.agentEvents, event.id, event);
+    for (const key of agentEventIndexKeys(event)) {
+      const existing = await kv
+        .get<{ eventIds?: string[] }>(KV.agentEventIndexes, key)
+        .catch(() => null);
+      const eventIds = new Set<string>(existing?.eventIds ?? []);
+      eventIds.add(event.id);
+      await kv
+        .set(KV.agentEventIndexes, key, {
+          eventIds: [...eventIds],
+          updatedAt: event.timestamp,
+        })
+        .catch(() => undefined);
+    }
+  }
+}
+
 export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction("mem::export", 
+  sdk.registerFunction("mem::export",
     async (data?: ExportRequest) => {
       const rawMax = Number(data?.maxSessions);
       const maxSessions = Number.isFinite(rawMax) && rawMax > 0 ? Math.min(Math.floor(rawMax), 1000) : undefined;
@@ -1841,92 +2077,86 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         accessLogs: 0,
         memoryHistory: 0,
         agentEvents: 0,
-        skipped: validation.quarantine.count,
+        profiles: 0,
+        graphNodes: 0,
+        graphEdges: 0,
+        semanticMemories: 0,
+        proceduralMemories: 0,
+        actions: 0,
+        actionEdges: 0,
+        routines: 0,
+        signals: 0,
+        checkpoints: 0,
+        sentinels: 0,
+        sketches: 0,
+        crystals: 0,
+        facets: 0,
+        lessons: 0,
+        insights: 0,
+        skipped: 0,
         quarantined: validation.quarantine.count,
       };
       const optionalSections = validation.optionalSections;
       const coreSections = validation.sections;
 
       if (strategy === "replace") {
-        const existing = await kv.list<Session>(KV.sessions);
-        for (const session of existing) {
-          await kv.delete(KV.sessions, session.id);
-          const obs = await kv
-            .list<CompressedObservation>(KV.observations(session.id))
-            .catch(() => []);
-          for (const o of obs) {
-            await kv.delete(KV.observations(session.id), o.id);
-          }
-        }
-        const existingMem = await kv.list<Memory>(KV.memories);
-        for (const m of existingMem) {
-          await kv.delete(KV.memories, m.id);
-        }
+        // Snapshot everything before the destructive delete so a mid-replace
+        // failure can roll back rather than leave the store partially wiped.
+        // Observation buckets are enumerated independently of the sessions
+        // list (see observationBucketSessionIds) so orphaned buckets clear.
+        const existingSessions = await kv.list<Session>(KV.sessions);
         const existingSummaries = await kv.list<SessionSummary>(KV.summaries);
-        for (const s of existingSummaries) {
-          await kv.delete(KV.summaries, s.sessionId);
-        }
-        for (const a of await kv.list<Action>(KV.actions).catch(() => [])) {
-          await kv.delete(KV.actions, a.id);
-        }
-        for (const e of await kv.list<ActionEdge>(KV.actionEdges).catch(() => [])) {
-          await kv.delete(KV.actionEdges, e.id);
-        }
-        for (const r of await kv.list<Routine>(KV.routines).catch(() => [])) {
-          await kv.delete(KV.routines, r.id);
-        }
-        for (const s of await kv.list<Signal>(KV.signals).catch(() => [])) {
-          await kv.delete(KV.signals, s.id);
-        }
-        for (const c of await kv.list<Checkpoint>(KV.checkpoints).catch(() => [])) {
-          await kv.delete(KV.checkpoints, c.id);
-        }
-        for (const s of await kv.list<Sentinel>(KV.sentinels).catch(() => [])) {
-          await kv.delete(KV.sentinels, s.id);
-        }
-        for (const s of await kv.list<Sketch>(KV.sketches).catch(() => [])) {
-          await kv.delete(KV.sketches, s.id);
-        }
-        for (const c of await kv.list<Crystal>(KV.crystals).catch(() => [])) {
-          await kv.delete(KV.crystals, c.id);
-        }
-        for (const f of await kv.list<Facet>(KV.facets).catch(() => [])) {
-          await kv.delete(KV.facets, f.id);
-        }
-        for (const l of await kv.list<Lesson>(KV.lessons).catch(() => [])) {
-          await kv.delete(KV.lessons, l.id);
-        }
-        for (const i of await kv.list<Insight>(KV.insights).catch(() => [])) {
-          await kv.delete(KV.insights, i.id);
-        }
-        for (const n of await kv.list<{ id: string }>(KV.graphNodes).catch(() => [])) {
-          await kv.delete(KV.graphNodes, n.id);
-        }
-        for (const e of await kv.list<{ id: string }>(KV.graphEdges).catch(() => [])) {
-          await kv.delete(KV.graphEdges, e.id);
-        }
-        for (const s of await kv.list<{ id: string }>(KV.semantic).catch(() => [])) {
-          await kv.delete(KV.semantic, s.id);
-        }
-        for (const p of await kv.list<{ id: string }>(KV.procedural).catch(() => [])) {
-          await kv.delete(KV.procedural, p.id);
-        }
-        for (const profile of await kv.list<ProjectProfile>(KV.profiles).catch(() => [])) {
-          await kv.delete(KV.profiles, profile.project);
-        }
-        for (const a of await kv.list<AccessLogExport>(KV.accessLog).catch(() => [])) {
-          await kv.delete(KV.accessLog, a.memoryId);
-        }
-        for (const h of await kv.list<MemoryRevision>(KV.memoryHistory).catch(() => [])) {
-          await kv.delete(KV.memoryHistory, h.id);
-        }
-        for (const event of await kv.list<AgentEvent>(KV.agentEvents).catch(() => [])) {
-          await kv.delete(KV.agentEvents, event.id);
-          await Promise.all(
-            agentEventIndexKeys(event).map((key) =>
-              kv.delete(KV.agentEventIndexes, key).catch(() => undefined),
-            ),
-          );
+        const snapshot = await snapshotExistingState(
+          kv,
+          existingSessions,
+          existingSummaries,
+        );
+
+        // Record the destructive intent BEFORE deleting anything: if the
+        // delete pass throws and rollback also fails, the audit log still
+        // attests that a replace was attempted and what it would remove.
+        const replacedCounts = {
+          sessions: snapshot.sessions.length,
+          observations: [...snapshot.observations.values()].reduce(
+            (sum, bucket) => sum + bucket.length,
+            0,
+          ),
+          memories: snapshot.memories.length,
+          summaries: snapshot.summaries.length,
+          agentEvents: snapshot.agentEvents.length,
+        };
+        await recordAudit(kv, "import", "mem::import", [], {
+          strategy,
+          phase: "replace-pre-delete",
+          replacedCounts,
+        });
+
+        try {
+          await deleteSnapshotState(kv, snapshot);
+        } catch (error) {
+          try {
+            await restoreSnapshotState(kv, snapshot);
+          } catch (restoreError) {
+            logger.error("Replace rollback failed after delete error", {
+              deleteError:
+                error instanceof Error ? error.message : String(error),
+              restoreError:
+                restoreError instanceof Error
+                  ? restoreError.message
+                  : String(restoreError),
+            });
+            throw restoreError;
+          }
+          logger.error("Replace delete failed; existing data restored", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return {
+            success: false,
+            strategy,
+            error: `replace import aborted and existing data was restored: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          };
         }
       }
 
@@ -2004,6 +2234,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.graphNodes, node.id, node);
+        stats.graphNodes++;
       }
       for (const edge of optionalSections.graphEdges as GraphEdge[]) {
         if (strategy === "skip") {
@@ -2011,6 +2242,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.graphEdges, edge.id, edge);
+        stats.graphEdges++;
       }
       for (const sem of optionalSections.semanticMemories as SemanticMemory[]) {
         if (strategy === "skip") {
@@ -2018,6 +2250,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.semantic, sem.id, sem);
+        stats.semanticMemories++;
       }
       for (const proc of optionalSections.proceduralMemories as ProceduralMemory[]) {
         if (strategy === "skip") {
@@ -2025,6 +2258,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.procedural, proc.id, proc);
+        stats.proceduralMemories++;
       }
       for (const profile of optionalSections.profiles as ProjectProfile[]) {
         if (strategy === "skip") {
@@ -2037,6 +2271,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           }
         }
         await kv.set(KV.profiles, profile.project, profile);
+        stats.profiles++;
       }
 
       for (const action of optionalSections.actions as Action[]) {
@@ -2045,6 +2280,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.actions, action.id, action);
+        stats.actions++;
       }
       for (const edge of optionalSections.actionEdges as ActionEdge[]) {
         if (strategy === "skip") {
@@ -2052,6 +2288,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.actionEdges, edge.id, edge);
+        stats.actionEdges++;
       }
       for (const routine of optionalSections.routines as Routine[]) {
         if (strategy === "skip") {
@@ -2059,6 +2296,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.routines, routine.id, routine);
+        stats.routines++;
       }
       for (const signal of optionalSections.signals as Signal[]) {
         if (strategy === "skip") {
@@ -2066,6 +2304,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.signals, signal.id, signal);
+        stats.signals++;
       }
       for (const checkpoint of optionalSections.checkpoints as Checkpoint[]) {
         if (strategy === "skip") {
@@ -2073,6 +2312,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.checkpoints, checkpoint.id, checkpoint);
+        stats.checkpoints++;
       }
       for (const sentinel of optionalSections.sentinels as Sentinel[]) {
         if (strategy === "skip") {
@@ -2080,6 +2320,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.sentinels, sentinel.id, sentinel);
+        stats.sentinels++;
       }
       for (const sketch of optionalSections.sketches as Sketch[]) {
         if (strategy === "skip") {
@@ -2087,6 +2328,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.sketches, sketch.id, sketch);
+        stats.sketches++;
       }
       for (const crystal of optionalSections.crystals as Crystal[]) {
         if (strategy === "skip") {
@@ -2094,6 +2336,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.crystals, crystal.id, crystal);
+        stats.crystals++;
       }
       for (const facet of optionalSections.facets as Facet[]) {
         if (strategy === "skip") {
@@ -2101,6 +2344,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.facets, facet.id, facet);
+        stats.facets++;
       }
       for (const lesson of optionalSections.lessons as Lesson[]) {
         if (strategy === "skip") {
@@ -2108,6 +2352,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.lessons, lesson.id, lesson);
+        stats.lessons++;
       }
       for (const insight of optionalSections.insights as Insight[]) {
         if (strategy === "skip") {
@@ -2115,6 +2360,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           if (existing) { stats.skipped++; continue; }
         }
         await kv.set(KV.insights, insight.id, insight);
+        stats.insights++;
       }
       for (const raw of optionalSections.accessLogs as AccessLogExport[]) {
         const log = normalizeAccessLog(raw);

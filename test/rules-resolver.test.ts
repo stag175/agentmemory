@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -9,7 +10,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { resolveWorkspaceRules } from "../src/functions/rules-resolver.js";
+import {
+  resolveRulesRequest,
+  resolveWorkspaceRules,
+} from "../src/functions/rules-resolver.js";
 
 const tempRoots: string[] = [];
 
@@ -147,5 +151,106 @@ describe("resolveWorkspaceRules", () => {
     const result = await resolveWorkspaceRules(root);
     expect(result.rules).toEqual([]);
     expect(result.warnings.some((warning) => warning.code === "symlink_skipped")).toBe(true);
+  });
+});
+
+describe("resolveRulesRequest allowed-roots constraint", () => {
+  it("rejects a workspaceRoot outside the allowed roots", async () => {
+    const allowed = realpathSync(tempDir());
+    const outside = realpathSync(tempDir());
+    write(join(outside, "AGENTS.md"), "secret host instructions\n");
+
+    const result = await resolveRulesRequest(
+      { workspaceRoot: outside },
+      { allowedRoots: [allowed] },
+    );
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected rejection");
+    expect(result.code).toBe("forbidden_root");
+  });
+
+  it("rejects a well-known host path with a wildcard glob", async () => {
+    const allowed = realpathSync(tempDir());
+    const hostPath = process.platform === "win32" ? "C:/Users" : "/etc";
+
+    const result = await resolveRulesRequest(
+      { workspaceRoot: hostPath, instructionGlobs: ["**/*"], includeContent: true },
+      { allowedRoots: [allowed] },
+    );
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected rejection");
+    expect(result.code).toBe("forbidden_root");
+  });
+
+  it("accepts a path inside an allowed root", async () => {
+    const allowed = realpathSync(tempDir());
+    const nested = join(allowed, "package", "service");
+    write(join(nested, "AGENTS.md"), "nested instructions\n");
+
+    const result = await resolveRulesRequest(
+      { workspaceRoot: nested },
+      { allowedRoots: [allowed] },
+    );
+
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error(result.error);
+    expect(result.rules.some((rule) => rule.relativePath === "AGENTS.md")).toBe(true);
+  });
+
+  it("defaults the allowed root to the supplied defaultCwd", async () => {
+    const allowed = realpathSync(tempDir());
+    write(join(allowed, "AGENTS.md"), "cwd instructions\n");
+    const outside = realpathSync(tempDir());
+    write(join(outside, "AGENTS.md"), "outside instructions\n");
+
+    const inside = await resolveRulesRequest(
+      { workspaceRoot: allowed },
+      { defaultCwd: allowed },
+    );
+    expect(inside.success).toBe(true);
+
+    const blocked = await resolveRulesRequest(
+      { workspaceRoot: outside },
+      { defaultCwd: allowed },
+    );
+    expect(blocked.success).toBe(false);
+    if (blocked.success) throw new Error("expected rejection");
+    expect(blocked.code).toBe("forbidden_root");
+  });
+
+  it("ignores caller globs and content unless explicitly opted in", async () => {
+    const allowed = realpathSync(tempDir());
+    write(join(allowed, "AGENTS.md"), "root instructions\n");
+    write(join(allowed, "docs", "NOTES.md"), "extra notes\n");
+
+    const locked = await resolveRulesRequest(
+      {
+        workspaceRoot: allowed,
+        instructionGlobs: ["**/NOTES.md"],
+        includeContent: true,
+      },
+      { allowedRoots: [allowed] },
+    );
+    expect(locked.success).toBe(true);
+    if (!locked.success) throw new Error(locked.error);
+    expect(locked.includeContent).toBe(false);
+    expect(locked.rules.some((rule) => rule.relativePath === "docs/NOTES.md")).toBe(false);
+    expect(locked.rules.every((rule) => !("content" in rule))).toBe(true);
+
+    const opened = await resolveRulesRequest(
+      {
+        workspaceRoot: allowed,
+        instructionGlobs: ["**/NOTES.md"],
+        includeContent: true,
+      },
+      { allowedRoots: [allowed], allowCallerOptions: true },
+    );
+    expect(opened.success).toBe(true);
+    if (!opened.success) throw new Error(opened.error);
+    expect(opened.includeContent).toBe(true);
+    expect(opened.rules.some((rule) => rule.relativePath === "docs/NOTES.md")).toBe(true);
+    expect(opened.rules.some((rule) => "content" in rule)).toBe(true);
   });
 });

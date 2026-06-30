@@ -48,6 +48,17 @@ export function configureStateEncryptionRuntime(
   let keySource: LocalJsonEncryptionKeySource | undefined;
   setStorageEncryptionRuntimeWired(false);
   setBackupArtifactEncryptionRuntimeWired(false);
+  // The adapter wraps every encrypted surface with a single key. If distinct
+  // per-surface keyRefs are configured we would silently honour only one and
+  // store the others' data under the wrong key, so fail closed instead of
+  // pretending each surface uses its declared keyRef.
+  if (keyRefs.length > 1) {
+    throw new EncryptionPolicyError(
+      "ENCRYPTION_READINESS_FAILED",
+      "Distinct per-surface encryption key references are configured, but the storage adapter honours a single key. Use one key reference (AGENTMEMORY_ENCRYPTION_KEY_REF) for all encrypted surfaces.",
+      evaluateEncryptionReadiness(config),
+    );
+  }
   if (keyRef && keyRefs.length > 0) {
     for (const requestedKeyRef of keyRefs) {
       const requestedKeySource = keySourceFromEncryptionKeyRef(requestedKeyRef, env);

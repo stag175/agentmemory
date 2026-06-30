@@ -212,7 +212,12 @@ function nextActionsFromFindings(
   }));
 }
 
-export function registerComplianceEvidenceFunction(sdk: ISdk, kv: StateKV): void {
+export function registerComplianceEvidenceFunction(
+  sdk: ISdk,
+  kv: StateKV,
+  options: { allowedRoots?: string[] } = {},
+): void {
+  const allowedRoots = options.allowedRoots;
   sdk.registerFunction(
     "mem::compliance-evidence",
     async (input: ComplianceEvidenceInput = {}): Promise<ComplianceEvidenceReport> => {
@@ -499,10 +504,16 @@ export function registerComplianceEvidenceFunction(sdk: ISdk, kv: StateKV): void
           recommendation: "Provide workspaceRoot to include local AGENTS.md and compatible rule hashes in the SOC2 evidence pack.",
         });
       } else {
-        const rulesResult = await resolveRulesRequest({
-          workspaceRoot,
-          includeContent: includeRuleContent,
-        });
+        const rulesResult = await resolveRulesRequest(
+          {
+            workspaceRoot,
+            includeContent: includeRuleContent,
+          },
+          {
+            allowCallerOptions: true,
+            ...(allowedRoots !== undefined && { allowedRoots }),
+          },
+        );
         if (!rulesResult.success) {
           finding(findings, {
             id: "rules_resolution_failed",

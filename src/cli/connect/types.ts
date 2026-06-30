@@ -15,6 +15,11 @@ export type ConnectInspectionStatus =
   | "missing"
   | "healthy"
   | "stale"
+  // The agentmemory entry exists but does NOT reference @agentmemory/mcp.
+  // This is almost certainly an unrelated server a user (or another tool)
+  // parked under the `agentmemory` key. It is NOT auto-repairable — blindly
+  // overwriting it (even with --force) would clobber config we don't own.
+  | "foreign"
   | "invalid-config"
   | "manual-only";
 

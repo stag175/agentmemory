@@ -187,32 +187,6 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         const comparableMemories = existingMemories.filter((existing) =>
           isSameAgentScope(existing, callAgentId),
         );
-        let supersededId: string | undefined;
-        let supersededVersion = 1;
-        let supersededMemory: Memory | undefined;
-        const lowerContent = content.toLowerCase();
-        if (!privacySummary.redactionApplied) {
-          for (const existing of comparableMemories) {
-            if (!isMemorySearchable(existing)) continue;
-            // Never supersede a memory that belongs to a different project.
-            // Both sides must have an explicit project for the guard to engage;
-            // an unscoped memory (legacy, no project field) is treated as a
-            // wildcard so pre-existing data is not stranded.
-            if (project && existing.project && existing.project !== project) {
-              continue;
-            }
-            const similarity = jaccardSimilarity(
-              lowerContent,
-              existing.content.toLowerCase(),
-            );
-            if (similarity > 0.7) {
-              supersededId = existing.id;
-              supersededVersion = existing.version ?? 1;
-              supersededMemory = existing;
-              break;
-            }
-          }
-        }
         const requireGatePass = shouldRequireGatePass(data);
         const writeGate: WriteGateDecision = {
           ...evaluateWriteGate({
@@ -247,6 +221,39 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           };
         }
 
+        let supersededId: string | undefined;
+        let supersededVersion = 1;
+        let supersededMemory: Memory | undefined;
+        const lowerContent = content.toLowerCase();
+        // Near-duplicate content supersedes the prior memory (dedup keeps the
+        // latest). The write gate is advisory in the default "review" mode: it
+        // records a decision for observability and the review queue but does not
+        // suppress dedup or recall. Strict enforcement (require_pass) rejects a
+        // failing write outright above, before it can reach this point. Only
+        // redacted/quarantined writes are held back from superseding.
+        if (!privacySummary.redactionApplied) {
+          for (const existing of comparableMemories) {
+            if (!isMemorySearchable(existing)) continue;
+            // Never supersede a memory that belongs to a different project.
+            // Both sides must have an explicit project for the guard to engage;
+            // an unscoped memory (legacy, no project field) is treated as a
+            // wildcard so pre-existing data is not stranded.
+            if (project && existing.project && existing.project !== project) {
+              continue;
+            }
+            const similarity = jaccardSimilarity(
+              lowerContent,
+              existing.content.toLowerCase(),
+            );
+            if (similarity > 0.7) {
+              supersededId = existing.id;
+              supersededVersion = existing.version ?? 1;
+              supersededMemory = existing;
+              break;
+            }
+          }
+        }
+
         const memory: GatedMemory = {
           id: generateId("mem"),
           createdAt: now,
@@ -273,9 +280,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           lifecycleState: privacySummary.redactionApplied ? "quarantined" : "active",
           reviewState: privacySummary.redactionApplied
             ? "needs_review"
-            : writeGate.reviewState === "needs_review"
-              ? "needs_review"
-              : reviewState ?? "unreviewed",
+            : reviewState ?? "unreviewed",
           writeGate,
           ...(privacyScope
             ? { privacyScope }

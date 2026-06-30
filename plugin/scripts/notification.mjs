@@ -146,8 +146,8 @@ async function main() {
 			timestamp: (/* @__PURE__ */ new Date()).toISOString(),
 			data: {
 				notification_type: notificationType,
-				title: data.title,
-				message: data.message,
+				title: safeString(data.title),
+				message: safeString(data.message),
 				lineage
 			}
 		}),

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile as nodeReadFile } from "node:fs/promises";
+import { lstat, readdir, readFile as nodeReadFile, realpath as nodeRealpath } from "node:fs/promises";
 import type { Dirent, Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ISdk } from "iii-sdk";
@@ -119,9 +119,24 @@ export type RulesResolveResult =
     } & Omit<RulesResolution, "rules">)
   | {
       success: false;
-      code: "invalid_input";
+      code: "invalid_input" | "forbidden_root";
       error: string;
     };
+
+export interface RulesResolveRequestOptions {
+  defaultCwd?: string;
+  /**
+   * Absolute roots that a requested workspaceRoot must resolve inside of.
+   * Defaults to [defaultCwd ?? process.cwd()] when not provided.
+   */
+  allowedRoots?: string[];
+  /**
+   * When true, caller-supplied instructionGlobs and includeContent are honored.
+   * Defaults to false so untrusted/network callers cannot widen the scan surface
+   * or request raw rule content. In-process callers pass true explicitly.
+   */
+  allowCallerOptions?: boolean;
+}
 
 interface SourceDefinition {
   host: RuleHost;
@@ -200,12 +215,17 @@ const registeredRulesResolverSdks = new WeakSet<object>();
 
 export function registerRulesResolverFunction(
   sdk: Pick<ISdk, "registerFunction">,
+  options: { allowedRoots?: string[] } = {},
 ): void {
   const key = sdk as object;
   if (registeredRulesResolverSdks.has(key)) return;
   registeredRulesResolverSdks.add(key);
+  const allowedRoots = options.allowedRoots;
   sdk.registerFunction("mem::rules-resolve", async (data: unknown) =>
-    resolveRulesRequest(data, { defaultCwd: process.cwd() }),
+    resolveRulesRequest(data, {
+      defaultCwd: process.cwd(),
+      ...(allowedRoots !== undefined && { allowedRoots }),
+    }),
   );
 }
 
@@ -240,11 +260,13 @@ export function normalizeRulesResolveInput(
 
 export async function resolveRulesRequest(
   raw: unknown,
-  options: { defaultCwd?: string } = {},
+  options: RulesResolveRequestOptions = {},
 ): Promise<RulesResolveResult> {
+  const defaultCwd = options.defaultCwd ?? process.cwd();
+  const allowCallerOptions = options.allowCallerOptions === true;
   let payload: RulesResolvePayload;
   try {
-    payload = normalizeRulesResolveInput(raw, options);
+    payload = normalizeRulesResolveInput(raw, { defaultCwd });
     await assertWorkspaceDirectory(payload.workspaceRoot);
   } catch (error) {
     return {
@@ -254,8 +276,25 @@ export async function resolveRulesRequest(
     };
   }
 
-  const resolution = await resolveWorkspaceRules(payload.workspaceRoot, {
-    instructionGlobs: payload.instructionGlobs,
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = await assertRootWithinAllowed(
+      payload.workspaceRoot,
+      options.allowedRoots ?? [defaultCwd],
+    );
+  } catch (error) {
+    return {
+      success: false,
+      code: "forbidden_root",
+      error: errorMessage(error),
+    };
+  }
+
+  const includeContent = allowCallerOptions ? payload.includeContent : false;
+  const instructionGlobs = allowCallerOptions ? payload.instructionGlobs : undefined;
+
+  const resolution = await resolveWorkspaceRules(canonicalRoot, {
+    instructionGlobs,
     ignoreDirectories: payload.ignoreDirectories,
     maxDepth: payload.maxDepth,
     maxFileBytes: payload.maxFileBytes,
@@ -263,10 +302,10 @@ export async function resolveRulesRequest(
 
   return {
     success: true,
-    includeContent: payload.includeContent,
+    includeContent,
     workspaceRoot: resolution.workspaceRoot,
     scannedAt: resolution.scannedAt,
-    rules: payload.includeContent
+    rules: includeContent
       ? resolution.rules
       : resolution.rules.map(stripRuleContent),
     warnings: resolution.warnings,
@@ -785,6 +824,37 @@ async function assertWorkspaceDirectory(workspaceRoot: string): Promise<void> {
   if (!stats.isDirectory()) {
     throw new Error("workspaceRoot must be a directory");
   }
+}
+
+async function canonicalize(path: string): Promise<string> {
+  try {
+    return await nodeRealpath(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+async function assertRootWithinAllowed(
+  workspaceRoot: string,
+  allowedRoots: string[],
+): Promise<string> {
+  const normalizedAllowed = allowedRoots
+    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    .map((entry) => resolve(entry.trim()));
+  if (normalizedAllowed.length === 0) {
+    throw new Error("workspaceRoot is not within an allowed root");
+  }
+
+  const canonicalRoot = await canonicalize(workspaceRoot);
+  const canonicalAllowed = await Promise.all(normalizedAllowed.map(canonicalize));
+
+  const permitted = canonicalAllowed.some(
+    (allowed) => canonicalRoot === allowed || isInside(allowed, canonicalRoot),
+  );
+  if (!permitted) {
+    throw new Error("workspaceRoot is not within an allowed root");
+  }
+  return canonicalRoot;
 }
 
 function normalizeGlobList(value: unknown, field: string): string[] | undefined {

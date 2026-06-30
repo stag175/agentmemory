@@ -4,13 +4,16 @@ import { resolve } from "node:path";
 import {
   BENCHMARK_ADAPTERS,
   defaultBenchmarkAdapters,
+  isAdapterAvailable,
   knownBenchmarkAdapters,
   resolveBenchmarkAdapters,
+  runBenchmarkAdapters,
 } from "../eval/runner/adapters/index.js";
+import type { BenchmarkAdapterSkip } from "../eval/runner/adapters/index.js";
 import { UnavailableAdapterError } from "../eval/runner/adapters/unavailable.js";
 import { grepAdapter } from "../eval/runner/adapters/grep.js";
 import { aggregate, scoreQuestion } from "../eval/runner/score.js";
-import type { Question, Session } from "../eval/runner/types.js";
+import type { Question, ScoreRow, Session } from "../eval/runner/types.js";
 
 const DATA_DIR = resolve(__dirname, "..", "eval", "data", "coding-agent-life-v1");
 const sessions = JSON.parse(readFileSync(`${DATA_DIR}/sessions.json`, "utf8")) as Session[];
@@ -177,6 +180,100 @@ describe("eval scaffold", () => {
     expect(row.hit).toBe(false);
     expect(row.recallAtK).toBe(0);
     expect(row.topGoldRank).toBeNull();
+  });
+
+  it("defaultBenchmarkAdapters is derived from descriptor defaultEnabled flags", () => {
+    const derived = BENCHMARK_ADAPTERS.filter((d) => d.defaultEnabled === true).map((d) => d.name);
+    expect(defaultBenchmarkAdapters()).toEqual(derived);
+    expect(defaultBenchmarkAdapters()).toEqual(coreAdapters);
+    for (const name of competitorAdapters) {
+      expect(defaultBenchmarkAdapters()).not.toContain(name);
+    }
+  });
+
+  it("isAdapterAvailable reflects descriptor availability status", () => {
+    for (const descriptor of resolveBenchmarkAdapters(coreAdapters)) {
+      expect(isAdapterAvailable(descriptor)).toBe(true);
+    }
+    for (const descriptor of resolveBenchmarkAdapters(competitorAdapters)) {
+      expect(isAdapterAvailable(descriptor)).toBe(false);
+    }
+  });
+
+  it("runBenchmarkAdapters records available rows and skips the unavailable adapter", async () => {
+    const descriptors = resolveBenchmarkAdapters(["grep", "mem0"]);
+    const startOrder: string[] = [];
+    const persistedRows: ScoreRow[] = [];
+    const persistedSkips: BenchmarkAdapterSkip[] = [];
+
+    const result = await runBenchmarkAdapters(descriptors, {
+      onAdapterStart(descriptor) {
+        startOrder.push(descriptor.name);
+      },
+      onRows(_descriptor, rows) {
+        persistedRows.push(...rows);
+      },
+      onSkip(skip) {
+        persistedSkips.push(skip);
+      },
+      async evaluate(descriptor) {
+        const adapter = descriptor.adapter;
+        const state = await adapter.init(sessions);
+        const out: ScoreRow[] = [];
+        try {
+          for (const q of queries) {
+            const ranked = await adapter.query(q.question, state, 5);
+            out.push(scoreQuestion({ ...q, haystack: sessions }, ranked, 5, adapter.name, 1));
+          }
+        } finally {
+          if (adapter.teardown) await adapter.teardown(state);
+        }
+        return out;
+      },
+    });
+
+    expect(startOrder).toEqual(["grep", "mem0"]);
+
+    expect(result.rows.length).toBe(queries.length);
+    expect(result.rows.every((row) => row.adapter === "grep")).toBe(true);
+    expect(persistedRows).toEqual(result.rows);
+
+    expect(result.skips).toHaveLength(1);
+    expect(result.skips[0].adapter).toBe("mem0");
+    expect(result.skips[0].skip.reason).toBe("adapter_unavailable");
+    expect(persistedSkips).toEqual(result.skips);
+
+    const agg = aggregate(result.rows);
+    expect(agg.byAdapter.grep.n).toBe(queries.length);
+    expect(agg.byAdapter.mem0).toBeUndefined();
+  });
+
+  it("runBenchmarkAdapters skips unavailable adapters without invoking evaluate", async () => {
+    const descriptors = resolveBenchmarkAdapters(["mem0"]);
+    let evaluated = false;
+
+    const result = await runBenchmarkAdapters(descriptors, {
+      async evaluate() {
+        evaluated = true;
+        return [];
+      },
+    });
+
+    expect(evaluated).toBe(false);
+    expect(result.rows).toEqual([]);
+    expect(result.skips).toHaveLength(1);
+    expect(result.skips[0].adapter).toBe("mem0");
+  });
+
+  it("runBenchmarkAdapters rethrows unexpected evaluate failures", async () => {
+    const descriptors = resolveBenchmarkAdapters(["grep"]);
+    await expect(
+      runBenchmarkAdapters(descriptors, {
+        async evaluate() {
+          throw new Error("boom");
+        },
+      }),
+    ).rejects.toThrow("boom");
   });
 
   it("aggregate computes per-adapter and per-type means", () => {

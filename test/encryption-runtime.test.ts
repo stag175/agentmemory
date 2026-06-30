@@ -165,6 +165,43 @@ describe("state encryption runtime wiring", () => {
     expect(isBackupArtifactEncryptionRuntimeWired()).toBe(false);
   });
 
+  it("fails closed when distinct per-surface key refs are configured", () => {
+    expect(() =>
+      configureStateEncryptionRuntime(
+        memoryKV(),
+        readyEnv({
+          AGENTMEMORY_ENCRYPTION_KEY_REF: undefined,
+          AGENTMEMORY_DB_ENCRYPTION_KEY_REF: "env:AGENTMEMORY_DB_KEY",
+          AGENTMEMORY_EMBEDDINGS_ENCRYPTION_KEY_REF: "env:AGENTMEMORY_EMB_KEY",
+          AGENTMEMORY_TRANSCRIPTS_ENCRYPTION_KEY_REF: "env:AGENTMEMORY_DB_KEY",
+          AGENTMEMORY_BACKUPS_ENCRYPTION_KEY_REF: "env:AGENTMEMORY_DB_KEY",
+          AGENTMEMORY_DB_KEY: "correct horse battery",
+          AGENTMEMORY_EMB_KEY: "second distinct passphrase",
+        }),
+      ),
+    ).toThrow(EncryptionPolicyError);
+    expect(isStorageEncryptionRuntimeWired()).toBe(false);
+    expect(isBackupArtifactEncryptionRuntimeWired()).toBe(false);
+  });
+
+  it("accepts a single shared key ref across every surface", async () => {
+    const base = memoryKV();
+    const runtime = configureStateEncryptionRuntime(
+      base,
+      readyEnv({
+        AGENTMEMORY_ENCRYPTION_KEY_REF: undefined,
+        AGENTMEMORY_DB_ENCRYPTION_KEY_REF: "env:AGENTMEMORY_LOCAL_KEY",
+        AGENTMEMORY_EMBEDDINGS_ENCRYPTION_KEY_REF: "env:AGENTMEMORY_LOCAL_KEY",
+        AGENTMEMORY_TRANSCRIPTS_ENCRYPTION_KEY_REF: "env:AGENTMEMORY_LOCAL_KEY",
+        AGENTMEMORY_BACKUPS_ENCRYPTION_KEY_REF: "env:AGENTMEMORY_LOCAL_KEY",
+      }),
+    );
+
+    expect(runtime.encrypted).toBe(true);
+    expect(runtime.keyRef).toBe("env:AGENTMEMORY_LOCAL_KEY");
+    expect(isStorageEncryptionRuntimeWired()).toBe(true);
+  });
+
   it("maps env key refs to the referenced passphrase env var", () => {
     const keySource = keySourceFromEncryptionKeyRef("env:AGENTMEMORY_LOCAL_KEY", {
       AGENTMEMORY_LOCAL_KEY: "secret",
