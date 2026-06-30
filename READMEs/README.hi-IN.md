@@ -458,7 +458,7 @@ codex plugin add agentmemory@agentmemory
 
 Codex plugin उसी `plugin/` directory से ship होता है जिससे Claude Code plugin। यह register करता है:
 
-- `@agentmemory/mcp` MCP सर्वर के रूप में (जब `AGENTMEMORY_URL` चल रहे agentmemory सर्वर पर point करता है, तो सभी 74 tools proxy करता है; कोई पहुँच योग्य सर्वर न होने पर locally 7 tools पर fallback करता है)
+- `@agentmemory/mcp` MCP सर्वर के रूप में (जब `AGENTMEMORY_URL` चल रहे agentmemory सर्वर पर point करता है, तो सभी 74 tools proxy करता है; कोई पहुँच योग्य सर्वर न होने पर locally 19 tools पर fallback करता है)
 - 6 lifecycle hooks: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`
 - 4 skills: `/recall`, `/remember`, `/session-history`, `/forget`
 
@@ -841,7 +841,7 @@ npm install @xenova/transformers
 
 74 tools, 6 resources, 3 prompts, और 15 skills — किसी भी agent के लिए सबसे व्यापक MCP memory toolkit।
 
-> **MCP shim बनाम full server:** published `@agentmemory/mcp` package एक thin shim है। यह full 74-tool surface को **केवल तभी expose करता है जब यह `AGENTMEMORY_URL` के माध्यम से चल रहे agentmemory server तक पहुँच सके** (proxy mode)। कोई पहुँच योग्य server न होने पर, shim 7-tool local set (`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`) पर fallback करता है। `AGENTMEMORY_TOOLS=core|all` env var एक *server-side* flag है — shim के `env` block में set करने का कोई असर नहीं। अगर आप Cursor / OpenCode / Gemini CLI में केवल 7 tools देखते हैं, तो `npx @agentmemory/agentmemory` (या Docker stack) शुरू करें और `AGENTMEMORY_URL=http://localhost:3111` set करें।
+> **MCP shim बनाम full server:** published `@agentmemory/mcp` package एक thin shim है। यह full 74-tool surface को **केवल तभी expose करता है जब यह `AGENTMEMORY_URL` के माध्यम से चल रहे agentmemory server तक पहुँच सके** (proxy mode)। कोई पहुँच योग्य server न होने पर, shim 19-tool local set (मूल tools `memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete` और `memory_create`, `memory_inspect`, `memory_history`, `memory_update`, `memory_expire`, `memory_archive`, `memory_restore`, `memory_delete`, `memory_search_explain`, `memory_ledger`, `memory_review_queue`, `memory_rules_resolve`) पर fallback करता है। `AGENTMEMORY_TOOLS=core|all` env var एक *server-side* flag है — shim के `env` block में set करने का कोई असर नहीं। अगर आप Cursor / OpenCode / Gemini CLI में केवल 19 tools देखते हैं, तो `npx @agentmemory/agentmemory` (या Docker stack) शुरू करें और `AGENTMEMORY_URL=http://localhost:3111` set करें।
 
 ### 74 Tools
 

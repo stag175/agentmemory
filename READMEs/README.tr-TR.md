@@ -458,7 +458,7 @@ codex plugin add agentmemory@agentmemory
 
 Codex eklentisi, Claude Code eklentisiyle aynı `plugin/` dizininden gelir. Şunları kaydeder:
 
-- `@agentmemory/mcp` MCP sunucusu olarak (`AGENTMEMORY_URL` çalışan bir agentmemory sunucusuna işaret ettiğinde tüm 74 tool'u proxy yapar; erişilebilir sunucu yoksa yerel olarak 7 tool'a düşer)
+- `@agentmemory/mcp` MCP sunucusu olarak (`AGENTMEMORY_URL` çalışan bir agentmemory sunucusuna işaret ettiğinde tüm 74 tool'u proxy yapar; erişilebilir sunucu yoksa yerel olarak 19 tool'a düşer)
 - 6 yaşam döngüsü hook'u: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`
 - 4 skill: `/recall`, `/remember`, `/session-history`, `/forget`
 
@@ -842,7 +842,7 @@ npm install @xenova/transformers
 
 74 tool, 6 kaynak, 3 prompt ve 15 skill — herhangi bir ajan için en kapsamlı MCP bellek toolkit'i.
 
-> **MCP shim vs tam sunucu:** yayımlanan `@agentmemory/mcp` paketi ince bir shim'dir. Tam 74-tool yüzeyini **yalnızca `AGENTMEMORY_URL` üzerinden çalışan bir agentmemory sunucusuna erişebildiğinde** açığa çıkarır (proxy modu). Erişilebilir sunucu yoksa, shim 7-tool yerel sete (`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`) düşer. `AGENTMEMORY_TOOLS=core|all` env değişkeni *sunucu tarafı* bir bayraktır — shim'in `env` bloğunda ayarlamak hiçbir etki yapmaz. Cursor / OpenCode / Gemini CLI'da yalnızca 7 tool görüyorsanız, `npx @agentmemory/agentmemory` (veya Docker stack'i) başlatın ve `AGENTMEMORY_URL=http://localhost:3111` ayarlayın.
+> **MCP shim vs tam sunucu:** yayımlanan `@agentmemory/mcp` paketi ince bir shim'dir. Tam 74-tool yüzeyini **yalnızca `AGENTMEMORY_URL` üzerinden çalışan bir agentmemory sunucusuna erişebildiğinde** açığa çıkarır (proxy modu). Erişilebilir sunucu yoksa, shim 19-tool yerel sete (orijinal `memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete` araçlarına ek olarak `memory_create`, `memory_inspect`, `memory_history`, `memory_update`, `memory_expire`, `memory_archive`, `memory_restore`, `memory_delete`, `memory_search_explain`, `memory_ledger`, `memory_review_queue`, `memory_rules_resolve`) düşer. `AGENTMEMORY_TOOLS=core|all` env değişkeni *sunucu tarafı* bir bayraktır — shim'in `env` bloğunda ayarlamak hiçbir etki yapmaz. Cursor / OpenCode / Gemini CLI'da yalnızca 19 tool görüyorsanız, `npx @agentmemory/agentmemory` (veya Docker stack'i) başlatın ve `AGENTMEMORY_URL=http://localhost:3111` ayarlayın.
 
 ### 74 Tool
 

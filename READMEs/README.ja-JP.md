@@ -459,7 +459,7 @@ codex plugin add agentmemory@agentmemory
 
 Codex プラグインは Claude Code プラグインと同じ `plugin/` ディレクトリから出荷されます。以下を登録します:
 
-- `@agentmemory/mcp` を MCP サーバーとして(`AGENTMEMORY_URL` が動作中の agentmemory サーバーを指す場合は 74 ツールすべてをプロキシ、サーバーに到達できない場合はローカルで 7 ツールにフォールバック)
+- `@agentmemory/mcp` を MCP サーバーとして(`AGENTMEMORY_URL` が動作中の agentmemory サーバーを指す場合は 74 ツールすべてをプロキシ、サーバーに到達できない場合はローカルで 19 ツールにフォールバック)
 - 6 つのライフサイクル hooks: `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`PreCompact`、`Stop`
 - 4 つの skills: `/recall`、`/remember`、`/session-history`、`/forget`
 
@@ -841,7 +841,7 @@ npm install @xenova/transformers
 
 74 ツール、6 リソース、3 プロンプト、15 skills — あらゆるエージェント向けで最も充実した MCP メモリツールキット。
 
-> **MCP shim とフルサーバー:** 公開されている `@agentmemory/mcp` パッケージは薄い shim です。**`AGENTMEMORY_URL` 経由で動作中の agentmemory サーバーに到達できる場合に限り**、完全な 74 ツール群を公開します(プロキシモード)。サーバーに到達できない場合、shim は 7 ツールのローカルセット(`memory_save`、`memory_recall`、`memory_smart_search`、`memory_sessions`、`memory_export`、`memory_audit`、`memory_governance_delete`)にフォールバックします。`AGENTMEMORY_TOOLS=core|all` 環境変数は*サーバー側*のフラグです — shim の `env` ブロックで設定しても効果はありません。Cursor / OpenCode / Gemini CLI で 7 ツールしか見えない場合は、`npx @agentmemory/agentmemory`(または Docker スタック)を起動し、`AGENTMEMORY_URL=http://localhost:3111` を設定してください。
+> **MCP shim とフルサーバー:** 公開されている `@agentmemory/mcp` パッケージは薄い shim です。**`AGENTMEMORY_URL` 経由で動作中の agentmemory サーバーに到達できる場合に限り**、完全な 74 ツール群を公開します(プロキシモード)。サーバーに到達できない場合、shim は 19 ツールのローカルセット(元の `memory_save`、`memory_recall`、`memory_smart_search`、`memory_sessions`、`memory_export`、`memory_audit`、`memory_governance_delete` ツールに加えて `memory_create`、`memory_inspect`、`memory_history`、`memory_update`、`memory_expire`、`memory_archive`、`memory_restore`、`memory_delete`、`memory_search_explain`、`memory_ledger`、`memory_review_queue`、`memory_rules_resolve`)にフォールバックします。`AGENTMEMORY_TOOLS=core|all` 環境変数は*サーバー側*のフラグです — shim の `env` ブロックで設定しても効果はありません。Cursor / OpenCode / Gemini CLI で 19 ツールしか見えない場合は、`npx @agentmemory/agentmemory`(または Docker スタック)を起動し、`AGENTMEMORY_URL=http://localhost:3111` を設定してください。
 
 ### 74 ツール
 

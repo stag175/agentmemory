@@ -459,7 +459,7 @@ codex plugin add agentmemory@agentmemory
 
 Codex 插件与 Claude Code 插件同源,来自相同的 `plugin/` 目录。它注册:
 
-- `@agentmemory/mcp` 作为 MCP 服务器(当 `AGENTMEMORY_URL` 指向运行中的 agentmemory 服务器时,代理全部 74 个工具;若服务器不可达,本地回退至 7 个工具)
+- `@agentmemory/mcp` 作为 MCP 服务器(当 `AGENTMEMORY_URL` 指向运行中的 agentmemory 服务器时,代理全部 74 个工具;若服务器不可达,本地回退至 19 个工具)
 - 6 个生命周期 hooks:`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`PreCompact`、`Stop`
 - 4 个 skills:`/recall`、`/remember`、`/session-history`、`/forget`
 
@@ -839,7 +839,7 @@ npm install @xenova/transformers
 
 74 个工具、6 个资源、3 个提示词、15 个 skills — 任何代理可用的最全面 MCP 记忆工具包。
 
-> **MCP shim 对比完整服务器:** 已发布的 `@agentmemory/mcp` 包是一个薄 shim。**只有当它能通过 `AGENTMEMORY_URL` 连通运行中的 agentmemory 服务器**(代理模式)时,才暴露完整的 74 工具表面。在没有可达服务器的情况下,shim 回退到 7 工具的本地集合(`memory_save`、`memory_recall`、`memory_smart_search`、`memory_sessions`、`memory_export`、`memory_audit`、`memory_governance_delete`)。`AGENTMEMORY_TOOLS=core|all` 环境变量是*服务器端*标志 — 在 shim 的 `env` 块中设置无效。如果在 Cursor / OpenCode / Gemini CLI 中只看到 7 个工具,启动 `npx @agentmemory/agentmemory`(或 Docker 栈)并设置 `AGENTMEMORY_URL=http://localhost:3111`。
+> **MCP shim 对比完整服务器:** 已发布的 `@agentmemory/mcp` 包是一个薄 shim。**只有当它能通过 `AGENTMEMORY_URL` 连通运行中的 agentmemory 服务器**(代理模式)时,才暴露完整的 74 工具表面。在没有可达服务器的情况下,shim 回退到 19 工具的本地集合(原有的 `memory_save`、`memory_recall`、`memory_smart_search`、`memory_sessions`、`memory_export`、`memory_audit`、`memory_governance_delete` 工具,外加 `memory_create`、`memory_inspect`、`memory_history`、`memory_update`、`memory_expire`、`memory_archive`、`memory_restore`、`memory_delete`、`memory_search_explain`、`memory_ledger`、`memory_review_queue`、`memory_rules_resolve`)。`AGENTMEMORY_TOOLS=core|all` 环境变量是*服务器端*标志 — 在 shim 的 `env` 块中设置无效。如果在 Cursor / OpenCode / Gemini CLI 中只看到 19 个工具,启动 `npx @agentmemory/agentmemory`(或 Docker 栈)并设置 `AGENTMEMORY_URL=http://localhost:3111`。
 
 ### 74 个工具
 

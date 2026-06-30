@@ -458,7 +458,7 @@ codex plugin add agentmemory@agentmemory
 
 El plugin de Codex se sirve desde el mismo directorio `plugin/` que el de Claude Code. Registra:
 
-- `@agentmemory/mcp` como servidor MCP (hace de proxy a las 74 tools cuando `AGENTMEMORY_URL` apunta a un servidor agentmemory en ejecución; cae a 7 tools en local cuando no hay servidor accesible)
+- `@agentmemory/mcp` como servidor MCP (hace de proxy a las 74 tools cuando `AGENTMEMORY_URL` apunta a un servidor agentmemory en ejecución; cae a 19 tools en local cuando no hay servidor accesible)
 - 6 hooks de ciclo de vida: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`
 - 4 skills: `/recall`, `/remember`, `/session-history`, `/forget`
 
@@ -831,7 +831,7 @@ npm install @xenova/transformers
 
 74 tools, 6 recursos, 3 prompts y 15 skills — el toolkit MCP de memoria más completo para cualquier agente.
 
-> **Shim MCP vs servidor completo:** el paquete publicado `@agentmemory/mcp` es un shim ligero. Expone la superficie completa de 74 tools **solo cuando puede alcanzar un servidor agentmemory en ejecución** vía `AGENTMEMORY_URL` (modo proxy). Sin servidor accesible, el shim cae a un set local de 7 tools (`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`). La variable de entorno `AGENTMEMORY_TOOLS=core|all` es un flag *del lado del servidor* — definirla en el bloque `env` del shim no tiene efecto. Si ves solo 7 tools en Cursor / OpenCode / Gemini CLI, arranca `npx @agentmemory/agentmemory` (o la stack Docker) y define `AGENTMEMORY_URL=http://localhost:3111`.
+> **Shim MCP vs servidor completo:** el paquete publicado `@agentmemory/mcp` es un shim ligero. Expone la superficie completa de 74 tools **solo cuando puede alcanzar un servidor agentmemory en ejecución** vía `AGENTMEMORY_URL` (modo proxy). Sin servidor accesible, el shim cae a un set local de 19 tools (las herramientas originales `memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete` más `memory_create`, `memory_inspect`, `memory_history`, `memory_update`, `memory_expire`, `memory_archive`, `memory_restore`, `memory_delete`, `memory_search_explain`, `memory_ledger`, `memory_review_queue`, `memory_rules_resolve`). La variable de entorno `AGENTMEMORY_TOOLS=core|all` es un flag *del lado del servidor* — definirla en el bloque `env` del shim no tiene efecto. Si ves solo 19 tools en Cursor / OpenCode / Gemini CLI, arranca `npx @agentmemory/agentmemory` (o la stack Docker) y define `AGENTMEMORY_URL=http://localhost:3111`.
 
 ### 74 Tools
 

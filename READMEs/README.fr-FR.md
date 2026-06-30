@@ -458,7 +458,7 @@ codex plugin add agentmemory@agentmemory
 
 Le plugin Codex est livré depuis le même répertoire `plugin/` que le plugin Claude Code. Il enregistre :
 
-- `@agentmemory/mcp` comme serveur MCP (proxie les 74 outils lorsque `AGENTMEMORY_URL` pointe vers un serveur agentmemory actif ; retombe sur 7 outils en local si aucun serveur n'est accessible)
+- `@agentmemory/mcp` comme serveur MCP (proxie les 74 outils lorsque `AGENTMEMORY_URL` pointe vers un serveur agentmemory actif ; retombe sur 19 outils en local si aucun serveur n'est accessible)
 - 6 hooks de cycle de vie : `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`
 - 4 skills : `/recall`, `/remember`, `/session-history`, `/forget`
 
@@ -838,7 +838,7 @@ npm install @xenova/transformers
 
 74 outils, 6 ressources, 3 prompts et 15 skills — la boîte à outils mémoire MCP la plus complète pour tout agent.
 
-> **Shim MCP vs serveur complet :** le paquet publié `@agentmemory/mcp` est un shim léger. Il expose la surface complète de 74 outils **uniquement quand il peut joindre un serveur agentmemory actif** via `AGENTMEMORY_URL` (mode proxy). Sans serveur joignable, le shim retombe sur un jeu local de 7 outils (`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`). La variable d'env `AGENTMEMORY_TOOLS=core|all` est un drapeau *côté serveur* — la définir dans le bloc `env` du shim n'a aucun effet. Si vous ne voyez que 7 outils dans Cursor / OpenCode / Gemini CLI, lancez `npx @agentmemory/agentmemory` (ou la stack Docker) et définissez `AGENTMEMORY_URL=http://localhost:3111`.
+> **Shim MCP vs serveur complet :** le paquet publié `@agentmemory/mcp` est un shim léger. Il expose la surface complète de 74 outils **uniquement quand il peut joindre un serveur agentmemory actif** via `AGENTMEMORY_URL` (mode proxy). Sans serveur joignable, le shim retombe sur un jeu local de 19 outils (les outils d'origine `memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete` plus `memory_create`, `memory_inspect`, `memory_history`, `memory_update`, `memory_expire`, `memory_archive`, `memory_restore`, `memory_delete`, `memory_search_explain`, `memory_ledger`, `memory_review_queue`, `memory_rules_resolve`). La variable d'env `AGENTMEMORY_TOOLS=core|all` est un drapeau *côté serveur* — la définir dans le bloc `env` du shim n'a aucun effet. Si vous ne voyez que 19 outils dans Cursor / OpenCode / Gemini CLI, lancez `npx @agentmemory/agentmemory` (ou la stack Docker) et définissez `AGENTMEMORY_URL=http://localhost:3111`.
 
 ### 74 outils
 

@@ -458,7 +458,7 @@ codex plugin add agentmemory@agentmemory
 
 Codex 플러그인은 Claude Code 플러그인과 동일한 `plugin/` 디렉터리에서 제공됩니다. 다음을 등록합니다:
 
-- `@agentmemory/mcp`를 MCP 서버로 등록 (`AGENTMEMORY_URL`이 실행 중인 agentmemory 서버를 가리킬 때 51개 도구 모두 프록시. 도달 가능한 서버가 없으면 로컬에서 7개 도구로 폴백)
+- `@agentmemory/mcp`를 MCP 서버로 등록 (`AGENTMEMORY_URL`이 실행 중인 agentmemory 서버를 가리킬 때 51개 도구 모두 프록시. 도달 가능한 서버가 없으면 로컬에서 19개 도구로 폴백)
 - 6개 라이프사이클 hooks: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`
 - 4개 skills: `/recall`, `/remember`, `/session-history`, `/forget`
 
@@ -822,7 +822,7 @@ npm install @xenova/transformers
 
 53개 도구, 6개 리소스, 3개 프롬프트, 4개 skills — 모든 에이전트를 위한 가장 포괄적인 MCP 메모리 툴킷.
 
-> **MCP shim 대 전체 서버:** 게시된 `@agentmemory/mcp` 패키지는 얇은 shim입니다. `AGENTMEMORY_URL`을 통해 실행 중인 agentmemory 서버에 도달할 수 있을 때 **만** 전체 74-도구 표면을 노출합니다(프록시 모드). 도달 가능한 서버가 없으면 shim은 7-도구 로컬 세트(`memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete`)로 폴백합니다. `AGENTMEMORY_TOOLS=core|all` 환경 변수는 *서버 측* 플래그입니다 — shim의 `env` 블록에 설정해도 효과가 없습니다. Cursor / OpenCode / Gemini CLI에서 도구가 7개만 보인다면 `npx @agentmemory/agentmemory`(또는 Docker 스택)를 시작하고 `AGENTMEMORY_URL=http://localhost:3111`을 설정하십시오.
+> **MCP shim 대 전체 서버:** 게시된 `@agentmemory/mcp` 패키지는 얇은 shim입니다. `AGENTMEMORY_URL`을 통해 실행 중인 agentmemory 서버에 도달할 수 있을 때 **만** 전체 74-도구 표면을 노출합니다(프록시 모드). 도달 가능한 서버가 없으면 shim은 19-도구 로컬 세트(기존 `memory_save`, `memory_recall`, `memory_smart_search`, `memory_sessions`, `memory_export`, `memory_audit`, `memory_governance_delete` 도구에 더해 `memory_create`, `memory_inspect`, `memory_history`, `memory_update`, `memory_expire`, `memory_archive`, `memory_restore`, `memory_delete`, `memory_search_explain`, `memory_ledger`, `memory_review_queue`, `memory_rules_resolve`)로 폴백합니다. `AGENTMEMORY_TOOLS=core|all` 환경 변수는 *서버 측* 플래그입니다 — shim의 `env` 블록에 설정해도 효과가 없습니다. Cursor / OpenCode / Gemini CLI에서 도구가 19개만 보인다면 `npx @agentmemory/agentmemory`(또는 Docker 스택)를 시작하고 `AGENTMEMORY_URL=http://localhost:3111`을 설정하십시오.
 
 ### 51개 도구
 

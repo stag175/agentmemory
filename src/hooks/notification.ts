@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { buildLineage, eventFields } from "./_lineage.js";
+import { buildLineage, eventFields, safeString } from "./_lineage.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -49,8 +49,8 @@ async function main() {
       timestamp: new Date().toISOString(),
       data: {
         notification_type: notificationType,
-        title: data.title,
-        message: data.message,
+        title: safeString(data.title),
+        message: safeString(data.message),
         lineage,
       },
     }),
