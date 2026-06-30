@@ -1,5 +1,6 @@
 import { platform } from "node:os";
 import * as p from "@clack/prompts";
+import pc from "picocolors";
 import type { ConnectAdapter, ConnectOptions, ConnectResult } from "./types.js";
 import { formatInspectionSummary, inspectAdapter } from "./inspect.js";
 import {
@@ -335,13 +336,13 @@ function summarize(
   const lines = results.map(({ name, result }) => {
     switch (result.kind) {
       case "installed":
-        return `  ✓ ${name}${result.mutatedPath ? ` → ${result.mutatedPath}` : ""}`;
+        return `  ${pc.green("✓")} ${pc.bold(name)}${result.mutatedPath ? ` ${pc.dim("→")} ${pc.cyan(result.mutatedPath)}` : ""}`;
       case "already-wired":
-        return `  ✓ ${name} (already wired)`;
+        return `  ${pc.green("✓")} ${pc.bold(name)} ${pc.dim("(already wired)")}`;
       case "stub":
-        return `  ⚠ ${name} (manual install required: ${result.reason})`;
+        return `  ${pc.yellow("⚠")} ${pc.bold(name)} ${pc.yellow(`(manual install required: ${result.reason})`)}`;
       case "skipped":
-        return `  ✗ ${name} (skipped: ${result.reason})`;
+        return `  ${pc.red("✗")} ${pc.bold(name)} ${pc.dim(`(skipped: ${result.reason})`)}`;
     }
   });
   p.note(lines.join("\n"), "summary");
