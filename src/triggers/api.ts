@@ -3160,6 +3160,56 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/graph/reset", http_method: "POST" },
   });
 
+  // Q3 2026 roadmap: multi-hop query DSL over the knowledge graph.
+  // Body: { query: "MATCH (a:file)-[:uses]->(b:function) ...", limit? }.
+  // Parse failures come back as 400 with the failing character offset;
+  // runtime degradation (snapshot fallback, visit budget) is a 200 with
+  // a `warning` field, mirroring /graph/query.
+  sdk.registerFunction("api::graph-dsl",
+    async (
+      req: ApiRequest<{ query?: string; limit?: number }>,
+    ): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      if (typeof req.body?.query !== "string" || !req.body.query.trim()) {
+        return {
+          status_code: 400,
+          body: {
+            success: false,
+            parseError: true,
+            error:
+              "Body must include a non-empty `query` string, e.g. " +
+              '{"query": "MATCH (a:function)-[:uses]->(b:library) RETURN paths"}',
+          },
+        };
+      }
+      // Whitelist payload fields explicitly; AGENTS.md security rule:
+      // REST endpoints never pass raw req.body through to sdk.trigger.
+      const payload = {
+        query: req.body.query,
+        limit: req.body.limit,
+      };
+      try {
+        const result = await sdk.trigger({
+          function_id: "mem::graph-dsl",
+          payload,
+        });
+        const body = result as { success?: boolean; parseError?: boolean };
+        if (body && body.success === false && body.parseError === true) {
+          return { status_code: 400, body: result };
+        }
+        return { status_code: 200, body: result };
+      } catch {
+        return graphDisabledResponse();
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::graph-dsl",
+    config: { api_path: "/agentmemory/graph/dsl", http_method: "POST" },
+  });
+
   sdk.registerFunction("api::graph-extract",
     async (req: ApiRequest<{ observations: unknown[] }>): Promise<Response> => {
       const authErr = checkAuth(req, secret);

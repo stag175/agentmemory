@@ -14,7 +14,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/MCP-43_tools-1f6feb?style=flat-square" alt="43 MCP tools" />
-  <img src="https://img.shields.io/badge/Hooks-6_lifecycle-1f6feb?style=flat-square" alt="6 lifecycle hooks" />
+  <img src="https://img.shields.io/badge/Hooks-7_lifecycle-1f6feb?style=flat-square" alt="7 lifecycle hooks" />
   <img src="https://img.shields.io/badge/R@5-95.2%25-00875f?style=flat-square" alt="95.2% R@5" />
   <img src="https://img.shields.io/badge/Self--hosted-yes-00875f?style=flat-square" alt="Self-hosted" />
   <img src="https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square" alt="Apache 2.0" />
@@ -46,10 +46,10 @@ Verify it's working with
 http://localhost:3113 to watch memories being captured live.
 
 If I want deeper integration — pre-LLM context injection, turn-level
-capture, memory-write mirroring to MEMORY.md, and system prompt block
+and per-tool-use capture, memory-write mirroring to MEMORY.md, and system prompt block
 injection — copy `integrations/hermes` from the agentmemory repo to
 `~/.hermes/plugins/agentmemory` instead. That gives me the
-6-hook memory provider plugin on top of the MCP server.
+7-hook memory provider plugin on top of the MCP server.
 ```
 
 That's it. Hermes handles the rest.
@@ -94,6 +94,7 @@ The plugin auto-detects the running server and hooks into the Hermes agent loop.
 
 - `prefetch()` injects relevant memories before each LLM call
 - `sync_turn()` captures every conversation turn in the background
+- `on_post_tool_use()` captures each individual tool invocation (name, input, output) in the background
 - `on_session_end()` marks sessions complete for summarization
 - `on_pre_compress()` re-injects context before compaction
 - `on_memory_write()` mirrors MEMORY.md writes to agentmemory

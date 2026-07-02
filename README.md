@@ -50,6 +50,7 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/@agentmemory/agentmemory"><img src="https://img.shields.io/npm/v/@agentmemory/agentmemory?color=CB3837&label=npm&style=for-the-badge&logo=npm" alt="npm version" /></a>
   <a href="https://github.com/rohitg00/agentmemory/actions"><img src="https://img.shields.io/github/actions/workflow/status/rohitg00/agentmemory/ci.yml?label=tests&style=for-the-badge&logo=github" alt="CI" /></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/rohitg00/agentmemory"><img src="https://img.shields.io/ossf-scorecard/github.com/rohitg00/agentmemory?label=openssf%20scorecard&style=for-the-badge&logo=securityscorecard&logoColor=white" alt="OpenSSF Scorecard" /></a>
   <a href="https://github.com/rohitg00/agentmemory/blob/main/LICENSE"><img src="https://img.shields.io/github/license/rohitg00/agentmemory?color=blue&style=for-the-badge" alt="License" /></a>
   <a href="https://github.com/rohitg00/agentmemory/stargazers"><img src="https://img.shields.io/github/stars/rohitg00/agentmemory?style=for-the-badge&color=yellow&logo=github" alt="Stars" /></a>
 </p>
@@ -1537,7 +1538,7 @@ Create `~/.agentmemory/.env`:
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"><img src="assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-166 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
+167 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
 
 <details>
 <summary>Key endpoints</summary>
@@ -1559,10 +1560,38 @@ Create `~/.agentmemory/.env`:
 | `GET` | `/agentmemory/export` | Export all data |
 | `POST` | `/agentmemory/import` | Import from JSON |
 | `POST` | `/agentmemory/graph/query` | Knowledge graph query |
+| `POST` | `/agentmemory/graph/dsl` | Multi-hop graph query DSL |
 | `POST` | `/agentmemory/team/share` | Share with team |
 | `GET` | `/agentmemory/audit` | Audit trail |
 
 Full endpoint list: [`src/triggers/api.ts`](src/triggers/api.ts)
+
+**Multi-hop graph queries.** `POST /agentmemory/graph/dsl` takes a small
+Cypher-inspired query language for multi-hop questions over the knowledge
+graph — one `MATCH` pattern chain, an optional `WHERE` conjunction, an
+optional `RETURN` shape (`paths` | `nodes` | `edges` | variables), and an
+optional `LIMIT`:
+
+```bash
+# Which libraries do my entry-point files reach, directly or transitively?
+curl -X POST localhost:3111/agentmemory/graph/dsl -H 'Content-Type: application/json' \
+  -d '{"query": "MATCH (a:file \"index\")-[*1..3]->(b:library) RETURN b LIMIT 20"}'
+
+# Strong uses relationships only, filtered by edge weight
+curl -X POST localhost:3111/agentmemory/graph/dsl -H 'Content-Type: application/json' \
+  -d '{"query": "MATCH (f:function)-[e:uses]->(l:library) WHERE e.weight >= 0.7 RETURN paths"}'
+
+# What did this error touch? (undirected, cycle-safe)
+curl -X POST localhost:3111/agentmemory/graph/dsl -H 'Content-Type: application/json' \
+  -d '{"query": "MATCH (x:error \"TypeError\")-[:caused_by]-(y) RETURN nodes"}'
+```
+
+Node patterns are `(var:type "name-substring")` with every part optional;
+edges are `-[:type]->`, `<-[:type]-`, or undirected `-[:type]-`, with
+variable-length hops `*min..max` (capped at 5). `~` is case-insensitive
+substring matching; re-using a node variable joins on the same node
+(cycles). Parse errors return HTTP 400 with the failing character offset.
+Requires `GRAPH_EXTRACTION_ENABLED=true`.
 
 </details>
 

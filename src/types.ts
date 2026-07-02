@@ -771,6 +771,41 @@ export interface GraphSnapshot {
   resetAt?: string;
 }
 
+// Q3 2026 roadmap: multi-hop graph query DSL (POST /agentmemory/graph/dsl).
+// One match per pattern occurrence; `bindings` maps every bound pattern
+// variable to the matched node/edge id.
+export interface GraphDslMatch {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  bindings: Record<string, string>;
+  // Average edge weight across the matched path (1 for zero-edge
+  // matches). Drives the default result ordering (desc).
+  avgWeight: number;
+}
+
+export interface GraphDslResult {
+  success: boolean;
+  error?: string;
+  // True when `error` is a query-syntax problem (surfaced as HTTP 400
+  // by the REST layer) rather than a runtime failure.
+  parseError?: boolean;
+  // 0-based character offset of the parse failure in the submitted query.
+  position?: number;
+  // Populated according to the query's RETURN clause: `matches` for
+  // paths/vars, `nodes`/`edges` for the deduplicated union forms.
+  matches?: GraphDslMatch[];
+  nodes?: GraphNode[];
+  edges?: GraphEdge[];
+  totalMatches?: number;
+  truncated?: boolean;
+  limit?: number;
+  tookMs?: number;
+  // Set when the result was degraded (snapshot fallback, visit budget)
+  // so callers can surface an actionable banner instead of silently
+  // trusting a partial answer.
+  warning?: string;
+}
+
 export type ConsolidationTier =
   | "working"
   | "episodic"

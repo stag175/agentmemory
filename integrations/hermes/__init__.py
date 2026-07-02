@@ -43,6 +43,7 @@ except ImportError:
         def prefetch(self, query: str, **kwargs: Any) -> str: return ""
         def queue_prefetch(self, query: str, **kwargs: Any) -> None: pass
         def sync_turn(self, user: str, assistant: str, **kwargs: Any) -> None: pass
+        def on_post_tool_use(self, tool_name: str, tool_input: Any = "", tool_output: Any = "", **kwargs: Any) -> None: pass
         def on_session_end(self, messages: list, **kwargs: Any) -> None: pass
         def on_pre_compress(self, messages: list, **kwargs: Any) -> None: pass
         def on_memory_write(self, action: str, target: str, content: str, **kwargs: Any) -> None: pass
@@ -174,6 +175,14 @@ def _api_bg(base: str, path: str, body: dict | None = None) -> None:
     t.start()
 
 
+def _coerce_tool_field(value: Any, limit: int) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + "\n[...truncated]"
+    if isinstance(value, (dict, list)):
+        return value  # observe endpoint sanitizes/stringifies structured data
+    return ("" if value is None else str(value))[:limit]
+
+
 class AgentMemoryProvider(MemoryProvider):
 
     @property
@@ -196,6 +205,8 @@ class AgentMemoryProvider(MemoryProvider):
             "sessionId": session_id,
             "project": self._project,
             "cwd": self._project,
+            "captureSource": "automatic_hook",
+            "hookType": "session_start",
         })
 
     def get_config_schema(self) -> list[dict]:
@@ -357,9 +368,36 @@ class AgentMemoryProvider(MemoryProvider):
             },
         })
 
+    def on_post_tool_use(
+        self,
+        tool_name: str,
+        tool_input: Any = "",
+        tool_output: Any = "",
+        **kwargs: Any,
+    ) -> None:
+        # Per-tool-call capture (individual tool invocations), distinct
+        # from sync_turn's turn-level "conversation" observation.
+        # Background POST so the agent loop is never blocked; reuses
+        # _api_bg -> _api, which applies the plaintext-bearer guard and
+        # reads AGENTMEMORY_SECRET from env.
+        _api_bg(self._base, "observe", {
+            "hookType": "post_tool_use",
+            "sessionId": kwargs.get("session_id", self._session_id),
+            "project": self._project,
+            "cwd": self._project,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "data": {
+                "tool_name": tool_name or "unknown",
+                "tool_input": _coerce_tool_field(tool_input, 2000),
+                "tool_output": _coerce_tool_field(tool_output, 8000),
+            },
+        })
+
     def on_session_end(self, messages: list, **kwargs: Any) -> None:
         _api(self._base, "session/end", {
             "sessionId": kwargs.get("session_id", self._session_id),
+            "captureSource": "automatic_hook",
+            "hookType": "session_end",
         })
 
     def on_pre_compress(self, messages: list, **kwargs: Any) -> None:

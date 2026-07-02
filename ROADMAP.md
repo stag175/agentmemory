@@ -51,9 +51,9 @@ Anything not on this list that a contributor wants to pursue is welcome — open
 ### Planned
 - [ ] **Additional maintainer onboarding** — at least one Maintainer from a different organization added via the process in `GOVERNANCE.md`. This is a prerequisite for advancing past the foundation's Growth Stage.
 - [ ] **Slack / Discord connector** — third source in the connector family.
-- [ ] **OpenSSF Scorecard** — enroll, reach a Silver-equivalent score. Badged in the README.
-- [ ] **Hermes integration hardening** — reach parity with the OpenClaw plugin surface (session lifecycle + tool-use hooks).
-- [ ] **Knowledge graph query language** — small DSL on top of `/agentmemory/graph` for multi-hop questions.
+- [x] **OpenSSF Scorecard** — **workflows landed this cycle** (scorecard.yml + dependency-review.yml, SHA-pinned actions, least-privilege token permissions, README badge). Score ramp-up tracks once the Action runs on main.
+- [x] **Hermes integration hardening** — **shipped this cycle.** Per-tool-call `on_post_tool_use` capture closes the tool-use gap with the OpenClaw plugin surface; session lifecycle was already covered. Plugin surface is now 7 hooks.
+- [x] **Knowledge graph query language** — **shipped this cycle.** Cypher-inspired multi-hop DSL at `POST /agentmemory/graph/dsl`: pattern chains, variable-length hops, WHERE filters, RETURN shapes, snapshot fallback on large corpora.
 - [ ] **First conference talk** — submit to KubeCon / LlamaCon / similar.
 
 ### Candidate

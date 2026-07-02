@@ -4,11 +4,18 @@ import type {
   GraphEdge,
   GraphQueryResult,
   GraphSnapshot,
+  GraphDslResult,
   CompressedObservation,
   MemoryProvider,
 } from "../types.js";
 import { KV, generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
+import {
+  parseGraphDsl,
+  executeGraphDsl,
+  GraphDslParseError,
+  type GraphDslQuery,
+} from "./graph-dsl.js";
 import {
   GRAPH_EXTRACTION_SYSTEM,
   buildGraphExtractionPrompt,
@@ -23,6 +30,12 @@ import { logger } from "../logger.js";
 // fan out faster than nodes.
 const DEFAULT_GRAPH_QUERY_LIMIT = 500;
 const MAX_GRAPH_QUERY_LIMIT = 5000;
+
+// Q3 2026 roadmap: match caps for the multi-hop DSL. Matches are whole
+// paths (nodes + edges), so they weigh more per entry than the flat
+// node pages above — capped an order of magnitude lower.
+const DEFAULT_DSL_MATCH_LIMIT = 100;
+const MAX_DSL_MATCH_LIMIT = 1000;
 
 // #814: the precomputed snapshot covers the top-degree subgraph used by
 // the empty-body / nodeType-only branch — the path the viewer hits on
@@ -454,6 +467,7 @@ export function registerGraphFunction(
   sdk: ISdk,
   kv: StateKV,
   provider: MemoryProvider,
+  opts?: { dslEnumerationBudgetMs?: number },
 ): void {
   sdk.registerFunction("mem::graph-extract", 
     async (data: { observations: CompressedObservation[] }) => {
@@ -994,4 +1008,165 @@ export function registerGraphFunction(
     logger.info("Graph state reset", { counts, tookMs });
     return { success: true, cleared: counts, tookMs };
   });
+
+  // Q3 2026 roadmap: multi-hop query DSL over the knowledge graph.
+  // Parsing and evaluation live in graph-dsl.ts (pure, dependency-free);
+  // this handler owns data loading and reuses the #814 machinery: live
+  // enumeration raced against a wall-clock budget, with the top-degree
+  // snapshot as the degraded fallback. The injectable budget exists so
+  // tests can exercise the fallback without waiting out the real 6s.
+  const dslBudgetMs =
+    opts?.dslEnumerationBudgetMs ?? LIVE_ENUMERATION_BUDGET_MS;
+  sdk.registerFunction("mem::graph-dsl",
+    async (data: {
+      query?: string;
+      limit?: number;
+    }): Promise<GraphDslResult> => {
+      const started = Date.now();
+      const raw = typeof data?.query === "string" ? data.query : "";
+      if (!raw.trim()) {
+        return {
+          success: false,
+          parseError: true,
+          error:
+            "Query is empty. Expected e.g.: " +
+            'MATCH (a:function)-[:uses]->(b:library) WHERE b.name ~ "express" RETURN paths',
+          tookMs: Date.now() - started,
+        };
+      }
+
+      let parsed: GraphDslQuery;
+      try {
+        parsed = parseGraphDsl(raw);
+      } catch (err) {
+        if (err instanceof GraphDslParseError) {
+          return {
+            success: false,
+            parseError: true,
+            error: err.message,
+            position: err.position,
+            tookMs: Date.now() - started,
+          };
+        }
+        throw err;
+      }
+
+      // The query's own LIMIT clause wins over the payload field; both
+      // are clamped to the DSL match ceiling.
+      const requested =
+        parsed.limit ??
+        (typeof data.limit === "number" && Number.isFinite(data.limit)
+          ? Math.floor(data.limit)
+          : DEFAULT_DSL_MATCH_LIMIT);
+      const limit = Math.max(1, Math.min(requested, MAX_DSL_MATCH_LIMIT));
+
+      let allNodes: GraphNode[];
+      let allEdges: GraphEdge[];
+      let warning: string | undefined;
+      try {
+        const [rawNodes, rawEdges] = await withTimeout(
+          Promise.all([
+            kv.list<GraphNode>(KV.graphNodes),
+            kv.list<GraphEdge>(KV.graphEdges),
+          ]),
+          dslBudgetMs,
+          "graph-dsl enumeration",
+        );
+        allNodes = rawNodes.filter((n) => !n.stale);
+        allEdges = rawEdges.filter((e) => !e.stale);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn("Graph DSL enumeration timed out, using snapshot", {
+          error: msg,
+        });
+        const snap = await readSnapshot(kv);
+        if (!snap) {
+          return {
+            success: true,
+            matches: [],
+            totalMatches: 0,
+            truncated: false,
+            limit,
+            tookMs: Date.now() - started,
+            warning:
+              "Graph enumeration exceeded budget and no snapshot is available.",
+          };
+        }
+        allNodes = snap.topNodes.filter((n) => !n.stale);
+        allEdges = snap.topEdges.filter((e) => !e.stale);
+        warning =
+          "Live graph enumeration exceeded budget; the query was " +
+          "evaluated against the top-degree snapshot subgraph, not the " +
+          "full graph.";
+      }
+
+      const exec = executeGraphDsl(parsed, allNodes, allEdges, { limit });
+      if (exec.budgetExhausted) {
+        const note = `Match search stopped after ${exec.visits} node visits; results may be incomplete.`;
+        warning = warning ? `${warning} ${note}` : note;
+      }
+
+      const tookMs = Date.now() - started;
+      logger.info("Graph DSL query complete", {
+        matches: exec.matches.length,
+        visits: exec.visits,
+        tookMs,
+      });
+      const base = {
+        success: true as const,
+        totalMatches: exec.matches.length,
+        truncated: exec.truncated,
+        limit,
+        tookMs,
+        ...(warning ? { warning } : {}),
+      };
+      const r = parsed.returns;
+      if (r.kind === "nodes") {
+        const seen = new Set<string>();
+        const nodes: GraphNode[] = [];
+        for (const m of exec.matches) {
+          for (const n of m.nodes) {
+            if (!seen.has(n.id)) {
+              seen.add(n.id);
+              nodes.push(n);
+            }
+          }
+        }
+        return { ...base, nodes };
+      }
+      if (r.kind === "edges") {
+        const seen = new Set<string>();
+        const edges: GraphEdge[] = [];
+        for (const m of exec.matches) {
+          for (const e of m.edges) {
+            if (!seen.has(e.id)) {
+              seen.add(e.id);
+              edges.push(e);
+            }
+          }
+        }
+        return { ...base, edges };
+      }
+      if (r.kind === "vars") {
+        const wanted = new Set(r.vars);
+        const matches = exec.matches.map((m) => {
+          const ids = new Set(
+            r.vars
+              .map((v) => m.bindings[v])
+              .filter((id): id is string => id !== undefined),
+          );
+          return {
+            nodes: m.nodes.filter((n) => ids.has(n.id)),
+            edges: m.edges.filter((e) => ids.has(e.id)),
+            bindings: Object.fromEntries(
+              Object.entries(m.bindings).filter(([k]) => wanted.has(k)),
+            ),
+            avgWeight: m.avgWeight,
+          };
+        });
+        return { ...base, matches };
+      }
+      return { ...base, matches: exec.matches };
+    },
+  );
 }
