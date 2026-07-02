@@ -24,9 +24,13 @@ import type { GraphNode, GraphEdge, GraphDslMatch } from "../types.js";
 // Semantics:
 //   - A string literal inside a node pattern is a case-insensitive
 //     substring match against the node name and aliases.
-//   - "~" is case-insensitive substring; "=" / "!=" compare exactly
-//     (case-sensitive); > < >= <= are numeric. Conditions on missing
-//     fields never match.
+//   - "~" is case-insensitive substring; "=" / "!=" with a string
+//     literal compare exactly (case-sensitive), while a numeric
+//     literal coerces the field to a number first. > < >= <= are
+//     numeric. Number literals are non-negative (no unary minus).
+//     Conditions on missing fields never match.
+//   - "paths", "nodes", and "edges" are reserved words and cannot be
+//     used as pattern variable names.
 //   - Node fields: name, type, id; any other single field reads
 //     node.properties[field] ("properties.key" also works). Edge
 //     fields: type, weight, id.
@@ -493,6 +497,17 @@ class Parser {
   }
 
   private validate(q: GraphDslQuery): void {
+    // RETURN keywords would be silently shadowed by same-named
+    // variables, so refuse them outright.
+    const reserved = new Set(["paths", "nodes", "edges"]);
+    for (const pattern of [...q.nodes, ...q.edges]) {
+      if (pattern.variable && reserved.has(pattern.variable.toLowerCase())) {
+        throw new GraphDslParseError(
+          `'${pattern.variable}' is a reserved word and cannot be a variable name`,
+          pattern.pos,
+        );
+      }
+    }
     const nodeVars = new Set<string>();
     const edgeVars = new Set<string>();
     for (const n of q.nodes) {

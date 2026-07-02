@@ -3207,11 +3207,16 @@ export function registerApiTriggers(
         }
         return { status_code: 200, body: result };
       } catch (err) {
+        // Log the real failure server-side; the client gets a generic
+        // envelope so internal error text never leaks across the API.
+        logger.error("graph-dsl endpoint failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
         return {
           status_code: 500,
           body: {
             success: false,
-            error: err instanceof Error ? err.message : String(err),
+            error: "Graph DSL evaluation failed; see server logs.",
           },
         };
       }

@@ -1331,7 +1331,7 @@ CONSOLIDATION_ENABLED=true
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-api.svg"><img src="../assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-124 Endpunkte auf Port `3111`. Die REST API bindet sich standardmäßig an `127.0.0.1`. Geschützte Endpunkte verlangen `Authorization: Bearer <secret>`, wenn `AGENTMEMORY_SECRET` gesetzt ist, und Mesh-Sync-Endpunkte erfordern `AGENTMEMORY_SECRET` auf beiden Peers.
+167 Endpunkte auf Port `3111`. Die REST API bindet sich standardmäßig an `127.0.0.1`. Geschützte Endpunkte verlangen `Authorization: Bearer <secret>`, wenn `AGENTMEMORY_SECRET` gesetzt ist, und Mesh-Sync-Endpunkte erfordern `AGENTMEMORY_SECRET` auf beiden Peers.
 
 <details>
 <summary>Wichtige Endpunkte</summary>

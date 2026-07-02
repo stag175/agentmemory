@@ -21,7 +21,6 @@
     "build": "tsdown && node scripts/copy-build-assets.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/cli.mjs",
-    "migrate": "node dist/functions/migrate.js",
     "test": "vitest run --exclude test/integration.test.ts",
     "test:watch": "vitest --exclude test/integration.test.ts",
     "test:integration": "vitest run test/integration.test.ts",

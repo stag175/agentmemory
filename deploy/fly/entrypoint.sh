@@ -70,10 +70,12 @@ workers:
       enabled: true
       service_name: agentmemory
       exporter: memory
-      sampling_ratio: 1.0
+      # 0.1 + console-off: keep the #519 log-feedback-loop fix (see
+      # iii-config.yaml rationale) — 1.0 + console logs re-created it.
+      sampling_ratio: 0.1
       metrics_enabled: true
       logs_enabled: true
-      logs_console_output: true
+      logs_console_output: false
 EOF
 chown "$RUN_AS" "$III_CONFIG"
 

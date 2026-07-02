@@ -164,6 +164,8 @@ describe("Graph DSL parser", () => {
       /supports the fields/,
     ],
     ["trailing garbage", "MATCH (a) RETURN nodes extra", /Unexpected trailing|Unknown variable/],
+    ["reserved node var", "MATCH (paths)-[]->(b)", /reserved word/],
+    ["reserved edge var", "MATCH (a)-[edges:uses]->(b)", /reserved word/],
   ];
   for (const [label, query, pattern] of parseErrorCases) {
     it(`rejects ${label}`, () => {
@@ -584,7 +586,7 @@ describe("POST /agentmemory/graph/dsl REST wiring", () => {
     expect(response.body.flag).toBe("GRAPH_EXTRACTION_ENABLED");
   });
 
-  it("returns 500 with the message when the handler fails at runtime", async () => {
+  it("returns a generic 500 when the handler fails at runtime", async () => {
     const sdk = mockSdk();
     sdk.registerFunction("mem::graph-dsl", async () => {
       throw new Error("kv exploded");
@@ -595,7 +597,11 @@ describe("POST /agentmemory/graph/dsl REST wiring", () => {
       body: { query: "MATCH (a)" },
     })) as { status_code: number; body: { error?: string; flag?: string } };
     expect(response.status_code).toBe(500);
-    expect(response.body.error).toBe("kv exploded");
+    // Internal error text is logged server-side, never echoed to the
+    // client.
+    expect(response.body.error).toBe(
+      "Graph DSL evaluation failed; see server logs.",
+    );
     expect(response.body.flag).toBeUndefined();
   });
 

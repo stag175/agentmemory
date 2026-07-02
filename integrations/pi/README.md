@@ -24,8 +24,8 @@ npx @agentmemory/agentmemory
 Copy this folder into pi's global extensions directory:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions/agentmemory
-cp integrations/pi/index.ts ~/.pi/agent/extensions/agentmemory/index.ts
+mkdir -p ~/.pi/agent/extensions
+cp -r integrations/pi ~/.pi/agent/extensions/agentmemory
 ```
 
 Then enable it in `~/.pi/agent/settings.json` if you prefer explicit loading:

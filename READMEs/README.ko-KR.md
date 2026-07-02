@@ -1315,7 +1315,7 @@ CONSOLIDATION_ENABLED=true
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-api.svg"><img src="../assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-`3111` 포트의 124개 엔드포인트. REST API는 기본적으로 `127.0.0.1`에 바인딩됩니다. 보호된 엔드포인트는 `AGENTMEMORY_SECRET`이 설정되었을 때 `Authorization: Bearer <secret>`를 요구하며, mesh sync 엔드포인트는 양쪽 피어 모두에서 `AGENTMEMORY_SECRET`을 요구합니다.
+`3111` 포트의 167개 엔드포인트. REST API는 기본적으로 `127.0.0.1`에 바인딩됩니다. 보호된 엔드포인트는 `AGENTMEMORY_SECRET`이 설정되었을 때 `Authorization: Bearer <secret>`를 요구하며, mesh sync 엔드포인트는 양쪽 피어 모두에서 `AGENTMEMORY_SECRET`을 요구합니다.
 
 <details>
 <summary>주요 엔드포인트</summary>

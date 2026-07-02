@@ -1335,7 +1335,7 @@ CONSOLIDATION_ENABLED=true
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-api.svg"><img src="../assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-`3111` portunda 124 endpoint. REST API varsayılan olarak `127.0.0.1`'e bağlanır. `AGENTMEMORY_SECRET` ayarlandığında korumalı endpoint'ler `Authorization: Bearer <secret>` gerektirir ve mesh sync endpoint'leri her iki eşte de `AGENTMEMORY_SECRET` gerektirir.
+`3111` portunda 167 endpoint. REST API varsayılan olarak `127.0.0.1`'e bağlanır. `AGENTMEMORY_SECRET` ayarlandığında korumalı endpoint'ler `Authorization: Bearer <secret>` gerektirir ve mesh sync endpoint'leri her iki eşte de `AGENTMEMORY_SECRET` gerektirir.
 
 <details>
 <summary>Önemli endpoint'ler</summary>

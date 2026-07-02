@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { networkInterfaces } from "node:os";
 import {
   buildAllowedHosts,
   isLoopbackHost,
@@ -184,7 +185,14 @@ describe("startViewerServer host binding", () => {
     expect(addr.address).toBe("127.0.0.1");
   });
 
-  it("binds to AGENTMEMORY_VIEWER_HOST when set — covers the deploy/fly fix for #434", async () => {
+  // Containers and minimal sandboxes often lack an IPv6 loopback; the
+  // ::1 bind would otherwise burn a 5s timeout and fail spuriously.
+  // GitHub-hosted runners provide ::1, so CI still exercises this.
+  const hasIpv6Loopback = Object.values(networkInterfaces())
+    .flat()
+    .some((iface) => iface?.address === "::1");
+
+  it.skipIf(!hasIpv6Loopback)("binds to AGENTMEMORY_VIEWER_HOST when set — covers the deploy/fly fix for #434", async () => {
     process.env.AGENTMEMORY_VIEWER_HOST = "::1";
     server = startViewerServer(0, null, null);
     await waitForListening(server);

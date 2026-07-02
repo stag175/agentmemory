@@ -90,9 +90,11 @@ if (!version) {
   );
 }
 
+// Same counting rule as test/consistency.test.ts: every api_path key,
+// including multi-line config blocks the old single-line regex missed.
 const restEndpoints = safeCountMatches(
   join(repoRoot, "src", "triggers", "api.ts"),
-  /config:\s*\{\s*api_path:\s*"/g,
+  /api_path:\s*"/g,
 );
 const mcpTools = safeCountMatches(
   join(repoRoot, "src", "mcp", "tools-registry.ts"),

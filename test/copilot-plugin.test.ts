@@ -8,6 +8,13 @@ import { spawn } from "node:child_process";
 const repoRoot = resolve(__dirname, "..");
 const pluginRoot = join(repoRoot, "plugin");
 
+// A real non-git directory named "repo": hook payloads use it as cwd so
+// project resolution is deterministic on every platform (a literal
+// copilotCwd only derives project "repo" under win32 path semantics —
+// see src/hooks/_project.ts resolveProject).
+const copilotCwd = join(mkdtempSync(join(tmpdir(), "copilot-hook-cwd-")), "repo");
+mkdirSync(copilotCwd);
+
 function readJson<T = unknown>(path: string): T {
   return JSON.parse(readFileSync(path, "utf-8")) as T;
 }
@@ -299,7 +306,7 @@ describe("Copilot hook scripts", () => {
       "scripts/session-start.mjs",
       {
         sessionId: "copilot-session",
-        cwd: "C:\\repo",
+        cwd: copilotCwd,
         agentId: "codex-worker",
         framework: "copilot",
         nativeId: "native-session-1",
@@ -312,7 +319,7 @@ describe("Copilot hook scripts", () => {
     expect(request.body).toMatchObject({
       sessionId: "copilot-session",
       project: "repo",
-      cwd: "C:\\repo",
+      cwd: copilotCwd,
       agentId: "codex-worker",
       framework: "copilot",
       nativeId: "native-session-1",
@@ -343,7 +350,7 @@ describe("Copilot hook scripts", () => {
   it("prompt-submit accepts Copilot camelCase prompt payload", async () => {
     const result = await runHook("scripts/prompt-submit.mjs", {
       sessionId: "copilot-session",
-      cwd: "C:\\repo",
+      cwd: copilotCwd,
       userPrompt: "remember this prompt",
     });
 
@@ -356,7 +363,7 @@ describe("Copilot hook scripts", () => {
         lineage: {
           sessionId: "copilot-session",
           project: "repo",
-          cwd: "C:\\repo",
+          cwd: copilotCwd,
         },
       },
     });
@@ -394,7 +401,7 @@ describe("Copilot hook scripts", () => {
     const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
     const result = await runHook("scripts/post-tool-use.mjs", {
       sessionId: "copilot-session",
-      cwd: "C:\\repo",
+      cwd: copilotCwd,
       agentId: "codex-worker",
       framework: "copilot",
       nativeId: "native-session-1",
@@ -450,7 +457,7 @@ describe("Copilot hook scripts", () => {
     const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
     const result = await runHook("scripts/post-tool-failure.mjs", {
       sessionId: "copilot-session",
-      cwd: "C:\\repo",
+      cwd: copilotCwd,
       agentId: "codex-worker",
       framework: "copilot",
       nativeId: "native-session-1",
@@ -497,7 +504,7 @@ describe("Copilot hook scripts", () => {
   it("notification accepts Copilot camelCase notificationType", async () => {
     const result = await runHook("scripts/notification.mjs", {
       sessionId: "copilot-session",
-      cwd: "C:\\repo",
+      cwd: copilotCwd,
       notificationType: "permission_prompt",
       title: "Tool approval",
       message: "Approve edit",
@@ -514,7 +521,7 @@ describe("Copilot hook scripts", () => {
         lineage: {
           sessionId: "copilot-session",
           project: "repo",
-          cwd: "C:\\repo",
+          cwd: copilotCwd,
         },
       },
     });
@@ -523,7 +530,7 @@ describe("Copilot hook scripts", () => {
   it("subagent-start emits parent and child lineage", async () => {
     const result = await runHook("scripts/subagent-start.mjs", {
       sessionId: "copilot-session",
-      cwd: "C:\\repo",
+      cwd: copilotCwd,
       parentAgentId: "lead-agent",
       agentId: "review-agent",
       agentDisplayName: "Review agent",
@@ -564,7 +571,7 @@ describe("Copilot hook scripts", () => {
   it("stop sends shaped session and hook trace payloads", async () => {
     const result = await runHook("scripts/stop.mjs", {
       sessionId: "copilot-session",
-      cwd: "C:\\repo",
+      cwd: copilotCwd,
       agentId: "codex-worker",
       framework: "copilot",
       nativeId: "native-session-1",

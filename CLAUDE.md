@@ -5,6 +5,14 @@ This project is indexed by GitNexus as **agentmemory-v2** (8815 symbols, 22090 r
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
+> **Availability:** the GitNexus index, `.gitnexus/` runner, and MCP server are
+> developer-local tooling and are not committed to this repository. In an
+> environment where the GitNexus MCP tools are not connected (fresh clones,
+> CI, cloud sandboxes), the MUST rules below apply as manual discipline
+> instead: trace a symbol's callers before editing it, review the diff scope
+> before committing, and flag wide blast radii to the user — do not block on
+> the missing tooling.
+
 ## Always Do
 
 - **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.

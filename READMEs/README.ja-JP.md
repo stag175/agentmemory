@@ -1334,7 +1334,7 @@ CONSOLIDATION_ENABLED=true
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-api.svg"><img src="../assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-ポート `3111` 上の 124 エンドポイント。REST API はデフォルトで `127.0.0.1` にバインドします。`AGENTMEMORY_SECRET` が設定されている場合、保護されたエンドポイントは `Authorization: Bearer <secret>` を要求し、mesh sync エンドポイントは両ピアで `AGENTMEMORY_SECRET` を要求します。
+ポート `3111` 上の 167 エンドポイント。REST API はデフォルトで `127.0.0.1` にバインドします。`AGENTMEMORY_SECRET` が設定されている場合、保護されたエンドポイントは `Authorization: Bearer <secret>` を要求し、mesh sync エンドポイントは両ピアで `AGENTMEMORY_SECRET` を要求します。
 
 <details>
 <summary>主要エンドポイント</summary>

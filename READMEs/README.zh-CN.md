@@ -1332,7 +1332,7 @@ CONSOLIDATION_ENABLED=true
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-api.svg"><img src="../assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-端口 `3111` 上的 124 个端点。REST API 默认绑定 `127.0.0.1`。当 `AGENTMEMORY_SECRET` 已设置时,受保护端点需要 `Authorization: Bearer <secret>`,网状同步端点要求两端都设置 `AGENTMEMORY_SECRET`。
+端口 `3111` 上的 167 个端点。REST API 默认绑定 `127.0.0.1`。当 `AGENTMEMORY_SECRET` 已设置时,受保护端点需要 `Authorization: Bearer <secret>`,网状同步端点要求两端都设置 `AGENTMEMORY_SECRET`。
 
 <details>
 <summary>关键端点</summary>

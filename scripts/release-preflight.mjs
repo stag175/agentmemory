@@ -452,6 +452,7 @@ function assertVersionLockstep(summary) {
     for (const manifest of [
       "plugin/.claude-plugin/plugin.json",
       "plugin/.codex-plugin/plugin.json",
+      "plugin/opencode/plugin.json",
     ]) {
       if (existsSync(join(ROOT, manifest))) {
         actual.push([manifest, readJson(manifest).version]);

@@ -1331,7 +1331,7 @@ CONSOLIDATION_ENABLED=true
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-api.svg"><img src="../assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-124 эндпоинта на порту `3111`. REST API по умолчанию слушает на `127.0.0.1`. Защищённые эндпоинты требуют `Authorization: Bearer <secret>`, когда установлен `AGENTMEMORY_SECRET`, а эндпоинты mesh-синхронизации требуют `AGENTMEMORY_SECRET` на обоих узлах.
+167 эндпоинта на порту `3111`. REST API по умолчанию слушает на `127.0.0.1`. Защищённые эндпоинты требуют `Authorization: Bearer <secret>`, когда установлен `AGENTMEMORY_SECRET`, а эндпоинты mesh-синхронизации требуют `AGENTMEMORY_SECRET` на обоих узлах.
 
 <details>
 <summary>Ключевые эндпоинты</summary>

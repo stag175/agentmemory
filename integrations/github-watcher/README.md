@@ -16,6 +16,11 @@ Or run without installing:
 npx @agentmemory/github-watcher owner/repo
 ```
 
+> `@agentmemory/github-watcher` ships to npm with the next agentmemory
+> release (it is wired into the publish workflow). Until it appears on
+> the registry, run it straight from a checkout:
+> `node integrations/github-watcher/bin.mjs owner/repo`.
+
 ## Usage
 
 ```bash
