@@ -34,8 +34,11 @@ import type { GraphNode, GraphEdge, GraphDslMatch } from "../types.js";
 //     cycles are expressed. Matched paths are otherwise simple: no
 //     repeated node, never a repeated edge.
 //   - An edge variable cannot be combined with variable-length hops.
-//   - Matches are ordered by average edge weight (desc), then hop
-//     count (asc), then discovery order.
+//   - LIMIT stops the search once satisfied (Cypher-style): the
+//     returned matches are presented ordered by average edge weight
+//     (desc), then hop count (asc), then discovery order — the
+//     ordering applies within the returned set, it is not a global
+//     top-N ranking of all possible matches.
 //
 // The module is pure and dependency-free: parseGraphDsl / executeGraphDsl
 // never touch the kv store, which keeps them unit-testable without the
@@ -45,7 +48,7 @@ import type { GraphNode, GraphEdge, GraphDslMatch } from "../types.js";
 // Hand-rolled tokenizer + backtracking matcher — no eval, no RegExp
 // built from user input (substring matching only), so a hostile query
 // cannot inject code or trigger ReDoS. Work is bounded by maxVisits.
-export const MAX_DSL_QUERY_LENGTH = 2000;
+const MAX_DSL_QUERY_LENGTH = 2000;
 const MAX_PATTERN_SEGMENTS = 8;
 const MAX_VAR_HOPS = 5;
 const DEFAULT_VAR_HOPS_MAX = 3;
@@ -669,7 +672,12 @@ export function executeGraphDsl(
     if (!adjacency.has(e.sourceNodeId)) adjacency.set(e.sourceNodeId, []);
     if (!adjacency.has(e.targetNodeId)) adjacency.set(e.targetNodeId, []);
     adjacency.get(e.sourceNodeId)!.push({ edge: e, out: true });
-    adjacency.get(e.targetNodeId)!.push({ edge: e, out: false });
+    // A self-loop would land in the same list twice and double-count
+    // every match; store it once and let the direction check below
+    // treat self-loops as satisfying any direction.
+    if (e.sourceNodeId !== e.targetNodeId) {
+      adjacency.get(e.targetNodeId)!.push({ edge: e, out: false });
+    }
   }
 
   interface InternalMatch extends GraphDslMatch {
@@ -684,6 +692,27 @@ export function executeGraphDsl(
     query.where.every((c) =>
       condHolds(c, resolveField(c, bindings, nodesById, edgesById)),
     );
+
+  // Conditions grouped by variable so a failing condition prunes the
+  // search the moment its variable is bound, instead of the whole
+  // subtree being explored and rejected at the end. The final
+  // whereHolds pass stays as the correctness backstop.
+  const condsByVar = new Map<string, WhereCond[]>();
+  for (const c of query.where) {
+    const arr = condsByVar.get(c.variable) ?? [];
+    arr.push(c);
+    condsByVar.set(c.variable, arr);
+  }
+  const varCondsHold = (
+    varName: string,
+    bindings: Record<string, string>,
+  ): boolean => {
+    const conds = condsByVar.get(varName);
+    if (!conds) return true;
+    return conds.every((c) =>
+      condHolds(c, resolveField(c, bindings, nodesById, edgesById)),
+    );
+  };
 
   const bindNode = (
     p: NodePattern,
@@ -715,7 +744,10 @@ export function executeGraphDsl(
       avgWeight,
       hops: pathEdges.length,
     });
-    return matches.length < limit;
+    // Collect one match beyond the limit as a "more exist" probe so
+    // truncated is honest: exactly `limit` matches in the graph is a
+    // complete result, not a truncated one.
+    return matches.length <= limit;
   };
 
   // Returns false when the search should stop entirely (limit reached
@@ -753,8 +785,13 @@ export function executeGraphDsl(
           budgetExhausted = true;
           return false;
         }
-        if (ep.direction === "right" && !out) continue;
-        if (ep.direction === "left" && out) continue;
+        // A self-loop is simultaneously outgoing and incoming, so it
+        // satisfies either direction.
+        const selfLoop = edge.sourceNodeId === edge.targetNodeId;
+        if (!selfLoop) {
+          if (ep.direction === "right" && !out) continue;
+          if (ep.direction === "left" && out) continue;
+        }
         if (ep.type && edge.type.toLowerCase() !== ep.type) continue;
         if (hopEdgeSet.has(edge.id)) continue;
         const nextId = out ? edge.targetNodeId : edge.sourceNodeId;
@@ -777,24 +814,36 @@ export function executeGraphDsl(
               const withEdgeVar = ep.variable
                 ? { ...bound, [ep.variable]: edge.id }
                 : bound;
-              const nextNodes = revisiting
-                ? [...hopNodes]
-                : [...hopNodes, nextNode];
-              const nextNodeSet = revisiting
-                ? hopNodeSet
-                : new Set(hopNodeSet).add(nextId);
-              if (
-                !matchSegment(
-                  segIdx + 1,
-                  nextId,
-                  withEdgeVar,
-                  nextNodes,
-                  [...hopEdges, edge],
-                  nextNodeSet,
-                  new Set(hopEdgeSet).add(edge.id),
-                )
-              ) {
-                return false;
+              // Prune on freshly-bound variables whose WHERE
+              // conditions already fail — no point exploring the rest
+              // of the chain for a doomed binding.
+              const npFresh =
+                np.variable !== undefined &&
+                bindings[np.variable] === undefined;
+              const prunable =
+                (npFresh && !varCondsHold(np.variable!, withEdgeVar)) ||
+                (ep.variable !== undefined &&
+                  !varCondsHold(ep.variable, withEdgeVar));
+              if (!prunable) {
+                const nextNodes = revisiting
+                  ? [...hopNodes]
+                  : [...hopNodes, nextNode];
+                const nextNodeSet = revisiting
+                  ? hopNodeSet
+                  : new Set(hopNodeSet).add(nextId);
+                if (
+                  !matchSegment(
+                    segIdx + 1,
+                    nextId,
+                    withEdgeVar,
+                    nextNodes,
+                    [...hopEdges, edge],
+                    nextNodeSet,
+                    new Set(hopEdgeSet).add(edge.id),
+                  )
+                ) {
+                  return false;
+                }
               }
             }
           }
@@ -825,13 +874,23 @@ export function executeGraphDsl(
   };
 
   for (const seed of allNodes) {
+    // The pattern check on non-matching seeds is trivial and already
+    // bounded by the materialized node list, so only matching seeds
+    // are charged against the visit budget — otherwise a >100K-node
+    // corpus exhausts the budget before a rare seed is ever reached.
+    if (!nodeMatchesPattern(query.nodes[0], seed)) continue;
     if (++visits > maxVisits) {
       budgetExhausted = true;
       break;
     }
-    if (!nodeMatchesPattern(query.nodes[0], seed)) continue;
     const bound = bindNode(query.nodes[0], seed, {});
     if (bound === null) continue;
+    if (
+      query.nodes[0].variable !== undefined &&
+      !varCondsHold(query.nodes[0].variable, bound)
+    ) {
+      continue;
+    }
     if (
       !matchSegment(
         0,
@@ -847,13 +906,18 @@ export function executeGraphDsl(
     }
   }
 
+  // record() collects up to limit+1 matches; the extra one only proves
+  // more matches exist and is dropped after the sort.
+  const moreExist = matches.length > limit;
   matches.sort(
     (a, b) => b.avgWeight - a.avgWeight || a.hops - b.hops,
   );
 
   return {
-    matches: matches.map(({ hops: _hops, ...m }) => m),
-    truncated: budgetExhausted || matches.length >= limit,
+    matches: matches
+      .slice(0, limit)
+      .map(({ hops: _hops, ...m }) => m),
+    truncated: budgetExhausted || moreExist,
     visits,
     budgetExhausted,
   };

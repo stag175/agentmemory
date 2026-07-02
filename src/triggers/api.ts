@@ -3189,6 +3189,13 @@ export function registerApiTriggers(
         query: req.body.query,
         limit: req.body.limit,
       };
+      // Unlike the sibling graph endpoints, check the flag up front
+      // instead of inferring it from a trigger failure: mem::graph-dsl
+      // deliberately rethrows non-parse runtime errors, and a blanket
+      // catch would mislabel those as "flag disabled" 503s.
+      if (!isGraphExtractionEnabled()) {
+        return graphDisabledResponse();
+      }
       try {
         const result = await sdk.trigger({
           function_id: "mem::graph-dsl",
@@ -3199,8 +3206,14 @@ export function registerApiTriggers(
           return { status_code: 400, body: result };
         }
         return { status_code: 200, body: result };
-      } catch {
-        return graphDisabledResponse();
+      } catch (err) {
+        return {
+          status_code: 500,
+          body: {
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        };
       }
     },
   );

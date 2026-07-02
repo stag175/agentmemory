@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -11,7 +11,7 @@ import {
 } from "../src/functions/graph-dsl.js";
 import { registerGraphFunction } from "../src/functions/graph.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
-import { mockKV as sharedMockKV, mockSdk as sharedMockSdk } from "./helpers/mocks.js";
+import { mockKV, mockSdk } from "./helpers/mocks.js";
 import { KV } from "../src/state/schema.js";
 import type {
   GraphNode,
@@ -262,6 +262,41 @@ describe("Graph DSL evaluator", () => {
     expect(truncated).toBe(true);
   });
 
+  it("does not report truncation when the limit exactly fits all matches", () => {
+    // 5 directed single-hop matches exist; limit 5 is a complete
+    // result, not a truncated one.
+    const { matches, truncated } = run("MATCH (a)-[]->(b)", 5);
+    expect(matches).toHaveLength(5);
+    expect(truncated).toBe(false);
+  });
+
+  it("matches a self-loop exactly once regardless of direction", () => {
+    const nodes = [N("r", "concept", "recursion")];
+    const edges = [E("rr", "related_to", "r", "r", 0.9)];
+    for (const q of [
+      "MATCH (x)-[:related_to]-(x)",
+      "MATCH (x)-[:related_to]->(x)",
+      "MATCH (x)<-[:related_to]-(x)",
+    ]) {
+      const { matches } = executeGraphDsl(parseGraphDsl(q), nodes, edges, {
+        limit: 10,
+      });
+      expect(matches, q).toHaveLength(1);
+      expect(matches[0].edges.map((e) => e.id), q).toEqual(["rr"]);
+    }
+  });
+
+  it("prunes doomed seed bindings without changing results", () => {
+    // Same answer as the unpruned path — a WHERE condition on the
+    // seed variable filters seeds up front.
+    const { matches, visits } = run(
+      'MATCH (a:function)-[:uses]->(b:library) WHERE a.name = "main"',
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].bindings.a).toBe("fn1");
+    expect(visits).toBeLessThan(10);
+  });
+
   it("closes cycles only through re-bound variables", () => {
     const nodes = [N("a", "concept", "A"), N("b", "concept", "B")];
     const edges = [
@@ -327,68 +362,21 @@ describe("Graph DSL evaluator", () => {
   });
 });
 
-// Registration-level coverage: mem::graph-dsl through the same mock
-// sdk/kv harness graph.test.ts uses.
-function mockKV() {
-  const store = new Map<string, Map<string, unknown>>();
-  const kv = {
-    get: async <T>(scope: string, key: string): Promise<T | null> => {
-      return (store.get(scope)?.get(key) as T) ?? null;
-    },
-    set: async <T>(scope: string, key: string, data: T): Promise<T> => {
-      if (!store.has(scope)) store.set(scope, new Map());
-      store.get(scope)!.set(key, data);
-      return data;
-    },
-    delete: async (scope: string, key: string): Promise<void> => {
-      store.get(scope)?.delete(key);
-    },
-    list: async <T>(scope: string): Promise<T[]> => {
-      const entries = store.get(scope);
-      return entries ? (Array.from(entries.values()) as T[]) : [];
-    },
-  };
-  return { kv, store };
-}
-
-function mockSdk() {
-  const functions = new Map<string, Function>();
-  return {
-    registerFunction: (
-      idOrOpts: string | { id: string },
-      handler: Function,
-    ) => {
-      const id = typeof idOrOpts === "string" ? idOrOpts : idOrOpts.id;
-      functions.set(id, handler);
-    },
-    registerTrigger: () => {},
-    trigger: async (
-      idOrInput: string | { function_id: string; payload: unknown },
-      data?: unknown,
-    ) => {
-      const id =
-        typeof idOrInput === "string" ? idOrInput : idOrInput.function_id;
-      const payload = typeof idOrInput === "string" ? data : idOrInput.payload;
-      const fn = functions.get(id);
-      if (!fn) throw new Error(`No function: ${id}`);
-      return fn(payload);
-    },
-  };
-}
-
+// Registration-level coverage: mem::graph-dsl through the shared mock
+// sdk/kv harness (test/helpers/mocks.ts).
 const mockProvider = {
   name: "test",
   compress: vi.fn().mockResolvedValue(""),
   summarize: vi.fn(),
 };
 
-async function seededHarness(opts?: { dslEnumerationBudgetMs?: number }) {
+async function seededHarness() {
   const sdk = mockSdk();
-  const { kv, store } = mockKV();
-  registerGraphFunction(sdk as never, kv as never, mockProvider as never, opts);
+  const kv = mockKV();
+  registerGraphFunction(sdk as never, kv as never, mockProvider as never);
   for (const n of NODES) await kv.set(KV.graphNodes, n.id, n);
   for (const e of EDGES) await kv.set(KV.graphEdges, e.id, e);
-  return { sdk, kv, store };
+  return { sdk, kv };
 }
 
 describe("mem::graph-dsl registration", () => {
@@ -437,9 +425,12 @@ describe("mem::graph-dsl registration", () => {
     expect(result.totalMatches).toBe(0);
   });
 
-  it("falls back to the snapshot when enumeration exceeds budget", async () => {
+  it("falls back to the snapshot when enumeration fails", async () => {
+    // Same rejecting-kv seam graph.test.ts uses for the #814 catch
+    // path: kv.list rejects immediately, driving the fallback without
+    // waiting out the real enumeration budget.
     const sdk = mockSdk();
-    const { kv } = mockKV();
+    const kv = mockKV();
     const snapshot: GraphSnapshot = {
       version: 1,
       topNodes: [NODES[0], NODES[1]],
@@ -454,42 +445,51 @@ describe("mem::graph-dsl registration", () => {
       updatedAt: "2026-07-01T00:00:00Z",
       dirty: false,
     };
-    const hangingKv = {
-      ...kv,
-      get: kv.get,
-      list: () => new Promise(() => {}),
-    };
     await kv.set(KV.graphSnapshot, "current", snapshot);
+    const rejectingKv = {
+      ...kv,
+      list: () => Promise.reject(new Error("state adapter down")),
+    };
     registerGraphFunction(
       sdk as never,
-      hangingKv as never,
+      rejectingKv as never,
       mockProvider as never,
-      { dslEnumerationBudgetMs: 20 },
     );
     const result = (await sdk.trigger("mem::graph-dsl", {
       query: "MATCH (a:file)-[:uses]->(b:function)",
     })) as GraphDslResult;
     expect(result.success).toBe(true);
     expect(result.warning).toMatch(/snapshot/i);
+    expect(result.warning).toMatch(/state adapter down/);
     expect(result.totalMatches).toBe(1);
   });
 
-  it("returns an empty warning envelope when budget dies with no snapshot", async () => {
+  it("keeps the RETURN shape on the degraded no-snapshot path", async () => {
     const sdk = mockSdk();
-    const { kv } = mockKV();
-    const hangingKv = { ...kv, list: () => new Promise(() => {}) };
+    const kv = mockKV();
+    const rejectingKv = {
+      ...kv,
+      list: () => Promise.reject(new Error("state adapter down")),
+    };
     registerGraphFunction(
       sdk as never,
-      hangingKv as never,
+      rejectingKv as never,
       mockProvider as never,
-      { dslEnumerationBudgetMs: 20 },
     );
-    const result = (await sdk.trigger("mem::graph-dsl", {
+    const paths = (await sdk.trigger("mem::graph-dsl", {
       query: "MATCH (a)",
     })) as GraphDslResult;
-    expect(result.success).toBe(true);
-    expect(result.matches).toEqual([]);
-    expect(result.warning).toMatch(/no snapshot/i);
+    expect(paths.success).toBe(true);
+    expect(paths.matches).toEqual([]);
+    expect(paths.warning).toMatch(/no snapshot/i);
+    // RETURN nodes must come back with a `nodes` field even degraded,
+    // so `result.nodes.length` never throws on the documented shape.
+    const nodes = (await sdk.trigger("mem::graph-dsl", {
+      query: "MATCH (a) RETURN nodes",
+    })) as GraphDslResult;
+    expect(nodes.success).toBe(true);
+    expect(nodes.nodes).toEqual([]);
+    expect(nodes.matches).toBeUndefined();
   });
 
   it("shapes RETURN a, b to bound variables only", async () => {
@@ -508,9 +508,19 @@ describe("mem::graph-dsl registration", () => {
 });
 
 describe("POST /agentmemory/graph/dsl REST wiring", () => {
+  // api::graph-dsl checks GRAPH_EXTRACTION_ENABLED up front (unlike
+  // its siblings, which infer it from a trigger failure), so the happy
+  // paths need the flag on. getMergedEnv() reads process.env live.
+  beforeEach(() => {
+    process.env.GRAPH_EXTRACTION_ENABLED = "true";
+  });
+  afterEach(() => {
+    delete process.env.GRAPH_EXTRACTION_ENABLED;
+  });
+
   it("registers the route", () => {
-    const sdk = sharedMockSdk();
-    registerApiTriggers(sdk as never, sharedMockKV() as never, undefined);
+    const sdk = mockSdk();
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
     const routes = sdk.registerTrigger.mock.calls.map(
       ([trigger]: [{ config?: { api_path?: string; http_method?: string } }]) => ({
         path: trigger.config?.api_path,
@@ -524,13 +534,13 @@ describe("POST /agentmemory/graph/dsl REST wiring", () => {
   });
 
   it("whitelists body fields and returns 200 for a valid query", async () => {
-    const sdk = sharedMockSdk();
+    const sdk = mockSdk();
     let payload: Record<string, unknown> | undefined;
     sdk.registerFunction("mem::graph-dsl", async (input) => {
       payload = input as Record<string, unknown>;
       return { success: true, matches: [], totalMatches: 0 };
     });
-    registerApiTriggers(sdk as never, sharedMockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
     const response = (await sdk.trigger("api::graph-dsl", {
       headers: {},
       body: { query: "MATCH (a)", limit: 5, ignored: "drop" },
@@ -540,8 +550,8 @@ describe("POST /agentmemory/graph/dsl REST wiring", () => {
   });
 
   it("rejects missing queries and parse errors with 400", async () => {
-    const sdk = sharedMockSdk();
-    const kv = sharedMockKV();
+    const sdk = mockSdk();
+    const kv = mockKV();
     registerGraphFunction(sdk as never, kv as never, mockProvider as never);
     registerApiTriggers(sdk as never, kv as never, undefined);
     const missing = (await sdk.trigger("api::graph-dsl", {
@@ -560,11 +570,12 @@ describe("POST /agentmemory/graph/dsl REST wiring", () => {
   });
 
   it("returns the graph-disabled envelope when extraction is off", async () => {
-    // mem::graph-dsl is only registered behind GRAPH_EXTRACTION_ENABLED;
-    // without it the trigger throws and the API maps that to the 503
-    // flag-disabled envelope, mirroring /graph/query.
-    const sdk = sharedMockSdk();
-    registerApiTriggers(sdk as never, sharedMockKV() as never, undefined);
+    // The endpoint checks the flag before triggering, so a disabled
+    // graph gets the actionable 503 envelope rather than a runtime
+    // error being mislabeled as "flag off".
+    delete process.env.GRAPH_EXTRACTION_ENABLED;
+    const sdk = mockSdk();
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
     const response = (await sdk.trigger("api::graph-dsl", {
       headers: {},
       body: { query: "MATCH (a)" },
@@ -573,9 +584,24 @@ describe("POST /agentmemory/graph/dsl REST wiring", () => {
     expect(response.body.flag).toBe("GRAPH_EXTRACTION_ENABLED");
   });
 
+  it("returns 500 with the message when the handler fails at runtime", async () => {
+    const sdk = mockSdk();
+    sdk.registerFunction("mem::graph-dsl", async () => {
+      throw new Error("kv exploded");
+    });
+    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    const response = (await sdk.trigger("api::graph-dsl", {
+      headers: {},
+      body: { query: "MATCH (a)" },
+    })) as { status_code: number; body: { error?: string; flag?: string } };
+    expect(response.status_code).toBe(500);
+    expect(response.body.error).toBe("kv exploded");
+    expect(response.body.flag).toBeUndefined();
+  });
+
   it("requires the bearer secret when one is configured", async () => {
-    const sdk = sharedMockSdk();
-    registerApiTriggers(sdk as never, sharedMockKV() as never, "s3cret");
+    const sdk = mockSdk();
+    registerApiTriggers(sdk as never, mockKV() as never, "s3cret");
     const denied = (await sdk.trigger("api::graph-dsl", {
       headers: {},
       body: { query: "MATCH (a)" },

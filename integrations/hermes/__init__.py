@@ -175,11 +175,37 @@ def _api_bg(base: str, path: str, body: dict | None = None) -> None:
     t.start()
 
 
+# Client-side caps for per-tool capture, mirroring the native hooks
+# (tool output 8000 chars in src/hooks/post-tool-use.ts, metadata
+# strings 2000 chars in plugin/scripts/_lineage.mjs). mem::observe
+# applies no length cap server-side, so this bound is what keeps a
+# huge tool result from shipping wholesale on every call.
+TOOL_INPUT_LIMIT = 2000
+TOOL_OUTPUT_LIMIT = 8000
+_TRUNCATION_MARKER = "\n[...truncated]"
+
+
 def _coerce_tool_field(value: Any, limit: int) -> Any:
     if isinstance(value, str):
-        return value if len(value) <= limit else value[:limit] + "\n[...truncated]"
+        return value if len(value) <= limit else value[:limit] + _TRUNCATION_MARKER
     if isinstance(value, (dict, list)):
-        return value  # observe endpoint sanitizes/stringifies structured data
+        # Small JSON-serializable structured values pass through for
+        # server-side sanitization. Anything larger is serialized and
+        # truncated so the background POST stays bounded, and anything
+        # json.dumps rejects (bytes, sets, Paths) falls back to str()
+        # — otherwise the TypeError would escape inside _api's
+        # json.dumps and silently kill the capture thread.
+        try:
+            serialized = json.dumps(value)
+            json_ok = True
+        except (TypeError, ValueError):
+            serialized = str(value)
+            json_ok = False
+        if json_ok and len(serialized) <= limit:
+            return value
+        if len(serialized) <= limit:
+            return serialized
+        return serialized[:limit] + _TRUNCATION_MARKER
     return ("" if value is None else str(value))[:limit]
 
 
@@ -354,7 +380,18 @@ class AgentMemoryProvider(MemoryProvider):
 
         return json.dumps({"error": f"Unknown tool: {name}"})
 
-    def sync_turn(self, user: str, assistant: str, **kwargs: Any) -> None:
+    def _observe_tool_event(
+        self,
+        tool_name: str,
+        tool_input: Any,
+        tool_output: Any,
+        **kwargs: Any,
+    ) -> None:
+        # Shared observe envelope for turn-level and per-tool capture so
+        # the two payload shapes cannot drift apart. Background POST so
+        # the agent loop is never blocked; reuses _api_bg -> _api, which
+        # applies the plaintext-bearer guard and reads AGENTMEMORY_SECRET
+        # from env.
         _api_bg(self._base, "observe", {
             "hookType": "post_tool_use",
             "sessionId": kwargs.get("session_id", self._session_id),
@@ -362,11 +399,14 @@ class AgentMemoryProvider(MemoryProvider):
             "cwd": self._project,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "data": {
-                "tool_name": "conversation",
-                "tool_input": user[:500],
-                "tool_output": assistant[:2000],
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "tool_output": tool_output,
             },
         })
+
+    def sync_turn(self, user: str, assistant: str, **kwargs: Any) -> None:
+        self._observe_tool_event("conversation", user[:500], assistant[:2000], **kwargs)
 
     def on_post_tool_use(
         self,
@@ -377,21 +417,12 @@ class AgentMemoryProvider(MemoryProvider):
     ) -> None:
         # Per-tool-call capture (individual tool invocations), distinct
         # from sync_turn's turn-level "conversation" observation.
-        # Background POST so the agent loop is never blocked; reuses
-        # _api_bg -> _api, which applies the plaintext-bearer guard and
-        # reads AGENTMEMORY_SECRET from env.
-        _api_bg(self._base, "observe", {
-            "hookType": "post_tool_use",
-            "sessionId": kwargs.get("session_id", self._session_id),
-            "project": self._project,
-            "cwd": self._project,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "data": {
-                "tool_name": tool_name or "unknown",
-                "tool_input": _coerce_tool_field(tool_input, 2000),
-                "tool_output": _coerce_tool_field(tool_output, 8000),
-            },
-        })
+        self._observe_tool_event(
+            tool_name or "unknown",
+            _coerce_tool_field(tool_input, TOOL_INPUT_LIMIT),
+            _coerce_tool_field(tool_output, TOOL_OUTPUT_LIMIT),
+            **kwargs,
+        )
 
     def on_session_end(self, messages: list, **kwargs: Any) -> None:
         _api(self._base, "session/end", {

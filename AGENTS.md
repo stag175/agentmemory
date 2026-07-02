@@ -25,6 +25,7 @@ agentmemory is a persistent memory system for AI coding agents, built on iii-eng
 1. `src/triggers/api.ts` — endpoint registration
 2. `src/index.ts` — endpoint count in the log line
 3. `README.md` — endpoint count (search for "REST endpoints" and "endpoints on port")
+4. `npm run skills:gen` — regenerates `plugin/skills/agentmemory-rest-api/REFERENCE.md` (CI's `skills:check` fails on drift)
 
 **When bumping version, you MUST update ALL of the following:**
 1. `package.json` — version field

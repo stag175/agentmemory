@@ -20,7 +20,7 @@ mod = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(mod)
 
-for key in ("AGENTMEMORY_SECRET", "AGENTMEMORY_REQUIRE_HTTPS"):
+for key in ("AGENTMEMORY_SECRET", "AGENTMEMORY_URL", "AGENTMEMORY_REQUIRE_HTTPS"):
     os.environ.pop(key, None)
 
 fg_calls = []
@@ -119,6 +119,23 @@ assert bg_calls[1][1]["data"]["tool_output"] == "", bg_calls[1]
 provider.on_post_tool_use("T", None, 42)
 assert bg_calls[2][1]["data"]["tool_input"] == "", bg_calls[2]
 assert bg_calls[2][1]["data"]["tool_output"] == "42", bg_calls[2]
+
+# Oversized structured values serialize + truncate instead of shipping
+# wholesale, so per-call payloads stay bounded.
+provider.on_post_tool_use("T", "in", {"content": "z" * 20000})
+big = bg_calls[3][1]["data"]["tool_output"]
+assert isinstance(big, str), type(big)
+assert len(big) == 8000 + len(marker), len(big)
+assert big.endswith("[...truncated]"), big[-30:]
+
+# Non-JSON-serializable values (bytes) fall back to str() instead of
+# raising TypeError inside _api's json.dumps and killing the capture.
+provider.on_post_tool_use("T", {"path": b"raw-bytes"}, "ok")
+weird = bg_calls[4][1]["data"]["tool_input"]
+assert isinstance(weird, str), type(weird)
+assert "raw-bytes" in weird, weird
+import json as _json
+_json.dumps(bg_calls[4][1])  # whole body must be serializable
 `;
     const result = runPython(script, home);
     expect(result.status, result.stderr || result.stdout).toBe(0);

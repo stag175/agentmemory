@@ -194,6 +194,20 @@ function paginateFromSnapshot(
 // future extracts rebuild incrementally.
 const REBUILD_SAFE_NODE_CEILING = 25000;
 
+// Order-preserving id-dedup for the DSL's RETURN nodes / RETURN edges
+// response shaping.
+function dedupById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
 function nameIndexKey(type: string, name: string): string {
   return `${type}|${name}`;
 }
@@ -467,7 +481,6 @@ export function registerGraphFunction(
   sdk: ISdk,
   kv: StateKV,
   provider: MemoryProvider,
-  opts?: { dslEnumerationBudgetMs?: number },
 ): void {
   sdk.registerFunction("mem::graph-extract", 
     async (data: { observations: CompressedObservation[] }) => {
@@ -1013,10 +1026,7 @@ export function registerGraphFunction(
   // Parsing and evaluation live in graph-dsl.ts (pure, dependency-free);
   // this handler owns data loading and reuses the #814 machinery: live
   // enumeration raced against a wall-clock budget, with the top-degree
-  // snapshot as the degraded fallback. The injectable budget exists so
-  // tests can exercise the fallback without waiting out the real 6s.
-  const dslBudgetMs =
-    opts?.dslEnumerationBudgetMs ?? LIVE_ENUMERATION_BUDGET_MS;
+  // snapshot as the degraded fallback.
   sdk.registerFunction("mem::graph-dsl",
     async (data: {
       query?: string;
@@ -1069,35 +1079,35 @@ export function registerGraphFunction(
             kv.list<GraphNode>(KV.graphNodes),
             kv.list<GraphEdge>(KV.graphEdges),
           ]),
-          dslBudgetMs,
+          LIVE_ENUMERATION_BUDGET_MS,
           "graph-dsl enumeration",
         );
         allNodes = rawNodes.filter((n) => !n.stale);
         allEdges = rawEdges.filter((e) => !e.stale);
       } catch (err) {
+        // Budget expiry and genuine store failures both land here;
+        // carry the actual error into the warning so a data-layer
+        // fault is not misread as a tuning problem.
         const msg = err instanceof Error ? err.message : String(err);
-        logger.warn("Graph DSL enumeration timed out, using snapshot", {
+        logger.warn("Graph DSL enumeration failed, using snapshot", {
           error: msg,
         });
         const snap = await readSnapshot(kv);
         if (!snap) {
-          return {
-            success: true,
-            matches: [],
-            totalMatches: 0,
-            truncated: false,
-            limit,
-            tookMs: Date.now() - started,
-            warning:
-              "Graph enumeration exceeded budget and no snapshot is available.",
-          };
+          // Fall through to the shared RETURN-clause shaping with an
+          // empty graph so `nodes`/`edges` responses keep their
+          // documented shape even on the degraded path.
+          allNodes = [];
+          allEdges = [];
+          warning = `Graph enumeration failed (${msg}) and no snapshot is available.`;
+        } else {
+          allNodes = snap.topNodes.filter((n) => !n.stale);
+          allEdges = snap.topEdges.filter((e) => !e.stale);
+          warning =
+            `Live graph enumeration failed (${msg}); the query was ` +
+            "evaluated against the top-degree snapshot subgraph, not the " +
+            "full graph.";
         }
-        allNodes = snap.topNodes.filter((n) => !n.stale);
-        allEdges = snap.topEdges.filter((e) => !e.stale);
-        warning =
-          "Live graph enumeration exceeded budget; the query was " +
-          "evaluated against the top-degree snapshot subgraph, not the " +
-          "full graph.";
       }
 
       const exec = executeGraphDsl(parsed, allNodes, allEdges, { limit });
@@ -1122,30 +1132,16 @@ export function registerGraphFunction(
       };
       const r = parsed.returns;
       if (r.kind === "nodes") {
-        const seen = new Set<string>();
-        const nodes: GraphNode[] = [];
-        for (const m of exec.matches) {
-          for (const n of m.nodes) {
-            if (!seen.has(n.id)) {
-              seen.add(n.id);
-              nodes.push(n);
-            }
-          }
-        }
-        return { ...base, nodes };
+        return {
+          ...base,
+          nodes: dedupById(exec.matches.flatMap((m) => m.nodes)),
+        };
       }
       if (r.kind === "edges") {
-        const seen = new Set<string>();
-        const edges: GraphEdge[] = [];
-        for (const m of exec.matches) {
-          for (const e of m.edges) {
-            if (!seen.has(e.id)) {
-              seen.add(e.id);
-              edges.push(e);
-            }
-          }
-        }
-        return { ...base, edges };
+        return {
+          ...base,
+          edges: dedupById(exec.matches.flatMap((m) => m.edges)),
+        };
       }
       if (r.kind === "vars") {
         const wanted = new Set(r.vars);
