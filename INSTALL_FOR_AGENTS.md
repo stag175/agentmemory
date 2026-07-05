@@ -16,7 +16,7 @@ Default mode needs no API key and no cloud account. Out of the box it runs hybri
 
 ## Running non-interactively
 
-Several commands prompt on a TTY (for example the first-run "install globally?" question). As an agent you usually want no prompts. Either set `CI=1` in the environment for the commands below, or rely on the fact that agentmemory skips all prompts automatically when stdin/stdout are not a TTY. Prompts are also never-nag: once answered they persist and are not asked again. Re-run onboarding any time with `agentmemory --reset`.
+Several commands prompt on a TTY (for example the first-run "install globally?" question). As an agent you usually want no prompts. Set `CI=1` in the environment for the commands below, or rely on the fact that agentmemory skips prompts automatically when stdin/stdout are not a TTY. First-run native iii-engine download is a separate noninteractive opt-in: set `AGENTMEMORY_AUTO_INSTALL_ENGINE=1` when starting the server. Use `AGENTMEMORY_USE_DOCKER=1` instead only when you intentionally want Docker compose to provide the engine. Prompts are also never-nag: once answered they persist and are not asked again. Re-run onboarding any time with `agentmemory --reset`.
 
 ## 1. Install globally
 
@@ -43,10 +43,10 @@ Expect: a version string is printed. If `command not found`, the global bin is n
 The server listens on port 3111 and auto-starts its pinned iii engine on first run (this can take a few seconds the first time while the engine binary is fetched into `~/.agentmemory/bin`). Run it in the background or in a separate terminal so the rest of the runbook can talk to it.
 
 ```bash
-agentmemory &
+CI=1 AGENTMEMORY_AUTO_INSTALL_ENGINE=1 agentmemory &
 ```
 
-Or run `agentmemory` in the foreground in a dedicated terminal.
+Or run `CI=1 AGENTMEMORY_AUTO_INSTALL_ENGINE=1 agentmemory` in the foreground in a dedicated terminal. If you are using the no-install `npx` form, keep the same environment variables before `npx -y @agentmemory/agentmemory@latest`.
 
 Wait until it is reachable, then continue:
 
@@ -80,7 +80,7 @@ agentmemory connect <agent>
 
 If you cannot tell which agent you are, default to `claude-code`. After wiring, restart the agent or run its MCP reload command (for example `/mcp` in Claude Code) so it picks up the server.
 
-Expect: the agent now lists agentmemory's tools. With the server running you should see the full set of 65 tools (for example `memory_save`, `memory_create`, `memory_smart_search`, `memory_sessions`). If you see only 19 tools, the MCP shim could not reach a server, see Troubleshooting.
+Expect: the agent now lists agentmemory's tools. With the server running you should see the full set of 74 tools (for example `memory_save`, `memory_create`, `memory_smart_search`, `memory_sessions`). If you see only 19 tools, the MCP shim could not reach a server, see Troubleshooting.
 
 ## 6. Install native skills
 
@@ -116,7 +116,7 @@ curl -X POST http://localhost:3111/agentmemory/smart-search \
 
 Expect: the first call returns `201`, the second returns `200` with results that include the probe memory you just saved.
 
-If `AGENTMEMORY_SECRET` is set in the environment, the REST API requires it. Add `-H "Authorization: Bearer $AGENTMEMORY_SECRET"` to both calls. By default no secret is set and localhost is open.
+If `AGENTMEMORY_SECRET` is set in the environment, the REST API requires it. Add `-H "Authorization: Bearer $AGENTMEMORY_SECRET"` to both calls. By default no secret is set; this is only appropriate for loopback-bound local use. Set `AGENTMEMORY_SECRET` before exposing the daemon beyond `127.0.0.1`/`localhost`.
 
 ## Optional: richer features
 
@@ -128,7 +128,7 @@ These are off by default because they spend tokens. Enable them only if the user
 
 ## Tool surface
 
-The MCP server exposes 65 tools by default (`--tools all`). Use `--tools core` (or `AGENTMEMORY_TOOLS=core`) for a lean 8-tool set on hosts with tight tool limits. The 8 core tools cover save, recall, consolidate, smart search, sessions, diagnose, lesson save, and reflect.
+The MCP server exposes 74 tools by default (`--tools all`). Use `--tools core` (or `AGENTMEMORY_TOOLS=core`) for a lean 8-tool set on hosts with tight tool limits. The 8 core tools cover save, recall, consolidate, smart search, sessions, diagnose, lesson save, and reflect.
 
 ## Lifecycle commands
 

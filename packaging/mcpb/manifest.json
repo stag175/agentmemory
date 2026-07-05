@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "agentmemory",
   "display_name": "agentmemory",
-  "version": "0.9.27",
+  "version": "0.9.28",
   "description": "Persistent memory MCP server for AI coding agents.",
   "author": {
     "name": "Rohit Ghumare",

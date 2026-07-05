@@ -10,12 +10,13 @@ import type {
   SessionSummary,
 } from "../types.js";
 import { logger } from "../logger.js";
+import { isPathInside } from "../path-safety.js";
 
 const ALLOWED_DIRS = [resolve(homedir(), ".agentmemory")];
 
 function isAllowedPath(dbPath: string): boolean {
   const resolved = resolve(dbPath);
-  return ALLOWED_DIRS.some((dir) => resolved.startsWith(dir + "/"));
+  return ALLOWED_DIRS.some((dir) => isPathInside(dir, resolved));
 }
 
 // Infer memory project from the majority project of its associated sessions.

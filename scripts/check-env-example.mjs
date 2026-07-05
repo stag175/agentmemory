@@ -10,9 +10,10 @@
 // Returns 0 when in sync, 1 with a diff when out of sync.
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SRC = join(ROOT, "src");
 const ENV_FILE = join(ROOT, ".env.example");
 
@@ -25,8 +26,26 @@ const RUNTIME_ONLY = new Set([
   "HOME",
   "PATH",
   "USERPROFILE",
+  "CI",
+  "COMSPEC",
+  "DOCKER_CONTAINER",
+  "KUBERNETES_SERVICE_HOST",
+  "NO_COLOR",
   "NODE_ENV",
+  "EDITOR",
+  "VISUAL",
   "AGENTMEMORY_SDK_CHILD",
+  "AGENTMEMORY_COMMIT_SHA",
+  "AGENTMEMORY_CWD",
+  "AGENTMEMORY_DOCKER",
+  "AGENTMEMORY_FRAMEWORK",
+  "AGENTMEMORY_SESSION_ID",
+  "AGENTMEMORY_USE_DOCKER",
+  "CLAUDE_PLUGIN_ROOT",
+  "COPILOT_AGENT_SESSION_ID",
+  "COPILOT_CLI",
+  "COPILOT_HOME",
+  "COPILOT_PLUGIN_ROOT",
 ]);
 
 // Walk src/ for .ts / .mts / .mjs / .js files (excluding `.d.ts` declarations
@@ -56,6 +75,7 @@ const PATTERNS = [
   // Direct map index: process.env["KEY"], env["KEY"], getMergedEnv()["KEY"].
   // The trailing `]\s*` form covers `…)["KEY"]` and `…env["KEY"]`.
   /\[\s*"([A-Z][A-Z0-9_]+)"\s*\]/g,
+  /process\.env\.([A-Z][A-Z0-9_]+)/g,
   /getEnvVar\(\s*"([A-Z][A-Z0-9_]+)"\s*\)/g,
 ];
 const used = new Set();

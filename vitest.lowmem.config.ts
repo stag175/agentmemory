@@ -6,6 +6,8 @@ import { defineConfig } from "vitest/config";
 //   npx vitest run --config vitest.lowmem.config.ts --exclude test/integration.test.ts
 export default defineConfig({
   test: {
+    setupFiles: ["./test/setup-env.ts"],
+    testTimeout: 15_000,
     pool: "forks",
     poolOptions: { forks: { singleFork: true } },
     fileParallelism: false,

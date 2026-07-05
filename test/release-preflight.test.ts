@@ -31,6 +31,11 @@ describe("release preflight", () => {
     expect(script).toContain('"skills check"');
     expect(script).toContain('"pack smoke"');
     expect(script).toContain("temp install smoke");
+    expect(script).toContain("temp install dependency tree smoke");
+    expect(script).toContain("npm ls @agentmemory/agentmemory iii-sdk @opentelemetry/*");
+    expect(script).toContain("iii-sdk registerWorker missing");
+    expect(script).toContain("missing iii-sdk type");
+    expect(script).toContain("sdk-logs compatibility missing addLogRecordProcessor");
     expect(script).toContain("AGENTMEMORY_PREFLIGHT_SKIP_TEMP_INSTALL");
     expect(script).toContain("AGENTMEMORY_PREFLIGHT_RETRIEVAL_ARENA");
     expect(script).toContain("--with-retrieval-arena");
@@ -278,8 +283,23 @@ describe("release preflight", () => {
         "packaging/vscode-extension/package.json",
         "packaging/vscode-extension/extension.js",
         "packaging/vscode-extension/README.md",
+        "vendor/iii-sdk-compat/package.json",
       ]),
     );
+
+    const iiiSdk = JSON.parse(
+      readFileSync(join(ROOT, "vendor", "iii-sdk-compat", "package.json"), "utf8"),
+    );
+    for (const typePath of [
+      iiiSdk.exports["."].types,
+      iiiSdk.exports["./stream"].types,
+      iiiSdk.exports["./state"].types,
+      iiiSdk.exports["./telemetry"].types,
+    ]) {
+      expect(existsSync(join(ROOT, "vendor", "iii-sdk-compat", typePath))).toBe(
+        true,
+      );
+    }
 
     const script = readFileSync(scriptPath, "utf8");
     expect(script).not.toMatch(
@@ -296,6 +316,15 @@ describe("release preflight", () => {
         JSON.stringify([{ filename: "agentmemory-agentmemory-0.9.27.tgz" }]),
       ),
     ).toBe("agentmemory-agentmemory-0.9.27.tgz");
+    expect(
+      preflight.parseNpmPackFilename(
+        [
+          "> @agentmemory/agentmemory@0.9.28 prepack",
+          "> node scripts/prepare-bundled-deps.mjs",
+          JSON.stringify([{ filename: "agentmemory-agentmemory-0.9.28.tgz" }]),
+        ].join("\n"),
+      ),
+    ).toBe("agentmemory-agentmemory-0.9.28.tgz");
     expect(preflight.parseNpmPackFilename("not json")).toBeNull();
   });
 

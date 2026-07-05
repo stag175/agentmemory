@@ -139,6 +139,7 @@ const SUPPORTED_EXPORT_VERSIONS = [
   "0.9.25",
   "0.9.26",
   "0.9.27",
+  "0.9.28",
 ] as const satisfies readonly ExportVersion[];
 const SUPPORTED_EXPORT_VERSION_SET: ReadonlySet<string> = new Set(
   SUPPORTED_EXPORT_VERSIONS,

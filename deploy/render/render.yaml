@@ -14,8 +14,10 @@ services:
     envVars:
       - key: PORT
         value: "3111"
+      - key: AGENTMEMORY_SECRET
+        sync: false
       - key: AGENTMEMORY_VERSION
-        value: "0.9.27"
+        value: "0.9.28"
       - key: III_VERSION
         value: "0.11.2"
       - key: III_SDK_VERSION

@@ -452,6 +452,18 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       let purgedRevisionCount = 0;
       let deletedSession = false;
       const { decrementImageRef } = await import("./image-refs.js");
+      const pendingMemoryDeletes: Array<{
+        id: string;
+        imageRef?: string;
+        revisionIds: string[];
+      }> = [];
+      const pendingObservationDeletes: Array<{
+        sessionId: string;
+        id: string;
+        imageData?: string;
+        imageRef?: string;
+      }> = [];
+      let pendingSessionDelete: string | undefined;
 
       if (data.memoryId) {
         const mem = await kv.get<Memory>(KV.memories, data.memoryId);
@@ -462,19 +474,14 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           const memoryRevisions = revisions.filter(
             (revision) => revision.memoryId === data.memoryId,
           );
-          for (const revision of memoryRevisions) {
-            await kv.delete(KV.memoryHistory, revision.id);
-          }
           purgedRevisionCount = memoryRevisions.length;
-          await kv.delete(KV.memories, data.memoryId);
-          if (mem.imageRef) {
-            await decrementImageRef(kv, sdk, mem.imageRef);
-          }
-          await deleteAccessLog(kv, data.memoryId);
-          getSearchIndex().remove(data.memoryId);
-          vectorIndexRemove(data.memoryId);
           deletedMemoryIds.push(data.memoryId);
           deleted++;
+          pendingMemoryDeletes.push({
+            id: data.memoryId,
+            imageRef: mem.imageRef,
+            revisionIds: memoryRevisions.map((revision) => revision.id),
+          });
         }
       }
 
@@ -488,15 +495,14 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             KV.observations(data.sessionId),
             obsId,
           );
-          await kv.delete(KV.observations(data.sessionId), obsId);
-          if (obs?.imageData) await decrementImageRef(kv, sdk, obs.imageData);
-          if (obs?.imageRef && obs.imageRef !== obs.imageData) {
-            await decrementImageRef(kv, sdk, obs.imageRef);
-          }
-          getSearchIndex().remove(obsId);
-          vectorIndexRemove(obsId);
           deletedObservationIds.push(obsId);
           deleted++;
+          pendingObservationDeletes.push({
+            sessionId: data.sessionId,
+            id: obsId,
+            imageData: obs?.imageData,
+            imageRef: obs?.imageRef,
+          });
         }
       }
 
@@ -509,24 +515,21 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           KV.observations(data.sessionId),
         );
         for (const obs of observations) {
-          await kv.delete(KV.observations(data.sessionId), obs.id);
-          if (obs.imageData) await decrementImageRef(kv, sdk, obs.imageData);
-          if (obs.imageRef && obs.imageRef !== obs.imageData) {
-            await decrementImageRef(kv, sdk, obs.imageRef);
-          }
-          getSearchIndex().remove(obs.id);
-          vectorIndexRemove(obs.id);
           deletedObservationIds.push(obs.id);
           deleted++;
+          pendingObservationDeletes.push({
+            sessionId: data.sessionId,
+            id: obs.id,
+            imageData: obs.imageData,
+            imageRef: obs.imageRef,
+          });
         }
-        await kv.delete(KV.sessions, data.sessionId);
-        await kv.delete(KV.summaries, data.sessionId);
+        pendingSessionDelete = data.sessionId;
         deletedSession = true;
         deleted += 2;
       }
 
       if (deleted > 0) {
-        await flushIndexSave();
         await recordAudit(
           kv,
           "forget",
@@ -542,6 +545,32 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             reason: "user-initiated forget",
           },
         );
+        for (const pending of pendingMemoryDeletes) {
+          for (const revisionId of pending.revisionIds) {
+            await kv.delete(KV.memoryHistory, revisionId);
+          }
+          await kv.delete(KV.memories, pending.id);
+          if (pending.imageRef) {
+            await decrementImageRef(kv, sdk, pending.imageRef);
+          }
+          await deleteAccessLog(kv, pending.id);
+          getSearchIndex().remove(pending.id);
+          vectorIndexRemove(pending.id);
+        }
+        for (const pending of pendingObservationDeletes) {
+          await kv.delete(KV.observations(pending.sessionId), pending.id);
+          if (pending.imageData) await decrementImageRef(kv, sdk, pending.imageData);
+          if (pending.imageRef && pending.imageRef !== pending.imageData) {
+            await decrementImageRef(kv, sdk, pending.imageRef);
+          }
+          getSearchIndex().remove(pending.id);
+          vectorIndexRemove(pending.id);
+        }
+        if (pendingSessionDelete) {
+          await kv.delete(KV.sessions, pendingSessionDelete);
+          await kv.delete(KV.summaries, pendingSessionDelete);
+        }
+        await flushIndexSave();
         await safeRecordAgentEvent(kv, {
           type: "memory_forgotten",
           timestamp: new Date().toISOString(),

@@ -13,6 +13,33 @@ const VALID_TYPES: Sentinel["type"][] = [
   "approval",
   "custom",
 ];
+const MAX_PATTERN_LENGTH = 256;
+const MAX_PATTERN_TEST_LENGTH = 512;
+const NESTED_QUANTIFIER_RE = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})/;
+const QUANTIFIED_ALTERNATION_RE = /\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})/;
+const BACKREFERENCE_RE = /\\[1-9]/;
+const LOOKAROUND_RE = /\(\?[<!=]/;
+
+function validatePattern(pattern: string): string | null {
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    return `pattern must be ${MAX_PATTERN_LENGTH} characters or less`;
+  }
+  if (BACKREFERENCE_RE.test(pattern) || LOOKAROUND_RE.test(pattern)) {
+    return "pattern must not use backreferences or lookaround assertions";
+  }
+  if (NESTED_QUANTIFIER_RE.test(pattern)) {
+    return "pattern contains a nested quantifier and is not allowed";
+  }
+  if (QUANTIFIED_ALTERNATION_RE.test(pattern)) {
+    return "pattern contains a quantified alternation and is not allowed";
+  }
+  try {
+    new RegExp(pattern, "i");
+  } catch {
+    return "pattern must be a valid regular expression";
+  }
+  return null;
+}
 
 export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::sentinel-create", 
@@ -58,6 +85,10 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
             success: false,
             error: "pattern config requires a pattern string",
           };
+        }
+        const patternError = validatePattern(cfg.pattern);
+        if (patternError) {
+          return { success: false, error: patternError };
         }
       }
 
@@ -261,6 +292,8 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
 
         if (sentinel.type === "pattern") {
           const cfg = sentinel.config as { pattern: string };
+          const patternError = validatePattern(cfg.pattern);
+          if (patternError) continue;
           const regex = new RegExp(cfg.pattern, "i");
           const sessions = await kv.list<Session>(KV.sessions);
           let matchedObs: CompressedObservation | null = null;
@@ -275,7 +308,7 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
                   new Date(o.timestamp).getTime() >=
                   new Date(sentinel.createdAt).getTime(),
               )
-              .find((o) => regex.test(o.title));
+              .find((o) => regex.test(o.title.slice(0, MAX_PATTERN_TEST_LENGTH)));
             if (recent) {
               matchedObs = recent;
               break;

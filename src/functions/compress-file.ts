@@ -1,10 +1,10 @@
-import { constants } from "node:fs";
-import { lstat, open, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import type { ISdk } from "iii-sdk";
 import type { MemoryProvider } from "../types.js";
 import type { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
+import { parsePathList, resolveAllowedPath } from "../path-safety.js";
+import { readTextFileNoSymlink, writeTextFileNoSymlink } from "../fs-safety.js";
 
 const SENSITIVE_PATH_TERMS = [
   "secret",
@@ -14,6 +14,8 @@ const SENSITIVE_PATH_TERMS = [
   "id_rsa",
   "token",
 ];
+
+const DEFAULT_COMPRESS_ALLOWED_ROOTS = [process.cwd()];
 
 const COMPRESS_FILE_SYSTEM_PROMPT = `You compress markdown while preserving structure.
 Rules:
@@ -96,7 +98,15 @@ export function registerCompressFileFunction(
   sdk: ISdk,
   kv: StateKV,
   provider: MemoryProvider,
+  options: { allowedRoots?: string[] } = {},
 ): void {
+  const configuredRoots = parsePathList(
+    process.env["AGENTMEMORY_COMPRESS_ALLOWED_ROOTS"],
+  );
+  const allowedRoots =
+    options.allowedRoots ??
+    (configuredRoots.length > 0 ? configuredRoots : DEFAULT_COMPRESS_ALLOWED_ROOTS);
+
   sdk.registerFunction(
     "mem::compress-file",
     async (data: { filePath: string }) => {
@@ -104,7 +114,12 @@ export function registerCompressFileFunction(
         return { success: false, error: "filePath is required" };
       }
 
-      const absolutePath = resolve(data.filePath);
+      let absolutePath: string;
+      try {
+        absolutePath = await resolveAllowedPath(data.filePath, allowedRoots);
+      } catch {
+        return { success: false, error: "filePath is outside allowed roots" };
+      }
       const lowerPath = absolutePath.toLowerCase();
       if (extname(absolutePath).toLowerCase() !== ".md") {
         return { success: false, error: "filePath must point to a .md file" };
@@ -113,19 +128,17 @@ export function registerCompressFileFunction(
         return { success: false, error: "refusing to process sensitive-looking path" };
       }
 
-      try {
-        const stat = await lstat(absolutePath);
-        if (stat.isSymbolicLink()) {
-          return { success: false, error: "symlinks are not supported" };
-        }
-      } catch {
-        return { success: false, error: "file not found" };
-      }
-
       let original: string;
       try {
-        original = await readFile(absolutePath, "utf-8");
-      } catch {
+        original = await readTextFileNoSymlink(absolutePath);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("symlink") || (err as NodeJS.ErrnoException).code === "ELOOP") {
+          return { success: false, error: "symlinks are not supported" };
+        }
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          return { success: false, error: "file not found" };
+        }
         return { success: false, error: "failed to read file" };
       }
 
@@ -148,23 +161,16 @@ export function registerCompressFileFunction(
       }
 
       const backupPath = resolveBackupPath(absolutePath);
-      await writeFile(backupPath, original, "utf-8");
-
-      let fd: Awaited<ReturnType<typeof open>> | null = null;
       try {
-        fd = await open(
-          absolutePath,
-          constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
-        );
-        await fd.writeFile(compressed, "utf-8");
+        await writeTextFileNoSymlink(backupPath, original);
+        await writeTextFileNoSymlink(absolutePath, compressed);
       } catch (err: unknown) {
         const code = (err as NodeJS.ErrnoException).code;
-        if (code === "ELOOP" || code === "EINVAL") {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (code === "ELOOP" || msg.includes("symlink")) {
           return { success: false, error: "symlinks are not supported" };
         }
         return { success: false, error: "failed to write compressed file" };
-      } finally {
-        await fd?.close().catch(() => {});
       }
 
       try {

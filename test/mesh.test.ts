@@ -16,6 +16,10 @@ import type {
   GraphEdge,
 } from "../src/types.js";
 
+async function resolvePublicHost(_host: string): Promise<Array<{ address: string }>> {
+  return [{ address: "93.184.216.34" }];
+}
+
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
   return {
@@ -63,7 +67,9 @@ describe("Mesh Functions", () => {
     sdk = mockSdk();
     kv = mockKV();
     vi.clearAllMocks();
-    registerMeshFunction(sdk as never, kv as never);
+    registerMeshFunction(sdk as never, kv as never, undefined, {
+      resolveHost: resolvePublicHost,
+    });
   });
 
   describe("mesh-register", () => {
@@ -200,15 +206,15 @@ describe("Mesh Functions", () => {
     it("sends authorization headers to peers when syncing", async () => {
       const authedSdk = mockSdk();
       const authedKv = mockKV();
-      registerMeshFunction(authedSdk as never, authedKv as never, "mesh-secret");
-
-      const fetchMock = vi.fn(async () =>
-        new Response(JSON.stringify({ accepted: 0 }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-      vi.stubGlobal("fetch", fetchMock);
+      const requestJson = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ accepted: 0 }),
+      }));
+      registerMeshFunction(authedSdk as never, authedKv as never, "mesh-secret", {
+        resolveHost: resolvePublicHost,
+        requestJson,
+      });
 
       const regResult = (await authedSdk.trigger("mem::mesh-register", {
         url: "https://peer2.example.com",
@@ -222,16 +228,16 @@ describe("Mesh Functions", () => {
 
       expect(result.success).toBe(true);
       expect(result.results[0].errors).toEqual([]);
-      expect(fetchMock).toHaveBeenCalledWith(
-        "https://peer2.example.com/agentmemory/mesh/receive",
+      expect(requestJson).toHaveBeenCalledWith(
+        "https://peer2.example.com",
+        "/agentmemory/mesh/receive",
         expect.objectContaining({
           headers: expect.objectContaining({
             Authorization: "Bearer mesh-secret",
           }),
         }),
+        resolvePublicHost,
       );
-
-      vi.unstubAllGlobals();
     });
   });
 

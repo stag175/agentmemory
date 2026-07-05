@@ -1,0 +1,16 @@
+{
+  "name": "@opentelemetry/resources",
+  "version": "2.9.0",
+  "description": "AgentMemory compatibility shim for OpenTelemetry resources",
+  "license": "Apache-2.0",
+  "main": "./build/src/index.cjs",
+  "types": "./build/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./build/src/index.d.ts",
+      "import": "./build/esm/index.mjs",
+      "require": "./build/src/index.cjs"
+    }
+  },
+  "sideEffects": false
+}

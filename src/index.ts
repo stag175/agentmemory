@@ -116,6 +116,12 @@ import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
+function positiveIntervalMs(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 // #640 + #474: the worker process (this file) is spawned by iii-exec
 // inside the engine. When `agentmemory stop` kills only the engine pid,
 // this worker can survive (detached spawn, signal not propagated, or a
@@ -621,8 +627,14 @@ async function main() {
     config.restPort,
   );
 
-  const autoForgetIntervalMs = parseInt(process.env.AUTO_FORGET_INTERVAL_MS || "3600000", 10);
-  const consolidationIntervalMs = parseInt(process.env.CONSOLIDATION_INTERVAL_MS || "7200000", 10);
+  const autoForgetIntervalMs = positiveIntervalMs(
+    process.env.AUTO_FORGET_INTERVAL_MS,
+    3600000,
+  );
+  const consolidationIntervalMs = positiveIntervalMs(
+    process.env.CONSOLIDATION_INTERVAL_MS,
+    7200000,
+  );
 
   if (process.env.AUTO_FORGET_ENABLED !== "false") {
     const autoForgetTimer = setInterval(async () => {
@@ -660,15 +672,10 @@ async function main() {
   // AGENTMEMORY_AGENT_EVENT_RETENTION_* env. Interval is config-driven (default
   // 24h) and the tick swallows errors so it never throws on the hot path.
   if (process.env.AGENT_EVENT_RETENTION_ENABLED !== "false") {
-    const agentEventRetentionIntervalMs = parseInt(
-      process.env.AGENT_EVENT_RETENTION_INTERVAL_MS || "86400000",
-      10,
+    const safeAgentEventRetentionIntervalMs = positiveIntervalMs(
+      process.env.AGENT_EVENT_RETENTION_INTERVAL_MS,
+      86400000,
     );
-    const safeAgentEventRetentionIntervalMs =
-      Number.isFinite(agentEventRetentionIntervalMs) &&
-      agentEventRetentionIntervalMs > 0
-        ? agentEventRetentionIntervalMs
-        : 86400000;
     const agentEventRetentionTimer = setInterval(async () => {
       try {
         await sdk.trigger({

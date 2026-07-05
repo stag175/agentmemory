@@ -571,6 +571,7 @@ export function validateDistributionMetadata() {
     validateSmitheryMetadata(mcpPkg, failures, evidence);
     validateHomebrewMetadata(rootPkg, failures, evidence);
     validateVscodeExtensionMetadata(rootPkg, failures, evidence);
+    validateBundledDependencyMetadata(rootPkg, failures, evidence);
   } catch (error) {
     failures.push(`distribution metadata check crashed: ${errorMessage(error)}`);
   }
@@ -882,6 +883,47 @@ function validateVscodeExtensionMetadata(rootPkg, failures, evidence) {
   }
 }
 
+function validateBundledDependencyMetadata(rootPkg, failures, evidence) {
+  const expectedBundled = new Set([
+    "iii-sdk",
+    "@opentelemetry/resources",
+    "@opentelemetry/sdk-logs",
+  ]);
+  const bundled = new Set(rootPkg.bundledDependencies ?? rootPkg.bundleDependencies ?? []);
+  for (const name of expectedBundled) {
+    if (!bundled.has(name)) {
+      failures.push(`package.json bundledDependencies must include ${name}`);
+    }
+  }
+
+  const iiiSdk = readJson("vendor/iii-sdk-compat/package.json");
+  evidence.push("vendor/iii-sdk-compat/package.json");
+  const expectedTypes = [
+    iiiSdk.exports?.["."]?.types,
+    iiiSdk.exports?.["./stream"]?.types,
+    iiiSdk.exports?.["./state"]?.types,
+    iiiSdk.exports?.["./telemetry"]?.types,
+  ];
+  for (const typePath of expectedTypes) {
+    if (typeof typePath !== "string") {
+      failures.push("vendor/iii-sdk-compat/package.json exports must declare types");
+      continue;
+    }
+    if (!existsSync(join(ROOT, "vendor/iii-sdk-compat", typePath))) {
+      failures.push(`vendor/iii-sdk-compat missing exported type file ${typePath}`);
+    }
+  }
+  if (iiiSdk.dependencies?.["@opentelemetry/resources"] !== "2.9.0") {
+    failures.push("vendor/iii-sdk-compat must depend on @opentelemetry/resources 2.9.0");
+  }
+  if (iiiSdk.dependencies?.["@opentelemetry/sdk-logs"] !== "0.220.0") {
+    failures.push("vendor/iii-sdk-compat must depend on @opentelemetry/sdk-logs 0.220.0");
+  }
+  if (iiiSdk.exports?.["./package.json"] !== "./package.json") {
+    failures.push("vendor/iii-sdk-compat must export ./package.json for pack smoke verification");
+  }
+}
+
 function assertNoPublishCredentialMarkers(file, contents, failures) {
   for (const marker of PUBLISH_CREDENTIAL_MARKERS) {
     if (contents.includes(marker)) {
@@ -906,13 +948,20 @@ function runStep(summary, stepKey, label, command, args) {
 }
 
 export function parseNpmPackFilename(stdout) {
-  try {
-    const parsed = JSON.parse(stdout);
-    if (Array.isArray(parsed) && typeof parsed[0]?.filename === "string") {
-      return parsed[0].filename;
+  const trimmed = stdout.trim();
+  const candidates = [
+    trimmed,
+    trimmed.slice(trimmed.indexOf("["), trimmed.lastIndexOf("]") + 1),
+  ].filter((candidate) => candidate.startsWith("[") && candidate.endsWith("]"));
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed) && typeof parsed[0]?.filename === "string") {
+        return parsed[0].filename;
+      }
+    } catch {
+      // Keep trying: npm lifecycle output may wrap the JSON array.
     }
-  } catch {
-    return null;
   }
   return null;
 }
@@ -943,6 +992,26 @@ function runTempInstallSmoke(tarballPath) {
     );
     if (!install.ok) return install;
 
+    const dependencyTree = run(
+      "temp install dependency tree smoke",
+      npmCmd,
+      [
+        "ls",
+        "@agentmemory/agentmemory",
+        "iii-sdk",
+        "@opentelemetry/sdk-logs",
+        "@opentelemetry/resources",
+        "@opentelemetry/otlp-transformer",
+        "@opentelemetry/core",
+        "@opentelemetry/sdk-metrics",
+        "@opentelemetry/sdk-trace-base",
+        "@opentelemetry/sdk-trace-node",
+        "--all",
+      ],
+      { cwd: tempRoot },
+    );
+    if (!dependencyTree.ok) return dependencyTree;
+
     return run(
       "temp install import/bin smoke",
       nodeCmd,
@@ -964,6 +1033,19 @@ function runTempInstallSmoke(tarballPath) {
           "  const binPath = path.join(root, bin);",
           "  if (!fs.existsSync(binPath)) throw new Error(`missing bin ${bin}`);",
           "}",
+          "const pkgReq = createRequire(mainPath);",
+          "const sdkPkg = pkgReq('iii-sdk/package.json');",
+          "const sdkRoot = path.dirname(pkgReq.resolve('iii-sdk/package.json'));",
+          "for (const rel of [sdkPkg.exports['.'].types, sdkPkg.exports['./stream'].types, sdkPkg.exports['./state'].types, sdkPkg.exports['./telemetry'].types]) {",
+          "  if (!fs.existsSync(path.join(sdkRoot, rel))) throw new Error(`missing iii-sdk type ${rel}`);",
+          "}",
+          "const sdk = pkgReq('iii-sdk');",
+          "if (typeof sdk.registerWorker !== 'function') throw new Error('iii-sdk registerWorker missing');",
+          "const logs = pkgReq('@opentelemetry/sdk-logs');",
+          "const provider = new logs.LoggerProvider();",
+          "if (typeof provider.addLogRecordProcessor !== 'function') throw new Error('sdk-logs compatibility missing addLogRecordProcessor');",
+          "const resources = pkgReq('@opentelemetry/resources');",
+          "if (typeof resources.resourceFromAttributes !== 'function') throw new Error('resources compatibility missing resourceFromAttributes');",
           "console.log(`${pkg.name}@${pkg.version} ${mainPath}`);",
         ].join(" "),
       ],
@@ -1034,6 +1116,7 @@ function runPackSmoke(summary) {
         "npm pack --dry-run",
         "npm pack --json",
         "npm install --omit=dev --omit=optional <packed tarball>",
+        "npm ls @agentmemory/agentmemory iii-sdk @opentelemetry/*",
         "node import/bin smoke",
       ],
     });

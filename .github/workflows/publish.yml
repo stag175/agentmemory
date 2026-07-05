@@ -42,8 +42,8 @@ jobs:
       # Lockfiles are gitignored at the repo level.
       - run: npm install --package-lock-only --legacy-peer-deps --no-audit --no-fund
       - run: npm ci --legacy-peer-deps --no-audit --no-fund
-      - run: npm run build
-      - run: npm test
+      - name: Release preflight
+        run: npm run release:preflight
 
       - name: Publish @agentmemory/agentmemory
         run: |

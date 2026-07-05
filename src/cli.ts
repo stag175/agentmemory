@@ -78,6 +78,11 @@ import {
   type ConnectRollbackPathKind,
 } from "./cli/connect/util.js";
 import { renderSplash } from "./cli/splash.js";
+import {
+  iiiReleaseAsset,
+  iiiReleaseChecksumUrlFor,
+  iiiReleaseUrlFor,
+} from "./cli/iii-release.js";
 import { isFirstRun, readPrefs, resetPrefs, writePrefs } from "./cli/preferences.js";
 import { runOnboarding } from "./cli/onboarding.js";
 import { runMemoryCommand } from "./cli/memory-lifecycle.js";
@@ -130,43 +135,24 @@ const IIPINNED_VERSION =
 
 // Map Node platform/arch → the asset name iii-hq/iii ships under
 // https://github.com/iii-hq/iii/releases/download/iii/v<version>/<asset>
-function iiiReleaseAsset(): string | null {
-  const p = platform();
-  const a = process.arch;
-  if (p === "darwin" && a === "arm64")
-    return "iii-aarch64-apple-darwin.tar.gz";
-  if (p === "darwin" && a === "x64")
-    return "iii-x86_64-apple-darwin.tar.gz";
-  if (p === "linux" && a === "x64")
-    return "iii-x86_64-unknown-linux-gnu.tar.gz";
-  if (p === "linux" && a === "arm64")
-    return "iii-aarch64-unknown-linux-gnu.tar.gz";
-  if (p === "linux" && a === "arm")
-    return "iii-armv7-unknown-linux-gnueabihf.tar.gz";
-  if (p === "win32" && a === "x64")
-    return "iii-x86_64-pc-windows-msvc.zip";
-  if (p === "win32" && a === "arm64")
-    return "iii-aarch64-pc-windows-msvc.zip";
-  return null;
-}
-
 function iiiReleaseUrl(): string | null {
   const asset = iiiReleaseAsset();
   if (!asset) return null;
   // Tag name is monorepo-prefixed: `iii/v0.11.2`. Slash is URL-encoded
   // by GitHub when serving the download path, hence `iii/v...` not `iii%2Fv...`.
-  return `https://github.com/iii-hq/iii/releases/download/iii/v${IIPINNED_VERSION}/${asset}`;
+  return iiiReleaseUrlFor(IIPINNED_VERSION, asset);
 }
 
-// URL of the published SHA-256 checksum file for the pinned asset. Convention:
-// iii-hq/iii ships `<asset>.sha256` alongside each release asset. We download
-// and verify this BEFORE extracting/executing so a compromised CDN, a
-// man-in-the-middle, or a swapped asset can't smuggle a malicious binary onto
-// the user's machine (item 5).
+// URL of the published SHA-256 checksum file for the pinned asset. The release
+// names sidecars after the binary target, not the archive extension
+// (`iii-x86_64-pc-windows-msvc.sha256`, not
+// `iii-x86_64-pc-windows-msvc.zip.sha256`). We download and verify this BEFORE
+// extracting/executing so a compromised CDN, a man-in-the-middle, or a swapped
+// asset can't smuggle a malicious binary onto the user's machine (item 5).
 function iiiReleaseChecksumUrl(): string | null {
-  const url = iiiReleaseUrl();
-  if (!url) return null;
-  return `${url}.sha256`;
+  const asset = iiiReleaseAsset();
+  if (!asset) return null;
+  return iiiReleaseChecksumUrlFor(IIPINNED_VERSION, asset);
 }
 
 // A pinned SHA-256 can also be supplied out-of-band via env (e.g. an air-
@@ -302,6 +288,8 @@ Commands:
   import-jsonl [p]   Import Claude Code JSONL transcripts (default: ~/.claude/projects)
                      --max-files <N> | --max-files=<N>: override scan cap (default 200, max 1000;
                      out-of-range is rejected; for trees >1000 files, batch by subdirectory)
+  migrate            Run supported migration jobs through the REST daemon.
+                     Defaults to a dry-run project-scope backfill; pass --apply to write.
 
 Options:
   --help, -h         Show this help
@@ -341,6 +329,7 @@ Quick start:
   npx @agentmemory/agentmemory versions --json
   npx @agentmemory/agentmemory status   # health + memory count + flags
   npx @agentmemory/agentmemory upgrade  # upgrade agentmemory + iii runtime
+  npx @agentmemory/agentmemory migrate --apply
   npx @agentmemory/agentmemory mcp      # standalone MCP server (no engine)
   npx @agentmemory/mcp                  # same as above (shim package)
 `);
@@ -3030,6 +3019,152 @@ async function runConnectCmd(): Promise<void> {
   await runConnect(args.slice(1));
 }
 
+type MigrateApiResponse = {
+  success?: boolean;
+  error?: string;
+  step?: string;
+  updated?: number;
+  skipped?: number;
+  ambiguous?: number;
+  sessionCount?: number;
+  obsCount?: number;
+  summaryCount?: number;
+};
+
+function parseFlagValue(tail: readonly string[], index: number, name: string): string | undefined {
+  const exact = tail[index];
+  if (exact === name) return tail[index + 1];
+  const prefix = `${name}=`;
+  if (exact?.startsWith(prefix)) return exact.slice(prefix.length);
+  return undefined;
+}
+
+async function runMigrate(): Promise<void> {
+  const tail = args.slice(1);
+  if (tail.includes("--help") || tail.includes("-h")) {
+    p.note(
+      [
+        "Usage:",
+        "  agentmemory migrate [--step infer-memory-projects] [--dry-run|--apply]",
+        "  agentmemory migrate --db-path <path-to-old-sqlite-db> --apply",
+        "",
+        "Defaults:",
+        "  --step infer-memory-projects",
+        "  --dry-run for step migrations",
+        "",
+        "Environment:",
+        "  AGENTMEMORY_URL      REST base URL (default http://localhost:3111)",
+        "  AGENTMEMORY_SECRET   Bearer token when the daemon requires auth",
+      ].join("\n"),
+      "migrate",
+    );
+    return;
+  }
+
+  let step: string | undefined;
+  let dbPath: string | undefined;
+  let dryRun = !tail.includes("--apply");
+  const positional: string[] = [];
+  const valueFlags = new Set(["--port", "--tools", "--step", "--db-path"]);
+
+  for (let i = 0; i < tail.length; i++) {
+    const a = tail[i]!;
+    const stepValue = parseFlagValue(tail, i, "--step");
+    if (stepValue !== undefined) {
+      step = stepValue;
+      if (a === "--step") i++;
+      continue;
+    }
+    const dbPathValue = parseFlagValue(tail, i, "--db-path");
+    if (dbPathValue !== undefined) {
+      dbPath = dbPathValue;
+      if (a === "--db-path") i++;
+      continue;
+    }
+    if (a === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (a === "--apply") {
+      dryRun = false;
+      continue;
+    }
+    if (valueFlags.has(a)) {
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) continue;
+    positional.push(a);
+  }
+
+  if (!dbPath && positional[0]) dbPath = positional[0];
+  if (!step && !dbPath) step = "infer-memory-projects";
+
+  if (dbPath && dryRun) {
+    p.log.error(
+      "SQLite dbPath migration has no dry-run mode. Re-run with --db-path <path> --apply if you intend to import it.",
+    );
+    process.exit(1);
+  }
+
+  const body: Record<string, unknown> = {};
+  if (step) {
+    body["step"] = step;
+    body["dryRun"] = dryRun;
+  }
+  if (dbPath) body["dbPath"] = dbPath;
+
+  const base = getBaseUrl();
+  p.intro("agentmemory migrate");
+
+  const live = await apiJson(base, "livez", { timeoutMs: 2000 });
+  if (!live.ok) {
+    p.log.error(
+      `agentmemory livez probe failed at ${base}: ${live.error}. Start the daemon, then re-run this command.`,
+    );
+    process.exit(1);
+  }
+
+  const result = await apiJson<MigrateApiResponse>(base, "migrate", {
+    method: "POST",
+    body,
+    timeoutMs: 120_000,
+  });
+  if (!result.ok || result.data?.success !== true) {
+    const detail = result.ok
+      ? result.data?.error || "migration response did not report success"
+      : result.error;
+    if (result.status === 401) {
+      p.log.error(`${detail}. Set AGENTMEMORY_SECRET to match the daemon and re-run.`);
+    } else {
+      p.log.error(detail);
+    }
+    process.exit(1);
+  }
+
+  const data = result.data;
+  if (data.step === "infer-memory-projects" || step === "infer-memory-projects") {
+    p.outro(
+      [
+        `${dryRun ? "Dry-run" : "Applied"} infer-memory-projects migration.`,
+        `updated=${data.updated ?? 0}`,
+        `skipped=${data.skipped ?? 0}`,
+        `ambiguous=${data.ambiguous ?? 0}`,
+      ].join(" "),
+    );
+    return;
+  }
+
+  p.outro(
+    [
+      "Migration complete.",
+      `sessions=${data.sessionCount ?? 0}`,
+      `observations=${data.obsCount ?? 0}`,
+      `summaries=${data.summaryCount ?? 0}`,
+    ].join(" "),
+  );
+}
+
 async function runImportJsonl(): Promise<void> {
   // Long-form flags that take a value. Their value tokens must be
   // consumed alongside the flag so they don't leak into positional
@@ -3612,6 +3747,7 @@ const commands: Record<string, () => Promise<void>> = {
   stop: runStop,
   remove: runRemove,
   mcp: runMcp,
+  migrate: runMigrate,
   "import-jsonl": runImportJsonl,
 };
 

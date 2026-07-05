@@ -824,11 +824,11 @@ One-click templates for managed hosts. Each one ships a self-contained
 Dockerfile that pulls `@agentmemory/agentmemory` from npm and copies
 the iii engine binary in from the official `iiidev/iii` Docker Hub
 image — no pre-built agentmemory image required. Persistent storage
-mounts at `/data`; the first-boot entrypoint overwrites the
+mounts at `/data`; the deployment entrypoint overwrites the
 npm-bundled iii config (which binds `127.0.0.1`) with a deploy-tuned
-one that binds `0.0.0.0` and uses absolute `/data` paths, generates
-the HMAC secret, then drops privileges from `root` to `node` via
-`gosu` before exec'ing the agentmemory CLI.
+one that binds `0.0.0.0` and uses absolute `/data` paths, refuses to
+start without `AGENTMEMORY_SECRET`, then drops privileges from `root`
+to `node` via `gosu` before exec'ing the agentmemory CLI.
 
 <p>
   <a href="https://fly.io/launch?repo=https://github.com/rohitg00/agentmemory&path=deploy/fly"><img src="https://img.shields.io/badge/Deploy%20to-fly.io-8b5cf6?style=for-the-badge&logo=fly.io&logoColor=white" alt="Deploy to fly.io" /></a>
@@ -837,7 +837,7 @@ the HMAC secret, then drops privileges from `root` to `node` via
 
 Render's one-click deploy button requires `render.yaml` at the repository root, which we deliberately keep clean. Use the Render Blueprint flow documented in [`deploy/render/`](./deploy/render/README.md) to point at the in-repo blueprint manually.
 
-Full setup details (HMAC capture, viewer SSH tunnel, rotation, backup,
+Full setup details (HMAC setup, viewer SSH tunnel, rotation, backup,
 cost floors) live in [`deploy/`](./deploy/README.md):
 
 - [`deploy/fly`](./deploy/fly/README.md) — single machine with

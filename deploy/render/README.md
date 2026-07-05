@@ -1,9 +1,9 @@
 # Deploy agentmemory on Render
 
 This template runs agentmemory on a single Render Web Service with a
-persistent disk mounted at `/data`. The HMAC secret is generated on
-first boot and persisted to the disk — you capture it from the deploy
-logs exactly once.
+persistent disk mounted at `/data`. Because the REST API is published
+through Render's HTTPS edge, the container refuses to start until
+`AGENTMEMORY_SECRET` is set for the service.
 
 ## What you get
 
@@ -13,9 +13,10 @@ logs exactly once.
 - A 1 GB persistent disk at `/data` for memories, BM25 index, and
   stream backlog
 - Render healthcheck against `/agentmemory/livez`
-- The HMAC bearer secret is generated on first boot inside the
-  container and persisted to `/data/.hmac` (chmod 600); the operator
-  copies it from the deploy logs once.
+- The HMAC bearer secret is supplied from Render Environment variables
+  and propagated to agentmemory at runtime. The Blueprint declares
+  `AGENTMEMORY_SECRET` with `sync: false` so you fill it in from the
+  dashboard instead of committing it.
 
 ## Deploy via Render Blueprint
 
@@ -27,9 +28,11 @@ dashboard's manual Blueprint flow instead:
    reach (a fork of `rohitg00/agentmemory` works).
 2. In the Render dashboard, click **New +** → **Blueprint**.
 3. Point Render at the repo and the path `deploy/render/render.yaml`.
-4. Render reads the Blueprint, provisions the disk, builds the
-   Dockerfile, and starts the service. The whole flow takes 3–5
-   minutes on the first run.
+4. Render reads the Blueprint, provisions the disk, and builds the
+   Dockerfile. The whole flow takes 3–5 minutes on the first run.
+5. Fill the Blueprint's non-synced `AGENTMEMORY_SECRET` environment
+   value with a strong random value, for example the output of
+   `openssl rand -hex 32`, before allowing the service to start.
 
 ## Deploy via Render Deploy Hook (one-click)
 
@@ -44,12 +47,11 @@ To pin a specific `@agentmemory/agentmemory` release, set the
 `AGENTMEMORY_VERSION` build arg in the service's *Environment* tab
 before the next deploy. Same for `III_VERSION`.
 
-## Capture the HMAC secret
+## Set the HMAC secret
 
-After the first deploy succeeds, open the service's **Logs** tab and
-search for `AGENTMEMORY_SECRET=`. You will see exactly one line of the
-form `AGENTMEMORY_SECRET=<64 hex chars>`. Copy it into your client
-environment. The secret is never printed again on subsequent boots.
+Render stores `AGENTMEMORY_SECRET` as an environment variable with
+`sync: false`. Save the value when you create it, then copy the same
+value into your client environment.
 
 ## Verify the deployment
 
@@ -74,15 +76,9 @@ ssh srv-XXYYZZ@ssh.<region>.render.com -L 3113:localhost:3113
 
 ## Rotate the HMAC secret
 
-```bash
-ssh srv-XXYYZZ@ssh.<region>.render.com
-rm /data/.hmac
-exit
-# trigger a redeploy from the Render dashboard or via the Deploy Hook
-```
-
-After the redeploy, grab the new secret from the logs and update every
-client. Old tokens stop working immediately.
+Update `AGENTMEMORY_SECRET` in the Render dashboard, then trigger a
+redeploy from the dashboard or via the Deploy Hook. Update every client
+with the new value. Old tokens stop working immediately.
 
 ## Back up `/data`
 
@@ -107,7 +103,7 @@ See <https://render.com/pricing> for the current rate card.
 - Render Free tier does not support persistent disks. The Starter plan
   ($7/month) is the minimum.
 - Render restarts the service on every deploy. The HMAC secret survives
-  because it lives on the disk, but expect a 10–30 s gap of 502s
-  during rollouts.
+  because it lives in Render's environment store, but expect a 10–30 s
+  gap of 502s during rollouts.
 - Render runs amd64 only for web services. The Dockerfile selects the
   matching iii binary automatically via `uname -m`.

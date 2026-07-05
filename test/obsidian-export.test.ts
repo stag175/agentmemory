@@ -6,11 +6,45 @@ vi.mock("../src/logger.js", () => ({
 
 const writtenFiles = new Map<string, string>();
 const createdDirs = new Set<string>();
+const symlinkPaths = new Set<string>();
+let mkdirFailure: Error | null = null;
+
+function mockFsStat(path: string) {
+  return {
+    dev: 0,
+    ino: 0,
+    isSymbolicLink: () => symlinkPaths.has(path),
+    isDirectory: () => createdDirs.has(path) && !symlinkPaths.has(path),
+    isFile: () => writtenFiles.has(path) && !symlinkPaths.has(path),
+  };
+}
 
 vi.mock("node:fs/promises", () => ({
   mkdir: vi.fn(async (dir: string) => {
+    if (mkdirFailure) throw mkdirFailure;
     createdDirs.add(dir);
   }),
+  lstat: vi.fn(async (path: string) => {
+    if (symlinkPaths.has(path) || createdDirs.has(path) || writtenFiles.has(path)) {
+      return mockFsStat(path);
+    }
+    throw Object.assign(new Error(`ENOENT: no such file or directory, lstat '${path}'`), {
+      code: "ENOENT",
+    });
+  }),
+  open: vi.fn(async (path: string) => ({
+    stat: vi.fn(async () => ({
+      dev: 0,
+      ino: 0,
+      isSymbolicLink: () => false,
+      isDirectory: () => false,
+      isFile: () => true,
+    })),
+    writeFile: vi.fn(async (content: string) => {
+      writtenFiles.set(path, content);
+    }),
+    close: vi.fn(async () => {}),
+  })),
   writeFile: vi.fn(async (path: string, content: string) => {
     writtenFiles.set(path, content);
   }),
@@ -135,6 +169,8 @@ describe("Obsidian Export", () => {
     kv = mockKV();
     writtenFiles.clear();
     createdDirs.clear();
+    symlinkPaths.clear();
+    mkdirFailure = null;
     registerObsidianExportFunction(sdk as never, kv as never);
   });
 
@@ -150,7 +186,11 @@ describe("Obsidian Export", () => {
     expect(result.exported.lessons).toBe(0);
     expect(result.exported.crystals).toBe(0);
     expect(result.exported.sessions).toBe(0);
-    expect(createdDirs.size).toBe(4);
+    const vaultDirs = [...createdDirs].filter((dir) =>
+      portablePath(dir).startsWith(portablePath(result.vaultDir)) &&
+      portablePath(dir) !== portablePath(result.vaultDir),
+    );
+    expect(vaultDirs).toHaveLength(4);
 
     const mocPath = [...writtenFiles.keys()].find((k) => k.endsWith("MOC.md"));
     expect(mocPath).toBeDefined();
@@ -246,6 +286,18 @@ describe("Obsidian Export", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain(exportRoot);
+  });
+
+  it("rejects a vault path that is a symlink under the export root", async () => {
+    const symlinkVault = join(exportRoot, "linked-vault");
+    symlinkPaths.add(symlinkVault);
+
+    const result = (await sdk.trigger("mem::obsidian-export", {
+      vaultDir: symlinkVault,
+    })) as { success: boolean; error: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("symlink");
   });
 
   it("skips deleted lessons", async () => {
@@ -419,22 +471,14 @@ describe("Obsidian Export", () => {
   it("never throws out to the engine — returns {success: false, error: <string>} on internal failure", async () => {
     // Force mkdir to throw to simulate an unexpected runtime error so we
     // can assert the outer try/catch turns it into a serializable error.
-    const fsModule = await import("node:fs/promises");
-    const original = fsModule.mkdir;
-    (fsModule.mkdir as any) = vi.fn(async () => {
-      throw new TypeError("simulated disk failure");
-    });
+    mkdirFailure = new TypeError("simulated disk failure");
 
-    try {
-      const result = (await sdk.trigger("mem::obsidian-export", {})) as {
-        success: boolean;
-        error?: string;
-      };
-      expect(result.success).toBe(false);
-      expect(typeof result.error).toBe("string");
-      expect(result.error).toContain("simulated disk failure");
-    } finally {
-      (fsModule.mkdir as any) = original;
-    }
+    const result = (await sdk.trigger("mem::obsidian-export", {})) as {
+      success: boolean;
+      error?: string;
+    };
+    expect(result.success).toBe(false);
+    expect(typeof result.error).toBe("string");
+    expect(result.error).toContain("simulated disk failure");
   });
 });

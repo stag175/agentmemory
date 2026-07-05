@@ -672,7 +672,7 @@ describe("memory lifecycle roadmap surface", () => {
     });
   });
 
-  it("does not record hard-delete success audit or event when row deletion fails", async () => {
+  it("records hard-delete audit before deletion but no success event when row deletion fails", async () => {
     const created = (await sdk.trigger("mem::remember", {
       content: "Failed hard delete must not emit success records",
       type: "fact",
@@ -695,9 +695,15 @@ describe("memory lifecycle roadmap surface", () => {
 
     expect(await kv.get<Memory>("mem:memories", created.memory.id)).not.toBeNull();
     const auditRows = await kv.list<AuditEntry>("mem:audit");
-    expect(
-      auditRows.some((row) => row.details?.action === "hard_delete"),
-    ).toBe(false);
+    expect(auditRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operation: "delete",
+          targetIds: [created.memory.id],
+          details: expect.objectContaining({ action: "hard_delete" }),
+        }),
+      ]),
+    );
     const events = await kv.list<AgentEvent>("mem:agent-events");
     expect(events.some((event) => event.type === "memory_deleted")).toBe(false);
   });

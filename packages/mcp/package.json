@@ -1,7 +1,7 @@
 {
   "name": "@agentmemory/mcp",
   "mcpName": "io.github.rohitg00/agentmemory",
-  "version": "0.9.27",
+  "version": "0.9.28",
   "description": "Standalone MCP server for agentmemory — thin shim that re-exposes @agentmemory/agentmemory's MCP entrypoint",
   "type": "module",
   "bin": {

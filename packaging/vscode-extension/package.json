@@ -2,7 +2,7 @@
   "name": "@agentmemory/vscode-extension",
   "displayName": "agentmemory",
   "description": "VS Code control plane for a local agentmemory daemon.",
-  "version": "0.9.27",
+  "version": "0.9.28",
   "publisher": "agentmemory",
   "license": "Apache-2.0",
   "type": "module",

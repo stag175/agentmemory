@@ -25,7 +25,7 @@ curl -X POST http://localhost:3111/agentmemory/smart-search \
 
 ## Auth
 
-By default localhost is open and no auth is needed. When `AGENTMEMORY_SECRET` is set, every request needs `Authorization: Bearer $AGENTMEMORY_SECRET`. See agentmemory-config.
+For loopback-bound local use, requests can omit auth. When `AGENTMEMORY_SECRET` is set, every request needs `Authorization: Bearer $AGENTMEMORY_SECRET`. Set a secret before exposing the daemon beyond `127.0.0.1`/`localhost`; see agentmemory-config.
 
 ## Conventions
 

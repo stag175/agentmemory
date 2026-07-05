@@ -104,7 +104,7 @@ function rest(): string {
     })
     .sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
   const lines = [
-    `The REST API is the primary surface. All paths are under \`http://localhost:3111\` (override with \`--port\`). When \`AGENTMEMORY_SECRET\` is set, send \`Authorization: Bearer $AGENTMEMORY_SECRET\`; localhost is otherwise open.`,
+    `The REST API is the primary surface. All paths are under \`http://localhost:3111\` (override with \`--port\`). When \`AGENTMEMORY_SECRET\` is set, send \`Authorization: Bearer $AGENTMEMORY_SECRET\`. Without a secret, use only loopback-bound local deployments; set a secret before exposing the daemon beyond \`127.0.0.1\`.`,
     "",
     `${rows.length} registered endpoints:`,
     "",

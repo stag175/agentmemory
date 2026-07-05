@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
-import { lstat, readFile, readdir } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { lstat, readdir } from "node:fs/promises";
+import { join } from "node:path";
 import type { ISdk } from "iii-sdk";
 import type {
   CompressedObservation,
@@ -17,9 +17,16 @@ import { safeAudit } from "./audit.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { getSearchIndex } from "./search.js";
 import { logger } from "../logger.js";
+import { parsePathList, resolveAllowedPath } from "../path-safety.js";
+import { readTextFileNoSymlink } from "../fs-safety.js";
 
 export const MAX_FILES_DEFAULT = 200;
 export const MAX_FILES_UPPER_BOUND = 1000;
+
+function replayImportAllowedRoots(defaultRoot: string): string[] {
+  const configured = parsePathList(process.env["AGENTMEMORY_REPLAY_IMPORT_ROOTS"]);
+  return configured.length > 0 ? configured : [defaultRoot];
+}
 
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /(^|[\\/_.-])secret([\\/_.-]|s?$)/i,
@@ -303,6 +310,7 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
       | { success: false; error: string }
     > => {
       const defaultRoot = join(homedir(), ".claude", "projects");
+      const allowedRoots = replayImportAllowedRoots(defaultRoot);
       const rawPath = data.path || defaultRoot;
       if (typeof rawPath !== "string" || rawPath.length === 0) {
         return { success: false, error: "path must be a non-empty string" };
@@ -310,7 +318,12 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
       const expanded = rawPath.startsWith("~")
         ? join(homedir(), rawPath.slice(1))
         : rawPath;
-      const abs = resolve(expanded);
+      let abs: string;
+      try {
+        abs = await resolveAllowedPath(expanded, allowedRoots);
+      } catch {
+        return { success: false, error: "path is outside allowed roots" };
+      }
       if (isSensitive(abs)) {
         return { success: false, error: "refusing to process sensitive-looking path" };
       }
@@ -372,7 +385,7 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
         if (await isSymlink(file)) continue;
         let text: string;
         try {
-          text = await readFile(file, "utf-8");
+          text = await readTextFileNoSymlink(file);
         } catch (err) {
           logger.warn("replay: failed to read jsonl", {
             file,

@@ -4,7 +4,7 @@ FROM iiidev/iii:${III_VERSION} AS iii-image
 
 FROM node:22-slim
 
-ARG AGENTMEMORY_VERSION=0.9.27
+ARG AGENTMEMORY_VERSION=0.9.28
 ARG III_VERSION=0.11.2
 ARG III_SDK_VERSION=0.11.2
 
@@ -26,6 +26,7 @@ RUN printf '{"name":"agentmemory-deploy","version":"1.0.0","private":true,"overr
  && ln -s /opt/agentmemory/node_modules/.bin/agentmemory /usr/local/bin/agentmemory
 
 ENV AGENTMEMORY_III_VERSION=${III_VERSION} \
+    PORT=3111 \
     TINI_SUBREAPER=1
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/agentmemory-entrypoint.sh

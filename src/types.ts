@@ -570,7 +570,8 @@ export type ExportVersion =
   | "0.9.24"
   | "0.9.25"
   | "0.9.26"
-  | "0.9.27";
+  | "0.9.27"
+  | "0.9.28";
 
 export interface ExportManifest {
   schema: "agentmemory.export";

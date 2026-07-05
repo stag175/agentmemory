@@ -1,6 +1,17 @@
-import type { RetrievalBackendDescriptor } from "./retrieval-backends.js";
-
 export type FetchLike = typeof fetch;
+
+type QdrantRetrievalDescriptor = {
+  backend: string;
+  collection: string;
+  connection:
+    | {
+        kind: "http";
+        url: string;
+      }
+    | {
+        kind: "none" | "local-path";
+      };
+};
 
 export type QdrantPoint = {
   id: string | number;
@@ -206,7 +217,7 @@ export class QdrantRetrievalStore implements RetrievalRuntimeStore {
 }
 
 export function createQdrantRetrievalStore(
-  descriptor: RetrievalBackendDescriptor,
+  descriptor: QdrantRetrievalDescriptor,
   options: { fetchImpl?: FetchLike; timeoutMs?: number; apiKey?: string } = {},
 ): QdrantRetrievalStore | null {
   if (descriptor.backend !== "qdrant") return null;

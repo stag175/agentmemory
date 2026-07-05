@@ -1,0 +1,8 @@
+{
+  "name": "@opentelemetry/sdk-logs",
+  "version": "0.220.0",
+  "description": "AgentMemory compatibility wrapper for @opentelemetry/sdk-logs legacy processor registration",
+  "main": "build/src/index.js",
+  "module": "build/esm/index.js",
+  "types": "build/src/index.d.ts"
+}

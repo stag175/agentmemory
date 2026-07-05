@@ -11,6 +11,7 @@ import { StateKV } from "../state/kv.js";
 import { recordAudit } from "./audit.js";
 import { deleteAccessLog } from "./access-tracker.js";
 import { logger } from "../logger.js";
+import { flushIndexSave, getSearchIndex, vectorIndexRemove } from "./search.js";
 
 interface EvictionConfig {
   staleSessionDays: number;
@@ -114,6 +115,7 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
       };
 
       let recoveredStaleSessions = 0;
+      let indexChanged = false;
       const sessions = await kv.list<Session>(KV.sessions).catch(() => []);
       const summaries = await kv
         .list<SessionSummary>(KV.summaries)
@@ -156,7 +158,29 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
               continue;
             }
 
+            await recordAudit(kv, "delete", "mem::evict", [session.id], {
+              resource: "session",
+              reason: recovered
+                ? "stale_session_recovered_then_evicted"
+                : "stale_session_without_summary",
+              observationCount: observations.length,
+              dryRun,
+            });
             try {
+              for (const observation of observations) {
+                await kv.delete(KV.observations(session.id), observation.id);
+                if (observation.imageData) {
+                  await decrementImageRef(kv, sdk, observation.imageData);
+                }
+                const imageRef =
+                  "imageRef" in observation ? observation.imageRef : undefined;
+                if (imageRef && imageRef !== observation.imageData) {
+                  await decrementImageRef(kv, sdk, imageRef);
+                }
+                getSearchIndex().remove(observation.id);
+                vectorIndexRemove(observation.id);
+                indexChanged = true;
+              }
               await kv.delete(KV.sessions, session.id);
               stats.staleSessions++;
             } catch (err) {
@@ -167,13 +191,6 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
               });
               continue;
             }
-            await recordAudit(kv, "delete", "mem::evict", [session.id], {
-              resource: "session",
-              reason: recovered
-                ? "stale_session_recovered_then_evicted"
-                : "stale_session_without_summary",
-              dryRun,
-            });
           }
         }
       }
@@ -200,6 +217,12 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
             if (dryRun) {
               stats.lowImportanceObs++;
             } else {
+              await recordAudit(kv, "delete", "mem::evict", [o.id], {
+                resource: "observation",
+                reason: "low_importance_old_observation",
+                sessionId: session.id,
+                dryRun,
+              });
               try {
                 await kv.delete(KV.observations(session.id), o.id);
                 stats.lowImportanceObs++;
@@ -214,12 +237,9 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
               }
               if (o.imageData) await decrementImageRef(kv, sdk, o.imageData);
               if (o.imageRef && o.imageRef !== o.imageData) await decrementImageRef(kv, sdk, o.imageRef);
-              await recordAudit(kv, "delete", "mem::evict", [o.id], {
-                resource: "observation",
-                reason: "low_importance_old_observation",
-                sessionId: session.id,
-                dryRun,
-              });
+              getSearchIndex().remove(o.id);
+              vectorIndexRemove(o.id);
+              indexChanged = true;
             }
           }
         }
@@ -243,6 +263,12 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
             stats.capEvictions += toEvict.length;
           } else {
             for (const o of toEvict) {
+              await recordAudit(kv, "delete", "mem::evict", [o.id], {
+                resource: "observation",
+                reason: "project_observation_cap",
+                sessionId: o.sessionId,
+                dryRun,
+              });
               try {
                 await kv.delete(KV.observations(o.sessionId), o.id);
                 stats.capEvictions++;
@@ -257,12 +283,9 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
               }
               if (o.imageData) await decrementImageRef(kv, sdk, o.imageData);
               if (o.imageRef && o.imageRef !== o.imageData) await decrementImageRef(kv, sdk, o.imageRef);
-              await recordAudit(kv, "delete", "mem::evict", [o.id], {
-                resource: "observation",
-                reason: "project_observation_cap",
-                sessionId: o.sessionId,
-                dryRun,
-              });
+              getSearchIndex().remove(o.id);
+              vectorIndexRemove(o.id);
+              indexChanged = true;
             }
           }
         }
@@ -278,6 +301,11 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
               stats.expiredMemories++;
               evictedMemIds.add(mem.id);
             } else {
+              await recordAudit(kv, "delete", "mem::evict", [mem.id], {
+                resource: "memory",
+                reason: "expired_memory",
+                dryRun,
+              });
               try {
                 await kv.delete(KV.memories, mem.id);
                 stats.expiredMemories++;
@@ -294,12 +322,10 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
               if (mem.imageRef) {
                 await decrementImageRef(kv, sdk, mem.imageRef);
               }
-              await recordAudit(kv, "delete", "mem::evict", [mem.id], {
-                resource: "memory",
-                reason: "expired_memory",
-                dryRun,
-              });
               await deleteAccessLog(kv, mem.id);
+              getSearchIndex().remove(mem.id);
+              vectorIndexRemove(mem.id);
+              indexChanged = true;
             }
           }
         }
@@ -314,6 +340,11 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
             if (dryRun) {
               stats.nonLatestMemories++;
             } else {
+              await recordAudit(kv, "delete", "mem::evict", [mem.id], {
+                resource: "memory",
+                reason: "old_non_latest_memory",
+                dryRun,
+              });
               try {
                 await kv.delete(KV.memories, mem.id);
                 stats.nonLatestMemories++;
@@ -329,17 +360,18 @@ export function registerEvictFunction(sdk: ISdk, kv: StateKV): void {
               if (mem.imageRef) {
                 await decrementImageRef(kv, sdk, mem.imageRef);
               }
-              await recordAudit(kv, "delete", "mem::evict", [mem.id], {
-                resource: "memory",
-                reason: "old_non_latest_memory",
-                dryRun,
-              });
               await deleteAccessLog(kv, mem.id);
+              getSearchIndex().remove(mem.id);
+              vectorIndexRemove(mem.id);
+              indexChanged = true;
             }
           }
         }
       }
 
+      if (!dryRun && indexChanged) {
+        await flushIndexSave();
+      }
       logger.info("Eviction complete", { stats });
       return stats;
     },

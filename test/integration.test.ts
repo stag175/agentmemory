@@ -71,7 +71,9 @@ describe("agentmemory integration", () => {
     });
 
     it("lists sessions including the new one", async () => {
-      const res = await fetch(url("/agentmemory/sessions"));
+      const res = await fetch(url("/agentmemory/sessions"), {
+        headers: authHeaders(),
+      });
       expect(res.status).toBe(200);
       const body = (await json(res)) as {
         sessions: Array<{ id: string }>;
@@ -93,7 +95,9 @@ describe("agentmemory integration", () => {
     });
 
     it("session is marked completed", async () => {
-      const res = await fetch(url("/agentmemory/sessions"));
+      const res = await fetch(url("/agentmemory/sessions"), {
+        headers: authHeaders(),
+      });
       const body = (await json(res)) as {
         sessions: Array<{ id: string; status: string; endedAt?: string }>;
       };
@@ -170,6 +174,7 @@ describe("agentmemory integration", () => {
     it("lists observations for the session", async () => {
       const res = await fetch(
         url(`/agentmemory/observations?sessionId=${OBS_SESSION}`),
+        { headers: authHeaders() },
       );
       expect(res.status).toBe(200);
       const body = (await json(res)) as {
@@ -179,7 +184,9 @@ describe("agentmemory integration", () => {
     });
 
     it("returns 400 without sessionId", async () => {
-      const res = await fetch(url("/agentmemory/observations"));
+      const res = await fetch(url("/agentmemory/observations"), {
+        headers: authHeaders(),
+      });
       expect(res.status).toBe(400);
       const body = (await json(res)) as { error: string };
       expect(body.error).toBe("sessionId required");

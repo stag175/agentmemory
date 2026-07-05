@@ -33,7 +33,9 @@ vi.mock("node:fs", () => ({
 }));
 
 import { registerSnapshotFunction } from "../src/functions/snapshot.js";
+import { KV } from "../src/state/schema.js";
 import type { Session, Memory, SnapshotMeta } from "../src/types.js";
+import { readFileSync } from "node:fs";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -155,6 +157,93 @@ describe("Snapshot Functions", () => {
 
     expect(result.success).toBe(true);
     expect(result.commitHash).toBe("abc1234");
+  });
+
+  it("snapshot-restore removes rows that are absent from the snapshot", async () => {
+    const extraSession: Session = {
+      id: "ses_extra",
+      project: "test",
+      cwd: "/tmp",
+      startedAt: "2026-02-02T00:00:00Z",
+      status: "completed",
+      observationCount: 1,
+    };
+    const extraMemory: Memory = {
+      id: "mem_extra",
+      createdAt: "2026-02-02T00:00:00Z",
+      updatedAt: "2026-02-02T00:00:00Z",
+      type: "pattern",
+      title: "Post snapshot",
+      content: "created after snapshot",
+      concepts: [],
+      files: [],
+      sessionIds: ["ses_extra"],
+      strength: 1,
+      version: 1,
+      isLatest: true,
+    };
+
+    await kv.set(KV.sessions, extraSession.id, extraSession);
+    await kv.set(KV.memories, extraMemory.id, extraMemory);
+    await kv.set(KV.observations("ses_extra"), "obs_extra", {
+      id: "obs_extra",
+      title: "extra",
+    });
+    await kv.set(KV.observations("ses_1"), "obs_stale", {
+      id: "obs_stale",
+      title: "stale",
+    });
+
+    (readFileSync as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      JSON.stringify({
+        version: "0.4.0",
+        timestamp: "2026-02-01T00:00:00Z",
+        sessions: [
+          {
+            id: "ses_1",
+            project: "test",
+            cwd: "/tmp",
+            startedAt: "2026-02-01T00:00:00Z",
+            status: "completed",
+            observationCount: 1,
+          },
+        ],
+        memories: [
+          {
+            id: "mem_1",
+            createdAt: "2026-02-01T00:00:00Z",
+            updatedAt: "2026-02-01T00:00:00Z",
+            type: "pattern",
+            title: "Test pattern",
+            content: "Always test",
+            concepts: [],
+            files: [],
+            sessionIds: ["ses_1"],
+            strength: 5,
+            version: 1,
+            isLatest: true,
+          },
+        ],
+        graphNodes: [],
+        observations: {
+          ses_1: [{ id: "obs_kept", title: "kept" }],
+        },
+        accessLogs: [],
+      }),
+    );
+
+    const result = (await sdk.trigger("mem::snapshot-restore", {
+      commitHash: "abc1234",
+    })) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(await kv.get(KV.sessions, "ses_extra")).toBeNull();
+    expect(await kv.get(KV.memories, "mem_extra")).toBeNull();
+    expect(await kv.get(KV.observations("ses_extra"), "obs_extra")).toBeNull();
+    expect(await kv.get(KV.observations("ses_1"), "obs_stale")).toBeNull();
+    expect(await kv.get(KV.observations("ses_1"), "obs_kept")).toMatchObject({
+      id: "obs_kept",
+    });
   });
 
   it("snapshot-create records an audit entry", async () => {

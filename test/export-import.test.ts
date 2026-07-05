@@ -145,7 +145,7 @@ describe("Export/Import Functions", () => {
   it("export produces valid ExportData structure", async () => {
     const result = (await sdk.trigger("mem::export", {})) as ExportData;
 
-    expect(result.version).toBe("0.9.27");
+    expect(result.version).toBe("0.9.28");
     expect(result.exportedAt).toBeDefined();
     expect(result.manifest).toBeDefined();
     expect(result.manifest?.schema).toBe("agentmemory.export");
@@ -189,7 +189,7 @@ describe("Export/Import Functions", () => {
         envVar: "AGENTMEMORY_EXPORT_TEST_KEY",
         keyRef: result.keyRef,
       });
-      expect(decrypted.version).toBe("0.9.27");
+      expect(decrypted.version).toBe("0.9.28");
       expect(decrypted.memories[0].id).toBe("mem_1");
       expect(decrypted.memories[0].content).toBe(testMemory.content);
       expect(decrypted.manifest?.hashes.memories).toMatch(/^[a-f0-9]{64}$/);

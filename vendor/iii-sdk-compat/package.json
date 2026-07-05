@@ -1,0 +1,54 @@
+{
+  "name": "iii-sdk",
+  "version": "0.11.2",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "index.js",
+  "author": "III",
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "III SDK for Node.js",
+  "keywords": [
+    "iii",
+    "sdk"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./stream": {
+      "types": "./dist/stream.d.mts",
+      "import": "./dist/stream.mjs",
+      "require": "./dist/stream.cjs"
+    },
+    "./state": {
+      "types": "./dist/state.d.mts",
+      "import": "./dist/state.mjs",
+      "require": "./dist/state.cjs"
+    },
+    "./telemetry": {
+      "types": "./dist/telemetry.d.mts",
+      "import": "./dist/telemetry.mjs",
+      "require": "./dist/telemetry.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/api-logs": "0.220.0",
+    "@opentelemetry/core": "2.9.0",
+    "@opentelemetry/instrumentation": "0.220.0",
+    "@opentelemetry/otlp-transformer": "0.220.0",
+    "@opentelemetry/resources": "2.9.0",
+    "@opentelemetry/sdk-logs": "0.220.0",
+    "@opentelemetry/sdk-metrics": "2.9.0",
+    "@opentelemetry/sdk-trace-base": "2.9.0",
+    "@opentelemetry/sdk-trace-node": "2.9.0",
+    "@opentelemetry/semantic-conventions": "^1.29.0",
+    "ws": "^8.21.0"
+  }
+}

@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import { registerApiTriggers } from "../src/triggers/api.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 
+const TEST_SECRET = "test-secret";
+const AUTH_HEADERS = { authorization: `Bearer ${TEST_SECRET}` };
+
 describe("roadmap REST endpoint whitelists", () => {
   it("registers proposal, sync, OTEL, and deletion propagation routes", () => {
     const sdk = mockSdk();
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
     const paths = sdk.registerTrigger.mock.calls.map(
       ([trigger]: [{ config?: { api_path?: string } }]) => trigger.config?.api_path,
     );
@@ -29,7 +32,7 @@ describe("roadmap REST endpoint whitelists", () => {
 
   it("registers the audit-chain GET read and verify POST routes", () => {
     const sdk = mockSdk();
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
     const routes = sdk.registerTrigger.mock.calls.map(
       ([trigger]: [{ config?: { api_path?: string; http_method?: string } }]) => ({
         path: trigger.config?.api_path,
@@ -53,7 +56,7 @@ describe("roadmap REST endpoint whitelists", () => {
 
   it("registers memory inspect POST and GET REST parity routes", () => {
     const sdk = mockSdk();
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
     const routes = sdk.registerTrigger.mock.calls.map(
       ([trigger]: [{ config?: { api_path?: string; http_method?: string } }]) => ({
         path: trigger.config?.api_path,
@@ -78,18 +81,18 @@ describe("roadmap REST endpoint whitelists", () => {
       seen.push(input as Record<string, unknown>);
       return { success: true, memory: { id: (input as { memoryId: string }).memoryId } };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const post = (await sdk.trigger("api::memory-inspect", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { memoryId: "mem_post", ignored: "drop" },
     })) as { status_code: number };
     const get = (await sdk.trigger("api::memory-inspect", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: { memoryId: "mem_get", ignored: "drop" },
     })) as { status_code: number };
     const missing = (await sdk.trigger("api::memory-inspect", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { ignored: "drop" },
     })) as { status_code: number; body: { error: string } };
 
@@ -107,10 +110,10 @@ describe("roadmap REST endpoint whitelists", () => {
       payload = input as Record<string, unknown>;
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const response = (await sdk.trigger("api::memory-proposal-create", {
-      headers: { "x-actor-id": "alice" },
+      headers: { ...AUTH_HEADERS, "x-actor-id": "alice" },
       body: {
         project: "billing",
         action: "create",
@@ -155,17 +158,17 @@ describe("roadmap REST endpoint whitelists", () => {
       seen.push(input as Record<string, unknown>);
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     // No x-actor-id header: actorId falls back to body.actorId (identity label
     // only — carries no authorization).
     await sdk.trigger("api::memory-proposal-approve", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { proposalId: "prop_1", actorId: "bob" },
     });
     // No header and no body.actorId: defaults to "operator".
     await sdk.trigger("api::memory-proposal-approve", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { proposalId: "prop_2" },
     });
 
@@ -188,10 +191,10 @@ describe("roadmap REST endpoint whitelists", () => {
         payload = input as Record<string, unknown>;
         return { success: true };
       });
-      registerApiTriggers(sdk as never, mockKV() as never, undefined);
+      registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
       await sdk.trigger("api::memory-proposal-approve", {
-        headers: {},
+        headers: AUTH_HEADERS,
         body: { proposalId: "prop_1" },
       });
 
@@ -212,10 +215,10 @@ describe("roadmap REST endpoint whitelists", () => {
       payload = input as Record<string, unknown>;
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const response = (await sdk.trigger("api::handoff-update", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: {
         signalId: "sig_1",
         agentId: "codex",
@@ -226,7 +229,7 @@ describe("roadmap REST endpoint whitelists", () => {
       },
     })) as { status_code: number };
     const invalid = (await sdk.trigger("api::handoff-update", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { signalId: ["sig_1"], agentId: "codex", status: "accepted" },
     })) as { status_code: number; body: { error: string } };
 
@@ -257,14 +260,14 @@ describe("roadmap REST endpoint whitelists", () => {
       seen.push(input as Record<string, unknown>);
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     await sdk.trigger("api::sync-plan", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { peerId: "peer_1", direction: "push", scopes: ["memories"], raw: "drop" },
     });
     await sdk.trigger("api::sync-local-apply", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: {
         peerId: "peer_1",
         workspaceId: "workspace_1",
@@ -275,7 +278,7 @@ describe("roadmap REST endpoint whitelists", () => {
       },
     });
     await sdk.trigger("api::otel-lineage-import", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { spans: [{ traceId: "a" }], source: "test", payload: "drop" },
     });
 
@@ -299,10 +302,10 @@ describe("roadmap REST endpoint whitelists", () => {
       calls++;
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const response = (await sdk.trigger("api::sync-plan", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { peerId: "peer_1", scopes: "memories" },
     })) as { status_code: number; body: { error: string } };
 
@@ -318,10 +321,10 @@ describe("roadmap REST endpoint whitelists", () => {
       payload = input as Record<string, unknown>;
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const response = (await sdk.trigger("api::deletion-propagation-report", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: {
         memoryId: "mem_1",
         sourceObservationId: "obs_1",
@@ -331,7 +334,7 @@ describe("roadmap REST endpoint whitelists", () => {
       },
     })) as { status_code: number };
     const invalid = (await sdk.trigger("api::deletion-propagation-report", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: "bad",
     })) as { status_code: number; body: { error: string } };
 
@@ -357,10 +360,10 @@ describe("roadmap REST endpoint whitelists", () => {
       seen.push(input as Record<string, unknown>);
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     await sdk.trigger("api::today-in-memory", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {
         project: "billing",
         agentId: "codex",
@@ -371,7 +374,7 @@ describe("roadmap REST endpoint whitelists", () => {
       },
     });
     await sdk.trigger("api::memory-unlinked-mentions", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {
         project: "billing",
         since: "2026-06-29T00:00:00Z",
@@ -409,14 +412,14 @@ describe("roadmap REST endpoint whitelists", () => {
     const sdk = mockSdk();
     sdk.registerFunction("mem::today-in-memory", async () => ({ success: true }));
     sdk.registerFunction("mem::memory-unlinked-mentions", async () => ({ success: true }));
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const badLimit = (await sdk.trigger("api::today-in-memory", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: { limit: "0" },
     })) as { status_code: number; body: { error: string } };
     const badMinMentions = (await sdk.trigger("api::memory-unlinked-mentions", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: { minMentions: "many" },
     })) as { status_code: number; body: { error: string } };
 
@@ -433,14 +436,14 @@ describe("roadmap REST endpoint whitelists", () => {
       payload = input as Record<string, unknown>;
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const ok = (await sdk.trigger("api::sync-peer-set-status", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { peerId: "peer_1", enabled: false, status: "drop", reason: "drop" },
     })) as { status_code: number };
     const badEnabled = (await sdk.trigger("api::sync-peer-set-status", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { peerId: "peer_1", enabled: "false" },
     })) as { status_code: number; body: { error: string } };
 
@@ -457,10 +460,10 @@ describe("roadmap REST endpoint whitelists", () => {
       payload = input as Record<string, unknown>;
       return { success: true, headHash: "abc", entries: [] };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const response = (await sdk.trigger("api::audit-chain", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {
         offset: "0",
         limit: "25",
@@ -494,10 +497,10 @@ describe("roadmap REST endpoint whitelists", () => {
       payload = input as Record<string, unknown>;
       return { success: true, checked: {}, mismatches: [] };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const ok = (await sdk.trigger("api::audit-chain-verify", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: {
         expectedHeadHash: "head_hash",
         expectedCount: 12,
@@ -516,11 +519,11 @@ describe("roadmap REST endpoint whitelists", () => {
       },
     })) as { status_code: number };
     const badCount = (await sdk.trigger("api::audit-chain-verify", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { expectedCount: "twelve" },
     })) as { status_code: number; body: { error: string } };
     const badChain = (await sdk.trigger("api::audit-chain-verify", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { chain: "not-an-array" },
     })) as { status_code: number; body: { error: string } };
 

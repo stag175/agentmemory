@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.28] — 2026-07-05
+
+Hardening release focused on production readiness for REST/MCP deployments, local file handling, first-run packaging, and iii-sdk runtime compatibility. No intentional breaking changes.
+
+### Security
+
+- REST and MCP auth now fail closed when `AGENTMEMORY_SECRET` is missing, while `/agentmemory/livez` and public health probes remain usable.
+- File-facing tools reject path escapes and symlink-backed targets more consistently across compression, replay import, and Obsidian export.
+- Mesh peer registration/sync now requires HTTPS public peers, blocks private/local DNS answers, disallows URL credentials/query/hash on peer roots, and pins validated DNS answers into outbound HTTPS requests.
+- Snapshot restore is now an authoritative restore instead of a merge: rows absent from the selected snapshot are deleted with audit evidence before restore completion.
+- Sentinel regex patterns reject ReDoS-prone nested quantifiers, backreferences/lookarounds, and quantified alternations.
+
+### Fixed
+
+- Native iii-engine installer checksum URLs now match the pinned GitHub release sidecar asset names.
+- Runtime compatibility with `iii-sdk@0.11.2` is restored under patched OpenTelemetry dependencies via vendored compatibility packages.
+- Public `/agentmemory/health` now returns only probe-safe fields unless the caller is authenticated.
+- Cross-process state writes use filesystem-backed keyed locks where available to reduce multi-agent write races.
+
+### Packaging
+
+- Release metadata and deploy templates bumped to `0.9.28` so npm/GitHub publishing does not skip the hardened worktree.
+- Agent install runbook now documents the noninteractive first-run engine opt-in explicitly.
+
 ## [0.9.27] — 2026-06-07
 
 Wave release closing several breaking regressions reported against v0.9.26, plus an agent-scope isolation security fix, an iii version-pin audit fix, and a benchmark scorecard correction. No breaking changes; drop-in upgrade.
@@ -51,6 +75,7 @@ Wave release closing several breaking regressions reported against v0.9.26, plus
 - `crypto.randomUUID()` global-only on Node <19 ([#715](https://github.com/rohitg00/agentmemory/issues/715)). Drop-in import fix tracked.
 
 [0.9.27]: https://github.com/rohitg00/agentmemory/compare/v0.9.26...v0.9.27
+[0.9.28]: https://github.com/rohitg00/agentmemory/compare/v0.9.27...v0.9.28
 
 ## [0.9.26] — 2026-06-03
 

@@ -9,17 +9,27 @@ const fileStore = new Map<string, string>();
 const symlinkPaths = new Set<string>();
 const openEloopPaths = new Set<string>();
 
+function mockFileStat(path: string) {
+  return {
+    dev: 0,
+    ino: 0,
+    isSymbolicLink: () => symlinkPaths.has(path),
+    isFile: () => fileStore.has(path) && !symlinkPaths.has(path),
+    isDirectory: () => false,
+  };
+}
+
 vi.mock("node:fs/promises", () => ({
   lstat: vi.fn(async (path: string) => {
     if (symlinkPaths.has(path)) {
-      return { isSymbolicLink: () => true };
+      return mockFileStat(path);
     }
     if (!fileStore.has(path)) {
       throw Object.assign(new Error(`ENOENT: no such file or directory, lstat '${path}'`), {
         code: "ENOENT",
       });
     }
-    return { isSymbolicLink: () => false };
+    return mockFileStat(path);
   }),
   open: vi.fn(async (path: string) => {
     if (openEloopPaths.has(path)) {
@@ -28,19 +38,23 @@ vi.mock("node:fs/promises", () => ({
       });
     }
     return {
+      stat: vi.fn(async () => ({
+        dev: 0,
+        ino: 0,
+        isSymbolicLink: () => false,
+        isFile: () => true,
+        isDirectory: () => false,
+      })),
+      readFile: vi.fn(async () => {
+        const value = fileStore.get(path);
+        if (value === undefined) throw new Error("ENOENT");
+        return value;
+      }),
       writeFile: vi.fn(async (content: string) => {
         fileStore.set(path, content);
       }),
       close: vi.fn(async () => {}),
     };
-  }),
-  readFile: vi.fn(async (path: string) => {
-    const value = fileStore.get(path);
-    if (value === undefined) throw new Error("ENOENT");
-    return value;
-  }),
-  writeFile: vi.fn(async (path: string, content: string) => {
-    fileStore.set(path, content);
   }),
 }));
 
@@ -104,7 +118,18 @@ describe("mem::compress-file", () => {
       sdk as never,
       kv as never,
       { name: "test-provider", summarize, compress: summarize } as never,
+      { allowedRoots: [resolve("/tmp")] },
     );
+  });
+
+  it("rejects markdown paths outside the configured allowed roots", async () => {
+    const result = (await sdk.trigger("mem::compress-file", {
+      filePath: resolve("/etc/notes.md"),
+    })) as { success: boolean; error: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("outside allowed roots");
+    expect(summarize).not.toHaveBeenCalled();
   });
 
   it("rejects symlinks", async () => {
@@ -134,6 +159,28 @@ describe("mem::compress-file", () => {
     })) as { success: boolean; error: string };
     expect(result.success).toBe(false);
     expect(result.error).toContain("symlink");
+  });
+
+  it("rejects preexisting symlink at the backup path", async () => {
+    const path = resolve("/tmp/notes.md");
+    const backupPath = resolve("/tmp/notes.original.md");
+    fileStore.set(
+      path,
+      "# Title\n\nVisit https://example.com\n\n```ts\nconst x = 1;\n```\n\nContent.",
+    );
+    fileStore.set(backupPath, "");
+    symlinkPaths.add(backupPath);
+    summarize.mockResolvedValue(
+      "# Title\n\nVisit https://example.com\n\n```ts\nconst x = 1;\n```\n\nShort.",
+    );
+
+    const result = (await sdk.trigger("mem::compress-file", {
+      filePath: path,
+    })) as { success: boolean; error: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("symlink");
+    expect(fileStore.get(path)).toContain("Content.");
   });
 
   it("rejects non-markdown paths", async () => {

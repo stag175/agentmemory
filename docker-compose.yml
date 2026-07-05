@@ -1,4 +1,8 @@
 services:
+  # Local development/CLI fallback only. Host publishes every port on
+  # 127.0.0.1, so this compose file is not a production or LAN template.
+  # If you change any published address to 0.0.0.0, set a strong
+  # AGENTMEMORY_SECRET first or use the managed templates under deploy/.
   # One-shot init container: docker creates named volumes root:root mode
   # 755, but the iii-engine image is distroless and runs as UID 65532
   # with no `chown` of its own. Without this, /data is unwritable, the
@@ -36,6 +40,11 @@ services:
     volumes:
       - iii-data:/data
       - ./iii-config.docker.yaml:/app/config.yaml:ro
+    environment:
+      # Optional for local loopback use; required before exposing beyond
+      # 127.0.0.1 because unset AGENTMEMORY_SECRET leaves REST endpoints
+      # unauthenticated by design.
+      AGENTMEMORY_SECRET: ${AGENTMEMORY_SECRET:-}
     restart: unless-stopped
     logging:
       driver: json-file

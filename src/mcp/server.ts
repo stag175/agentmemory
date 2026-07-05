@@ -156,6 +156,7 @@ export function registerMcpEndpoints(
   kv: StateKV,
   secret?: string,
 ): void {
+  const effectiveSecret = secret ?? process.env["AGENTMEMORY_SECRET"];
   // Item 4 (NETWORK MCP daemon): constrain rules-resolve to the server's
   // configured allowedRoots (default [process.cwd()]). The registered network
   // function keeps allowCallerOptions FALSE, so caller instructionGlobs/
@@ -192,7 +193,12 @@ export function registerMcpEndpoints(
     req: ApiRequest,
     sec: string | undefined,
   ): McpResponse | null {
-    if (!sec) return null;
+    if (!sec) {
+      return {
+        status_code: 503,
+        body: { error: "AGENTMEMORY_SECRET is required" },
+      };
+    }
     const auth =
       req.headers?.["authorization"] || req.headers?.["Authorization"];
     if (typeof auth !== "string" || !timingSafeCompare(auth, `Bearer ${sec}`)) {
@@ -203,7 +209,7 @@ export function registerMcpEndpoints(
 
   sdk.registerFunction("mcp::tools::list", 
     async (req: ApiRequest): Promise<McpResponse> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       return { status_code: 200, body: { tools: getVisibleTools() } };
     },
@@ -218,7 +224,7 @@ export function registerMcpEndpoints(
     async (
       req: ApiRequest<{ name: string; arguments: Record<string, unknown> }>,
     ): Promise<McpResponse> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
 
       if (!req.body || typeof req.body.name !== "string") {
@@ -2023,7 +2029,7 @@ export function registerMcpEndpoints(
 
   sdk.registerFunction("mcp::resources::list", 
     async (req: ApiRequest): Promise<McpResponse> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       return { status_code: 200, body: { resources: MCP_RESOURCES } };
     },
@@ -2036,7 +2042,7 @@ export function registerMcpEndpoints(
 
   sdk.registerFunction("mcp::resources::read", 
     async (req: ApiRequest<{ uri: string }>): Promise<McpResponse> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
 
       const uri = req.body?.uri;
@@ -2316,7 +2322,7 @@ export function registerMcpEndpoints(
 
   sdk.registerFunction("mcp::prompts::list", 
     async (req: ApiRequest): Promise<McpResponse> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       return { status_code: 200, body: { prompts: MCP_PROMPTS } };
     },
@@ -2331,7 +2337,7 @@ export function registerMcpEndpoints(
     async (
       req: ApiRequest<{ name: string; arguments?: Record<string, string> }>,
     ): Promise<McpResponse> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
 
       const promptName = req.body?.name;

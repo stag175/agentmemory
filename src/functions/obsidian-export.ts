@@ -1,5 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
@@ -10,20 +9,31 @@ import type {
   Crystal,
   Session,
 } from "../types.js";
-import { recordAudit } from "./audit.js";
+import { safeAudit } from "./audit.js";
+import { ensureDirectoryNoSymlink, writeTextFileNoSymlink } from "../fs-safety.js";
+import { canonicalizePath, isPathInside } from "../path-safety.js";
 const DEFAULT_EXPORT_ROOT = join(homedir(), ".agentmemory");
 
 function getExportRoot(): string {
   return resolve(process.env["AGENTMEMORY_EXPORT_ROOT"] || DEFAULT_EXPORT_ROOT);
 }
 
-function resolveVaultDir(vaultDir?: string): string | null {
+async function resolveVaultDir(vaultDir?: string): Promise<string | null> {
   const root = getExportRoot();
   const resolved = resolve(vaultDir || join(root, "vault"));
-  if (resolved === root || resolved.startsWith(root + sep)) {
-    return resolved;
+  if (!isPathInside(root, resolved)) {
+    return null;
   }
-  return null;
+
+  await ensureDirectoryNoSymlink(root);
+  await ensureDirectoryNoSymlink(resolved);
+
+  const canonicalRoot = await canonicalizePath(root);
+  const canonicalVault = await canonicalizePath(resolved);
+  if (!isPathInside(canonicalRoot, canonicalVault)) {
+    return null;
+  }
+  return canonicalVault;
 }
 
 function sanitize(name: string): string {
@@ -262,7 +272,15 @@ export function registerObsidianExportFunction(
         }
       }
 
-      const vaultDir = resolveVaultDir(data.vaultDir);
+      let vaultDir: string | null;
+      try {
+        vaultDir = await resolveVaultDir(data.vaultDir);
+      } catch (err) {
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
       if (!vaultDir) {
         return {
           success: false,
@@ -286,7 +304,7 @@ export function registerObsidianExportFunction(
       // worst case is `{success: false, error: <string>}`.
       try {
         await Promise.all(
-          Object.values(dirs).map((dir) => mkdir(dir, { recursive: true })),
+          Object.values(dirs).map((dir) => ensureDirectoryNoSymlink(dir)),
         );
 
         const stats = { memories: 0, lessons: 0, crystals: 0, sessions: 0 };
@@ -309,7 +327,7 @@ export function registerObsidianExportFunction(
           const filename = `${sanitize(m.id)}.md`;
           const filepath = join(dirs.memories, filename);
           try {
-            await writeFile(filepath, memoryToMd(m));
+            await writeTextFileNoSymlink(filepath, memoryToMd(m));
             stats.memories++;
             memoryMoc.push(
               `- [[memories/${sanitize(m.id)}|${safeString(m.title, m.id)}]] (${m.type}, strength: ${m.strength ?? 0})`,
@@ -329,7 +347,7 @@ export function registerObsidianExportFunction(
           const filename = `${sanitize(l.id)}.md`;
           const filepath = join(dirs.lessons, filename);
           try {
-            await writeFile(filepath, lessonToMd(l));
+            await writeTextFileNoSymlink(filepath, lessonToMd(l));
             stats.lessons++;
             const headline = safeString(l.content).slice(0, 60) || l.id;
             lessonMoc.push(
@@ -348,7 +366,7 @@ export function registerObsidianExportFunction(
           const filename = `${sanitize(c.id)}.md`;
           const filepath = join(dirs.crystals, filename);
           try {
-            await writeFile(filepath, crystalToMd(c));
+            await writeTextFileNoSymlink(filepath, crystalToMd(c));
             stats.crystals++;
             const headline = safeString(c.narrative).slice(0, 60) || c.id;
             crystalMoc.push(`- [[crystals/${sanitize(c.id)}|${headline}]]`);
@@ -369,7 +387,7 @@ export function registerObsidianExportFunction(
           const filename = `${sanitize(s.id)}.md`;
           const filepath = join(dirs.sessions, filename);
           try {
-            await writeFile(filepath, sessionToMd(s));
+            await writeTextFileNoSymlink(filepath, sessionToMd(s));
             stats.sessions++;
             sessionMoc.push(
               `- [[sessions/${sanitize(s.id)}|${safeString(s.project, "unknown")} (${safeString(s.status, "unknown")})]]`,
@@ -407,9 +425,9 @@ export function registerObsidianExportFunction(
           ...sessionMoc,
         ].join("\n");
 
-        await writeFile(join(vaultDir, "MOC.md"), moc);
+        await writeTextFileNoSymlink(join(vaultDir, "MOC.md"), moc);
 
-        await recordAudit(kv, "obsidian_export", "mem::obsidian-export", [], {
+        await safeAudit(kv, "obsidian_export", "mem::obsidian-export", [], {
           vaultDir,
           stats,
         });

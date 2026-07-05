@@ -8,6 +8,9 @@ import { InMemoryKV } from "../src/mcp/in-memory-kv.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 
+const TEST_SECRET = "test-secret";
+const AUTH_HEADERS = { authorization: `Bearer ${TEST_SECRET}` };
+
 type FetchMock = ReturnType<typeof vi.fn>;
 
 function installFetch(handler: (url: string, init?: RequestInit) => Response): FetchMock {
@@ -48,6 +51,29 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     for (const root of tempRoots.splice(0)) {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("keeps health probes public while protecting sensitive REST routes", () => {
+    const sdk = mockSdk();
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
+
+    const triggerCalls = (sdk.registerTrigger as unknown as ReturnType<typeof vi.fn>).mock
+      .calls as Array<[{
+        function_id: string;
+        config: {
+          api_path: string;
+          middleware_function_ids?: string[];
+        };
+      }]>;
+    const byPath = new Map(
+      triggerCalls.map(([trigger]) => [trigger.config.api_path, trigger.config]),
+    );
+
+    expect(byPath.get("/agentmemory/livez")?.middleware_function_ids).toBeUndefined();
+    expect(byPath.get("/agentmemory/health")?.middleware_function_ids).toBeUndefined();
+    expect(byPath.get("/agentmemory/search")?.middleware_function_ids).toEqual([
+      "middleware::api-auth",
+    ]);
   });
 
   it("proxies memory_sessions to GET /agentmemory/sessions when server is up", async () => {
@@ -271,10 +297,10 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       smartPayload = payload as Record<string, unknown>;
       return { ok: true };
     });
-    registerApiTriggers(sdk as never, kv as never, undefined);
+    registerApiTriggers(sdk as never, kv as never, TEST_SECRET);
 
     const context = await sdk.trigger("api::context", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {},
       body: {
         sessionId: "sess_1",
@@ -296,7 +322,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     });
 
     const smart = await sdk.trigger("api::smart-search", {
-      headers: { "x-agentmemory-source": "viewer" },
+      headers: { ...AUTH_HEADERS, "x-agentmemory-source": "viewer" },
       query_params: {},
       body: {
         query: "auth bug",
@@ -335,7 +361,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     expect(smartPayload).not.toHaveProperty("ignored");
 
     const explain = await sdk.trigger("api::search-explain", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {},
       body: {
         query: "auth bug",
@@ -367,7 +393,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     });
 
     const rejected = await sdk.trigger("api::smart-search", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {},
       body: { query: "auth bug", searchMode: "sideways" },
     });
@@ -377,7 +403,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     });
 
     const rejectedRetrievalMode = await sdk.trigger("api::smart-search", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {},
       body: { query: "auth bug", retrievalMode: "sideways" },
     });
@@ -398,10 +424,10 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       createPayload = payload as Record<string, unknown>;
       return { success: true, memory: { id: "mem_created" } };
     });
-    registerApiTriggers(sdk as never, kv as never, undefined);
+    registerApiTriggers(sdk as never, kv as never, TEST_SECRET);
 
     const created = await sdk.trigger("api::memory-create", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {},
       body: {
         content: "Use REST lifecycle create",
@@ -427,7 +453,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     });
 
     const rejected = await sdk.trigger("api::memory-create", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {},
       body: {
         content: "bad gate flag",
@@ -449,10 +475,10 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
       deletePayload = payload as Record<string, unknown>;
       return { success: true, deleted: 2 };
     });
-    registerApiTriggers(sdk as never, kv as never, undefined);
+    registerApiTriggers(sdk as never, kv as never, TEST_SECRET);
 
     const deleted = await sdk.trigger("api::memory-delete", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {},
       body: {
         sourceObservationId: "obs_1",
@@ -483,7 +509,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     });
 
     const missingSelector = await sdk.trigger("api::memory-delete", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {},
       body: { reason: "missing target" },
     });
@@ -493,7 +519,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     });
 
     const rejected = await sdk.trigger("api::memory-delete", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {},
       body: {
         sourceObservationId: "obs_1",

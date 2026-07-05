@@ -1,9 +1,9 @@
 # Deploy agentmemory on fly.io
 
 This template runs agentmemory on a single fly.io machine with a 1 GB
-persistent volume mounted at `/data`. The HMAC secret is generated on
-first boot and persisted to the volume — you capture it from the deploy
-logs exactly once.
+persistent volume mounted at `/data`. Because the REST API is published
+through Fly's HTTPS proxy, the container refuses to start until
+`AGENTMEMORY_SECRET` is set with `fly secrets set`.
 
 ## What you get
 
@@ -12,9 +12,8 @@ logs exactly once.
 - `auto_stop_machines = "stop"` and `min_machines_running = 0` — the
   machine sleeps when idle, so cost floor approaches $0 for low traffic
 - HTTP healthcheck at `/agentmemory/livez` every 30 s
-- The HMAC bearer secret is generated on first boot inside the
-  container and persisted to `/data/.hmac` (chmod 600); the operator
-  copies it from the deploy logs once.
+- The HMAC bearer secret is supplied from Fly Secrets and propagated to
+  agentmemory at runtime.
 
 ## One-time setup
 
@@ -24,9 +23,9 @@ flow stays consistent:
 
 ```bash
 # 1. Install flyctl: https://fly.io/docs/flyctl/install/
-# 2. Pick your unique app name (and matching volume name):
+# 2. Pick your unique app name:
 export APP="agentmemory-$(whoami)"     # or any other globally-unique name
-export VOLUME="${APP//-/_}_data"       # Fly volume names can't contain '-'
+export VOLUME="agentmemory_data"       # must match fly.toml [[mounts]].source
 
 # 3. From this directory:
 fly launch --copy-config --no-deploy --name "$APP"
@@ -34,32 +33,29 @@ fly launch --copy-config --no-deploy --name "$APP"
 # 4. Create the volume in the same region as the app:
 fly volumes create "$VOLUME" --region iad --size 1
 
-# 5. Deploy:
+# 5. Set the bearer secret before the public API starts:
+fly secrets set AGENTMEMORY_SECRET="$(openssl rand -hex 32)" --app "$APP"
+
+# 6. Deploy:
 fly deploy --app "$APP"
 ```
 
 If `fly launch` reports the name is taken, pick another value for `$APP`,
 re-export, and re-run.
 
-## Capture the HMAC secret
+## Set the HMAC secret
 
-Right after the first deploy succeeds:
-
-```bash
-fly logs --app "$APP" | grep -A1 AGENTMEMORY_SECRET=
-```
-
-You will see exactly one line of the form `AGENTMEMORY_SECRET=<64 hex chars>`.
-Copy it into your client environment (`~/.bashrc`, Claude Desktop config,
-the viewer unlock prompt, etc.). The secret is never printed again on
-subsequent boots.
-
-If the first-boot log line is no longer available, read the persisted
-secret from the mounted volume:
+Fly stores `AGENTMEMORY_SECRET` as a secret and does not print the value
+back later. Save the value when you run `fly secrets set`, or set it
+from an existing shell variable:
 
 ```bash
-fly ssh console --app "$APP" -C "sh -lc 'cat /data/.hmac'"
+export AGENTMEMORY_SECRET="$(openssl rand -hex 32)"
+fly secrets set AGENTMEMORY_SECRET="$AGENTMEMORY_SECRET" --app "$APP"
 ```
+
+Copy the same value into your client environment (`~/.bashrc`, Claude
+Desktop config, the viewer unlock prompt, etc.).
 
 ## Verify the deployment
 
@@ -98,8 +94,7 @@ explicitly set, and every request to `/agentmemory/*` must present
 favicon are still served unauthenticated. If a proxied viewer request
 gets a 401, the browser UI prompts for `AGENTMEMORY_SECRET` and stores
 it in session storage so subsequent viewer API calls include the bearer.
-Use the value printed in the first-boot logs or read `/data/.hmac`
-inside the machine.
+Use the value you stored in Fly Secrets.
 
 > **Security warning.** Setting `AGENTMEMORY_VIEWER_HOST=0.0.0.0` or
 > `::` turns the viewer into a network-reachable proxy that signs every
@@ -112,11 +107,9 @@ inside the machine.
 ## Rotate the HMAC secret
 
 ```bash
-fly ssh console --app "$APP"
-rm /data/.hmac
-exit
+export AGENTMEMORY_SECRET="$(openssl rand -hex 32)"
+fly secrets set AGENTMEMORY_SECRET="$AGENTMEMORY_SECRET" --app "$APP"
 fly machine restart <machine-id>
-fly logs --app "$APP" | grep AGENTMEMORY_SECRET=
 ```
 
 Update every client with the new secret. Old tokens stop working

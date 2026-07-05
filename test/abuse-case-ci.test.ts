@@ -34,6 +34,9 @@ import type {
   Session,
 } from "../src/types.js";
 
+const TEST_SECRET = "test-secret";
+const AUTH_HEADERS = { authorization: `Bearer ${TEST_SECRET}` };
+
 const ORIGINAL_AGENT_ID = process.env["AGENT_ID"];
 const ORIGINAL_AGENT_SCOPE = process.env["AGENTMEMORY_AGENT_SCOPE"];
 
@@ -273,10 +276,10 @@ describe("abuse-case CI hardening", () => {
       payload = input as Record<string, unknown>;
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const response = (await sdk.trigger("api::smart-search", {
-      headers: { "x-agentmemory-source": "viewer" },
+      headers: { ...AUTH_HEADERS, "x-agentmemory-source": "viewer" },
       body: {
         query: "billing",
         token_budget: 42,

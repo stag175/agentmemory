@@ -110,6 +110,28 @@ describe("Sentinels Functions", () => {
       expect(result.sentinel.type).toBe("pattern");
     });
 
+    it("rejects pattern sentinels with unsafe regular expressions", async () => {
+      const result = (await sdk.trigger("mem::sentinel-create", {
+        name: "redos",
+        type: "pattern",
+        config: { pattern: "(a+)+" },
+      })) as { success: boolean; error: string };
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("nested quantifier");
+    });
+
+    it("rejects ambiguous quantified alternation patterns", async () => {
+      const result = (await sdk.trigger("mem::sentinel-create", {
+        name: "redos-alt",
+        type: "pattern",
+        config: { pattern: "(a|aa)+$" },
+      })) as { success: boolean; error: string };
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("quantified alternation");
+    });
+
     it("creates an approval sentinel without config", async () => {
       const result = (await sdk.trigger("mem::sentinel-create", {
         name: "needs-approval",

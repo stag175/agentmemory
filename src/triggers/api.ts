@@ -44,7 +44,12 @@ function checkAuth(
   req: ApiRequest,
   secret: string | undefined,
 ): Response | null {
-  if (!secret) return null;
+  if (!secret) {
+    return {
+      status_code: 503,
+      body: { error: "AGENTMEMORY_SECRET is required" },
+    };
+  }
   const auth = req.headers?.["authorization"] || req.headers?.["Authorization"];
   if (
     typeof auth !== "string" ||
@@ -687,17 +692,26 @@ export function registerApiTriggers(
   metricsStore?: MetricsStore,
   provider?: ResilientProvider | { circuitState?: unknown },
 ): void {
+  const effectiveSecret = secret ?? process.env["AGENTMEMORY_SECRET"];
   sdk.registerFunction(
     "middleware::api-auth",
     async (input: {
       request?: { headers?: Record<string, string | undefined> };
     }) => {
-      if (!secret) return { action: "continue" };
+      if (!effectiveSecret) {
+        return {
+          action: "respond",
+          response: {
+            status_code: 503,
+            body: { error: "AGENTMEMORY_SECRET is required" },
+          },
+        };
+      }
       const headers = input?.request?.headers || {};
       const auth = headers["authorization"] || headers["Authorization"];
       if (
         typeof auth !== "string" ||
-        !timingSafeCompare(auth, `Bearer ${secret}`)
+        !timingSafeCompare(auth, `Bearer ${effectiveSecret}`)
       ) {
         return {
           action: "respond",
@@ -732,7 +746,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::config-flags",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const providerKind = detectLlmProviderKind();
       const embeddingProvider = detectEmbeddingProvider() ? "embeddings" : "none";
@@ -804,27 +818,34 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::health", 
-    async (): Promise<Response> => {
+    async (req: ApiRequest = {} as ApiRequest): Promise<Response> => {
       const health = await getLatestHealth(kv);
-      const functionMetrics = metricsStore ? await metricsStore.getAll() : [];
-      const circuitBreaker =
-        provider && "circuitState" in provider ? provider.circuitState : null;
-
       const status = health?.status || "healthy";
       const statusCode = status === "critical" ? 503 : 200;
+      const detailed =
+        !!effectiveSecret && checkAuth(req, effectiveSecret) === null;
+      const body: Record<string, unknown> = {
+        status,
+        service: "agentmemory",
+        version: VERSION,
+      };
 
-      return {
-        status_code: statusCode,
-        body: {
-          status,
-          service: "agentmemory",
-          version: VERSION,
+      if (detailed) {
+        const functionMetrics = metricsStore ? await metricsStore.getAll() : [];
+        const circuitBreaker =
+          provider && "circuitState" in provider ? provider.circuitState : null;
+        Object.assign(body, {
           health: health || null,
           functionMetrics,
           circuitBreaker,
           viewerPort: getBoundViewerPort(),
           viewerSkipped: getViewerSkipped(),
-        },
+        });
+      }
+
+      return {
+        status_code: statusCode,
+        body,
       };
     },
   );
@@ -834,7 +855,6 @@ export function registerApiTriggers(
     config: {
       api_path: "/agentmemory/health",
       http_method: "GET",
-      middleware_function_ids: ["middleware::api-auth"],
     },
   });
 
@@ -1044,7 +1064,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::compress-file", 
     async (req: ApiRequest<{ filePath: string }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       const filePath = asNonEmptyString(body.filePath);
@@ -1069,7 +1089,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::replay::load",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const sessionId = asNonEmptyString(req.query_params?.["sessionId"]);
       if (!sessionId) {
@@ -1090,7 +1110,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::replay::sessions",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const sessions = await kv.list<Session>(KV.sessions);
       sessions.sort((a, b) =>
@@ -1109,7 +1129,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ path?: string; maxFiles?: number }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       const payload: { path?: string; maxFiles?: number } = {};
@@ -1368,7 +1388,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::session::by-commit",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const sha = asNonEmptyString(req.query_params?.["sha"]);
       if (!sha) {
@@ -1403,7 +1423,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::commits",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const branch = asNonEmptyString(req.query_params?.["branch"]);
       const repo = asNonEmptyString(req.query_params?.["repo"]);
@@ -1430,7 +1450,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::sessions",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const sessions = await kv.list<Session>(KV.sessions);
       const normalizedAgentId =
@@ -1466,7 +1486,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::observations",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const sessionId = asNonEmptyString(req.query_params?.["sessionId"]);
       if (!sessionId)
@@ -1501,7 +1521,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ sessionId: string; files: string[] }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::file-context", payload: req.body });
       return { status_code: 200, body: result };
@@ -1523,7 +1543,7 @@ export function registerApiTriggers(
         project?: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (
         !req.body?.sessionId ||
@@ -1599,7 +1619,7 @@ export function registerApiTriggers(
         reviewState?: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (
         !req.body?.content ||
@@ -1653,7 +1673,7 @@ export function registerApiTriggers(
         memoryId?: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.sessionId && !req.body?.memoryId) {
         return {
@@ -1673,7 +1693,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-create",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (
@@ -1733,7 +1753,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-inspect",
     async (req: ApiRequest<{ memoryId?: string }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const memoryId =
         asNonEmptyString(req.body?.memoryId) ??
@@ -1759,7 +1779,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-history",
     async (req: ApiRequest<{ memoryId?: string }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const memoryId =
         asNonEmptyString(req.body?.memoryId) ??
@@ -1785,7 +1805,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-update",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (!asNonEmptyString(body.memoryId)) {
@@ -1821,7 +1841,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-expire",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (!asNonEmptyString(body.memoryId)) {
@@ -1847,7 +1867,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-archive",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (!asNonEmptyString(body.memoryId)) {
@@ -1872,7 +1892,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-restore",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (!asNonEmptyString(body.memoryId)) {
@@ -1897,7 +1917,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-delete",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       const optionalString = (field: string): string | Response | undefined => {
@@ -1962,7 +1982,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-ledger",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const params = req.query_params ?? {};
       const limit = parseOptionalPositiveInt(params.limit);
@@ -1995,7 +2015,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-review-queue",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const params = req.query_params ?? {};
       const limit = parseOptionalPositiveInt(params.limit);
@@ -2015,7 +2035,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::today-in-memory",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const params = req.query_params ?? {};
       const limit = parseOptionalPositiveInt(params.limit);
@@ -2045,7 +2065,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-unlinked-mentions",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const params = req.query_params ?? {};
       const limit = parseOptionalPositiveInt(params.limit);
@@ -2078,7 +2098,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::agent-event-list",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const params = req.query_params ?? {};
       const limit = parseOptionalPositiveInt(params.limit);
@@ -2126,7 +2146,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::agent-event-record",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       const built = buildAgentEventInput(body);
@@ -2152,7 +2172,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ project?: string; minObservations?: number }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::consolidate", payload: req.body });
       return { status_code: 200, body: result };
@@ -2166,7 +2186,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::patterns", 
     async (req: ApiRequest<{ project?: string }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::patterns", payload: req.body });
       return { status_code: 200, body: result };
@@ -2180,7 +2200,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::generate-rules", 
     async (req: ApiRequest<{ project?: string }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::generate-rules", payload: req.body });
       return { status_code: 200, body: result };
@@ -2194,7 +2214,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::rules-resolve",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (req.body !== undefined && !isRecord(req.body)) {
         return { status_code: 400, body: { error: "body must be an object" } };
@@ -2221,7 +2241,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::rules-resolve-get",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({
         function_id: "mem::rules-resolve",
@@ -2248,7 +2268,7 @@ export function registerApiTriggers(
   // forwards them to mem::audit-chain, which coerces + bounds them itself.
   sdk.registerFunction("api::audit-chain",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const payload = pickFields(
         req.query_params ?? {},
@@ -2276,7 +2296,7 @@ export function registerApiTriggers(
   // integrity proof).
   sdk.registerFunction("api::audit-chain-verify",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       return callWhitelistedFunction(
         sdk,
@@ -2298,7 +2318,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::compliance-soc2-evidence",
     async (req: ApiRequest<ComplianceEvidenceInput>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = req.body ?? {};
       if (
@@ -2347,7 +2367,7 @@ export function registerApiTriggers(
   ) => {
     sdk.registerFunction(apiFunctionId,
       async (req: ApiRequest): Promise<Response> => {
-        const authErr = checkAuth(req, secret);
+        const authErr = checkAuth(req, effectiveSecret);
         if (authErr) return authErr;
         return callWhitelistedFunction(sdk, req, memoryFunctionId, allowedFields);
       },
@@ -2398,7 +2418,7 @@ export function registerApiTriggers(
     const memoryFunctionId = route.memoryFunctionId;
     sdk.registerFunction(route.apiFunctionId,
       async (req: ApiRequest): Promise<Response> => {
-        const authErr = checkAuth(req, secret);
+        const authErr = checkAuth(req, effectiveSecret);
         if (authErr) return authErr;
         return callMemoryProposalFunction(sdk, req, memoryFunctionId);
       },
@@ -2489,7 +2509,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ dbPath?: string; step?: string; dryRun?: boolean }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const hasStep =
         typeof req.body?.step === "string" && req.body.step.trim().length > 0;
@@ -2520,7 +2540,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::evict", 
     async (req: ApiRequest<{ dryRun?: boolean }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const dryRun =
         req.query_params?.["dryRun"] === "true" || req.body?.dryRun === true;
@@ -2564,7 +2584,7 @@ export function registerApiTriggers(
         source?: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (
         !req.body?.query &&
@@ -2697,7 +2717,7 @@ export function registerApiTriggers(
         sessionId?: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.query || typeof req.body.query !== "string") {
         return {
@@ -2791,7 +2811,7 @@ export function registerApiTriggers(
   // so help text + the CLI status line carry the same caveat.
   sdk.registerFunction("api::diagnostic-followup",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({
         function_id: "mem::diagnostic::followup-stats",
@@ -2827,7 +2847,7 @@ export function registerApiTriggers(
         after?: number;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.anchor) {
         return { status_code: 400, body: { error: "anchor is required" } };
@@ -2844,7 +2864,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::profile", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const project = req.query_params["project"] as string;
       if (!project) {
@@ -2865,7 +2885,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::export",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       // mem::export already supports maxSessions/offset internally,
       // but the HTTP endpoint hardcoded an empty payload — so /export on a
@@ -2904,7 +2924,7 @@ export function registerApiTriggers(
         dryRun?: boolean;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body: Record<string, unknown> = isRecord(req.body) ? req.body : {};
       if (!body.exportData) {
@@ -2949,7 +2969,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ sourceId: string; targetId: string; type: string }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.sourceId || !req.body?.targetId || !req.body?.type) {
         return {
@@ -2975,7 +2995,7 @@ export function registerApiTriggers(
         newTitle?: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.memoryId || !req.body?.newContent) {
         return {
@@ -2995,7 +3015,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::auto-forget", 
     async (req: ApiRequest<{ dryRun?: boolean }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const dryRun =
         req.query_params?.["dryRun"] === "true" || req.body?.dryRun === true;
@@ -3011,7 +3031,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::claude-bridge-read", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({ function_id: "mem::claude-bridge-read", payload: {} });
@@ -3032,7 +3052,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::claude-bridge-sync", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({ function_id: "mem::claude-bridge-sync", payload: {} });
@@ -3065,7 +3085,7 @@ export function registerApiTriggers(
         offset?: number;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       // Whitelist payload fields explicitly; AGENTS.md security rule:
       // REST endpoints never pass raw req.body through to sdk.trigger.
@@ -3093,7 +3113,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::graph-stats", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({ function_id: "mem::graph-stats", payload: {} });
@@ -3116,7 +3136,7 @@ export function registerApiTriggers(
   // banner action and CLI repair.
   sdk.registerFunction("api::graph-snapshot-rebuild",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({
@@ -3141,7 +3161,7 @@ export function registerApiTriggers(
   // from new extracts (or a one-shot /graph/build replay).
   sdk.registerFunction("api::graph-reset",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({
@@ -3162,7 +3182,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::graph-extract",
     async (req: ApiRequest<{ observations: unknown[] }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (
         !Array.isArray(req.body?.observations) ||
@@ -3193,7 +3213,7 @@ export function registerApiTriggers(
   // and feeds them through `mem::graph-extract` in batches.
   sdk.registerFunction("api::graph-build",
     async (req: ApiRequest<{ batchSize?: number }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const batchSize = Math.max(
         1,
@@ -3254,7 +3274,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::consolidate-pipeline",
     async (req: ApiRequest<{ tier?: string }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({ function_id: "mem::consolidate-pipeline", payload: req.body || {},
@@ -3278,7 +3298,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ itemId: string; itemType: string; project?: string }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.itemId || !req.body?.itemType) {
         return {
@@ -3302,7 +3322,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::team-feed", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const parsedLimit = parseOptionalInt(req.query_params?.["limit"]);
@@ -3322,7 +3342,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::team-profile", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({ function_id: "mem::team-profile", payload: {} });
@@ -3340,7 +3360,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::audit",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const parsedLimit = parseOptionalInt(req.query_params?.["limit"]);
       const entries = await sdk.trigger({ function_id: "mem::audit-query", payload: {
@@ -3360,7 +3380,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ memoryIds: string[]; reason?: string }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.memoryIds || !Array.isArray(req.body.memoryIds)) {
         return {
@@ -3391,7 +3411,7 @@ export function registerApiTriggers(
         dryRun?: boolean;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::governance-bulk", payload: req.body || {} });
       return { status_code: 200, body: result };
@@ -3408,7 +3428,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::snapshots", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({ function_id: "mem::snapshot-list", payload: {} });
@@ -3426,7 +3446,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::snapshot-create", 
     async (req: ApiRequest<{ message?: string }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({ function_id: "mem::snapshot-create", payload: req.body || {},
@@ -3445,7 +3465,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::snapshot-restore", 
     async (req: ApiRequest<{ commitHash: string }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.commitHash) {
         return { status_code: 400, body: { error: "commitHash is required" } };
@@ -3466,7 +3486,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memories",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const memories = await kv.list<import("../types.js").Memory>(KV.memories);
       const latest = req.query_params?.["latest"] === "true";
@@ -3550,7 +3570,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::memory-by-id",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const id = req.path_params?.["id"];
       if (!id || typeof id !== "string") {
@@ -3571,7 +3591,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::semantic-list",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const semantic = await kv.list<import("../types.js").SemanticMemory>(KV.semantic);
       return { status_code: 200, body: { semantic } };
@@ -3585,7 +3605,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::procedural-list",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const procedural = await kv.list<import("../types.js").ProceduralMemory>(KV.procedural);
       return { status_code: 200, body: { procedural } };
@@ -3599,7 +3619,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::relations-list",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const relations = await kv.list<import("../types.js").MemoryRelation>(KV.relations);
       return { status_code: 200, body: { relations } };
@@ -3613,7 +3633,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::vision-search",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       const queryText = asNonEmptyString(body["queryText"]);
@@ -3652,7 +3672,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::vision-embed",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       const imageRef = asNonEmptyString(body["imageRef"]);
@@ -3679,7 +3699,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::slot-list", async (req: ApiRequest): Promise<Response> => {
-    const authErr = checkAuth(req, secret);
+    const authErr = checkAuth(req, effectiveSecret);
     if (authErr) return authErr;
     if (!isSlotsEnabled()) return slotsDisabledResponse();
     const result = await sdk.trigger({ function_id: "mem::slot-list", payload: {} });
@@ -3692,7 +3712,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::slot-get", async (req: ApiRequest): Promise<Response> => {
-    const authErr = checkAuth(req, secret);
+    const authErr = checkAuth(req, effectiveSecret);
     if (authErr) return authErr;
     if (!isSlotsEnabled()) return slotsDisabledResponse();
     const label = asNonEmptyString(req.query_params?.["label"]);
@@ -3711,7 +3731,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::slot-create", async (req: ApiRequest): Promise<Response> => {
-    const authErr = checkAuth(req, secret);
+    const authErr = checkAuth(req, effectiveSecret);
     if (authErr) return authErr;
     if (!isSlotsEnabled()) return slotsDisabledResponse();
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -3761,7 +3781,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::slot-append", async (req: ApiRequest): Promise<Response> => {
-    const authErr = checkAuth(req, secret);
+    const authErr = checkAuth(req, effectiveSecret);
     if (authErr) return authErr;
     if (!isSlotsEnabled()) return slotsDisabledResponse();
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -3784,7 +3804,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::slot-replace", async (req: ApiRequest): Promise<Response> => {
-    const authErr = checkAuth(req, secret);
+    const authErr = checkAuth(req, effectiveSecret);
     if (authErr) return authErr;
     if (!isSlotsEnabled()) return slotsDisabledResponse();
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -3809,7 +3829,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::slot-delete", async (req: ApiRequest): Promise<Response> => {
-    const authErr = checkAuth(req, secret);
+    const authErr = checkAuth(req, effectiveSecret);
     if (authErr) return authErr;
     if (!isSlotsEnabled()) return slotsDisabledResponse();
     const label = asNonEmptyString(req.query_params?.["label"]);
@@ -3828,7 +3848,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::slot-reflect", async (req: ApiRequest): Promise<Response> => {
-    const authErr = checkAuth(req, secret);
+    const authErr = checkAuth(req, effectiveSecret);
     if (authErr) return authErr;
     if (!isSlotsEnabled()) return slotsDisabledResponse();
     if (!isReflectEnabled()) return reflectDisabledResponse();
@@ -3861,7 +3881,7 @@ export function registerApiTriggers(
         edges?: Array<{ type: string; targetActionId: string }>;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.title) {
         return { status_code: 400, body: { error: "title is required" } };
@@ -3887,7 +3907,7 @@ export function registerApiTriggers(
         result?: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.actionId) {
         return { status_code: 400, body: { error: "actionId is required" } };
@@ -3904,7 +3924,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::action-list", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::action-list", payload: {
         status: req.query_params?.["status"],
@@ -3922,7 +3942,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::action-get", 
     async (req: ApiRequest<{ actionId: string }>): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const actionId = req.query_params?.["actionId"] as string;
       if (!actionId) {
@@ -3946,7 +3966,7 @@ export function registerApiTriggers(
         type: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.sourceActionId || !req.body?.targetActionId || !req.body?.type) {
         return { status_code: 400, body: { error: "sourceActionId, targetActionId, and type are required" } };
@@ -3963,7 +3983,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::frontier", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const parsedLimit = parseOptionalInt(req.query_params?.["limit"]);
       const result = await sdk.trigger({ function_id: "mem::frontier", payload: {
@@ -3982,7 +4002,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::next", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::next", payload: {
         project: req.query_params?.["project"],
@@ -4001,7 +4021,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ actionId: string; agentId: string; ttlMs?: number }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.actionId || !req.body?.agentId) {
         return { status_code: 400, body: { error: "actionId and agentId are required" } };
@@ -4020,7 +4040,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ actionId: string; agentId: string; result?: string }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.actionId || !req.body?.agentId) {
         return { status_code: 400, body: { error: "actionId and agentId are required" } };
@@ -4039,7 +4059,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ actionId: string; agentId: string; ttlMs?: number }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.actionId || !req.body?.agentId) {
         return { status_code: 400, body: { error: "actionId and agentId are required" } };
@@ -4056,7 +4076,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::routine-create",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (!asNonEmptyString(body.name) || !Array.isArray(body.steps)) {
@@ -4077,7 +4097,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::routine-list", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::routine-list", payload: {
         frozen: req.query_params?.["frozen"] === "true" ? true : undefined,
@@ -4095,7 +4115,7 @@ export function registerApiTriggers(
     async (
       req: ApiRequest<{ routineId: string; project?: string; initiatedBy?: string }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.routineId) {
         return { status_code: 400, body: { error: "routineId is required" } };
@@ -4112,7 +4132,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::routine-status", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const runId = req.query_params?.["runId"] as string;
       if (!runId) {
@@ -4138,7 +4158,7 @@ export function registerApiTriggers(
         replyTo?: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.from || !req.body?.content) {
         return { status_code: 400, body: { error: "from and content are required" } };
@@ -4155,7 +4175,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::signal-read", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const agentId = req.query_params?.["agentId"] as string;
       if (!agentId) {
@@ -4180,7 +4200,7 @@ export function registerApiTriggers(
   sdk.registerFunction(
     "api::handoff-update",
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const response = await callWhitelistedFunction(
         sdk,
@@ -4209,7 +4229,7 @@ export function registerApiTriggers(
         expiresInMs?: number;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.name) {
         return { status_code: 400, body: { error: "name is required" } };
@@ -4233,7 +4253,7 @@ export function registerApiTriggers(
         result?: unknown;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.checkpointId || !req.body?.status) {
         return { status_code: 400, body: { error: "checkpointId and status are required" } };
@@ -4250,7 +4270,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::checkpoint-list", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::checkpoint-list", payload: {
         status: req.query_params?.["status"],
@@ -4271,7 +4291,7 @@ export function registerApiTriggers(
     ): Promise<Response> => {
       const secretErr = requireConfiguredSecret(secret, "mesh");
       if (secretErr) return secretErr;
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       if (!req.body?.url || !req.body?.name) {
         return { status_code: 400, body: { error: "url and name are required" } };
@@ -4290,7 +4310,7 @@ export function registerApiTriggers(
     async (req: ApiRequest): Promise<Response> => {
       const secretErr = requireConfiguredSecret(secret, "mesh");
       if (secretErr) return secretErr;
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::mesh-list", payload: {} });
       return { status_code: 200, body: result };
@@ -4308,7 +4328,7 @@ export function registerApiTriggers(
     ): Promise<Response> => {
       const secretErr = requireConfiguredSecret(secret, "mesh");
       if (secretErr) return secretErr;
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::mesh-sync", payload: req.body || {} });
       return { status_code: 200, body: result };
@@ -4324,7 +4344,7 @@ export function registerApiTriggers(
     async (req: ApiRequest): Promise<Response> => {
       const secretErr = requireConfiguredSecret(secret, "mesh");
       if (secretErr) return secretErr;
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const result = await sdk.trigger({ function_id: "mem::mesh-receive", payload: req.body || {} });
       return { status_code: 200, body: result };
@@ -4340,7 +4360,7 @@ export function registerApiTriggers(
     async (req: ApiRequest): Promise<Response> => {
       const secretErr = requireConfiguredSecret(secret, "mesh");
       if (secretErr) return secretErr;
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const since = req.query_params?.["since"] as string;
       if (since) {
@@ -4393,7 +4413,7 @@ export function registerApiTriggers(
         project?: string;
       }>,
     ): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       try {
         const result = await sdk.trigger({ function_id: "mem::flow-compress", payload: req.body || {} });
@@ -4414,7 +4434,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::branch-detect", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const cwd = (req.query_params?.["cwd"] as string) || process.cwd();
       const result = await sdk.trigger({ function_id: "mem::detect-worktree", payload: { cwd } });
@@ -4429,7 +4449,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::branch-worktrees", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const cwd = (req.query_params?.["cwd"] as string) || process.cwd();
       const result = await sdk.trigger({ function_id: "mem::list-worktrees", payload: { cwd } });
@@ -4444,7 +4464,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::branch-sessions", 
     async (req: ApiRequest): Promise<Response> => {
-      const authErr = checkAuth(req, secret);
+      const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const cwd = (req.query_params?.["cwd"] as string) || process.cwd();
       const result = await sdk.trigger({ function_id: "mem::branch-sessions", payload: { cwd } });
@@ -4459,7 +4479,7 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::viewer", 
     async (req: ApiRequest): Promise<Response> => {
-      const denied = checkAuth(req, secret);
+      const denied = checkAuth(req, effectiveSecret);
       if (denied) return denied;
       const rendered = renderViewerDocument();
       if (rendered.found) {
@@ -4488,7 +4508,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::sentinel-create",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.name) return { status_code: 400, body: { error: "name is required" } };
@@ -4498,7 +4518,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sentinel-create", config: { api_path: "/agentmemory/sentinels", http_method: "POST" } });
 
   sdk.registerFunction("api::sentinel-trigger",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.sentinelId) return { status_code: 400, body: { error: "sentinelId is required" } };
@@ -4508,7 +4528,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sentinel-trigger", config: { api_path: "/agentmemory/sentinels/trigger", http_method: "POST" } });
 
   sdk.registerFunction("api::sentinel-check",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const result = await sdk.trigger({ function_id: "mem::sentinel-check", payload: {} });
     return { status_code: 200, body: result };
@@ -4516,7 +4536,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sentinel-check", config: { api_path: "/agentmemory/sentinels/check", http_method: "POST" } });
 
   sdk.registerFunction("api::sentinel-cancel",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.sentinelId) return { status_code: 400, body: { error: "sentinelId is required" } };
@@ -4526,7 +4546,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sentinel-cancel", config: { api_path: "/agentmemory/sentinels/cancel", http_method: "POST" } });
 
   sdk.registerFunction("api::sentinel-list",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const params = req.query_params || {};
     const result = await sdk.trigger({ function_id: "mem::sentinel-list", payload: { status: params.status, type: params.type } });
@@ -4535,7 +4555,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sentinel-list", config: { api_path: "/agentmemory/sentinels", http_method: "GET" } });
 
   sdk.registerFunction("api::sketch-create",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.title) return { status_code: 400, body: { error: "title is required" } };
@@ -4545,7 +4565,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sketch-create", config: { api_path: "/agentmemory/sketches", http_method: "POST" } });
 
   sdk.registerFunction("api::sketch-add",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.sketchId || !body?.title) return { status_code: 400, body: { error: "sketchId and title are required" } };
@@ -4555,7 +4575,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sketch-add", config: { api_path: "/agentmemory/sketches/add", http_method: "POST" } });
 
   sdk.registerFunction("api::sketch-promote",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.sketchId) return { status_code: 400, body: { error: "sketchId is required" } };
@@ -4565,7 +4585,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sketch-promote", config: { api_path: "/agentmemory/sketches/promote", http_method: "POST" } });
 
   sdk.registerFunction("api::sketch-discard",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.sketchId) return { status_code: 400, body: { error: "sketchId is required" } };
@@ -4575,7 +4595,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sketch-discard", config: { api_path: "/agentmemory/sketches/discard", http_method: "POST" } });
 
   sdk.registerFunction("api::sketch-list",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const params = req.query_params || {};
     const result = await sdk.trigger({ function_id: "mem::sketch-list", payload: { status: params.status, project: params.project } });
@@ -4584,7 +4604,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sketch-list", config: { api_path: "/agentmemory/sketches", http_method: "GET" } });
 
   sdk.registerFunction("api::sketch-gc",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const result = await sdk.trigger({ function_id: "mem::sketch-gc", payload: {} });
     return { status_code: 200, body: result };
@@ -4592,7 +4612,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::sketch-gc", config: { api_path: "/agentmemory/sketches/gc", http_method: "POST" } });
 
   sdk.registerFunction("api::crystallize",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.actionIds) return { status_code: 400, body: { error: "actionIds is required" } };
@@ -4602,7 +4622,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::crystallize", config: { api_path: "/agentmemory/crystals/create", http_method: "POST" } });
 
   sdk.registerFunction("api::crystal-list",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const params = req.query_params || {};
     const limit = parseOptionalPositiveInt(params.limit);
@@ -4618,7 +4638,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::crystal-list", config: { api_path: "/agentmemory/crystals", http_method: "GET" } });
 
   sdk.registerFunction("api::auto-crystallize",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     const result = await sdk.trigger({ function_id: "mem::auto-crystallize", payload: body || {} });
@@ -4627,7 +4647,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::auto-crystallize", config: { api_path: "/agentmemory/crystals/auto", http_method: "POST" } });
 
   sdk.registerFunction("api::diagnose",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     const result = await sdk.trigger({ function_id: "mem::diagnose", payload: body || {} });
@@ -4636,7 +4656,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::diagnose", config: { api_path: "/agentmemory/diagnostics", http_method: "POST" } });
 
   sdk.registerFunction("api::heal",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     const result = await sdk.trigger({ function_id: "mem::heal", payload: body || {} });
@@ -4645,7 +4665,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::heal", config: { api_path: "/agentmemory/diagnostics/heal", http_method: "POST" } });
 
   sdk.registerFunction("api::facet-tag",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.targetId || !body?.dimension || !body?.value) return { status_code: 400, body: { error: "targetId, dimension, and value are required" } };
@@ -4655,7 +4675,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::facet-tag", config: { api_path: "/agentmemory/facets", http_method: "POST" } });
 
   sdk.registerFunction("api::facet-untag",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.targetId || !body?.dimension) return { status_code: 400, body: { error: "targetId and dimension are required" } };
@@ -4665,7 +4685,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::facet-untag", config: { api_path: "/agentmemory/facets/remove", http_method: "POST" } });
 
   sdk.registerFunction("api::facet-query",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     const result = await sdk.trigger({ function_id: "mem::facet-query", payload: body || {} });
@@ -4674,7 +4694,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::facet-query", config: { api_path: "/agentmemory/facets/query", http_method: "POST" } });
 
   sdk.registerFunction("api::facet-get",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const params = req.query_params || {};
     if (!params.targetId) return { status_code: 400, body: { error: "targetId query param is required" } };
@@ -4684,7 +4704,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::facet-get", config: { api_path: "/agentmemory/facets", http_method: "GET" } });
 
   sdk.registerFunction("api::facet-stats",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const params = req.query_params || {};
     const result = await sdk.trigger({ function_id: "mem::facet-stats", payload: { targetType: params.targetType } });
@@ -4693,7 +4713,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::facet-stats", config: { api_path: "/agentmemory/facets/stats", http_method: "GET" } });
 
   sdk.registerFunction("api::verify",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.id || typeof body.id !== "string") return { status_code: 400, body: { error: "id is required" } };
@@ -4703,7 +4723,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::verify", config: { api_path: "/agentmemory/verify", http_method: "POST" } });
 
   sdk.registerFunction("api::cascade-update",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.supersededMemoryId || typeof body.supersededMemoryId !== "string") {
@@ -4715,7 +4735,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::cascade-update", config: { api_path: "/agentmemory/cascade-update", http_method: "POST" } });
 
   sdk.registerFunction("api::lesson-save",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.content || typeof body.content !== "string") return { status_code: 400, body: { error: "content is required" } };
@@ -4737,7 +4757,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::lesson-save", config: { api_path: "/agentmemory/lessons", http_method: "POST" } });
 
   sdk.registerFunction("api::lesson-list",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const params = req.query_params || {};
     const minConfidence = parseOptionalFiniteNumber(params.minConfidence);
@@ -4765,7 +4785,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::lesson-list", config: { api_path: "/agentmemory/lessons", http_method: "GET" } });
 
   sdk.registerFunction("api::lesson-search",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.query || typeof body.query !== "string") return { status_code: 400, body: { error: "query is required" } };
@@ -4775,7 +4795,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::lesson-search", config: { api_path: "/agentmemory/lessons/search", http_method: "POST" } });
 
   sdk.registerFunction("api::lesson-strengthen",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.lessonId || typeof body.lessonId !== "string") return { status_code: 400, body: { error: "lessonId is required" } };
@@ -4785,7 +4805,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::lesson-strengthen", config: { api_path: "/agentmemory/lessons/strengthen", http_method: "POST" } });
 
   sdk.registerFunction("api::obsidian-export", async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = (req.body as Record<string, unknown>) || {};
     const vaultDir = asNonEmptyString(body.vaultDir);
@@ -4802,7 +4822,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::obsidian-export", config: { api_path: "/agentmemory/obsidian/export", http_method: "POST" } });
 
   sdk.registerFunction("api::reflect",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = (req.body as Record<string, unknown>) || {};
     const result = await sdk.trigger({ function_id: "mem::reflect", payload: {
@@ -4814,7 +4834,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::reflect", config: { api_path: "/agentmemory/reflect", http_method: "POST" } });
 
   sdk.registerFunction("api::insight-list",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const params = req.query_params || {};
     const minConfidence = parseOptionalFiniteNumber(params.minConfidence);
@@ -4841,7 +4861,7 @@ export function registerApiTriggers(
   sdk.registerTrigger({ type: "http", function_id: "api::insight-list", config: { api_path: "/agentmemory/insights", http_method: "GET" } });
 
   sdk.registerFunction("api::insight-search",  async (req: ApiRequest) => {
-    const denied = checkAuth(req, secret);
+    const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
     if (!body?.query || typeof body.query !== "string") return { status_code: 400, body: { error: "query is required" } };

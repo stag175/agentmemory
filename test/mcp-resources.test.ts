@@ -7,6 +7,8 @@ vi.mock("../src/logger.js", () => ({
 import { registerMcpEndpoints } from "../src/mcp/server.js";
 import type { Session, SessionSummary, Memory } from "../src/types.js";
 
+const MCP_TEST_SECRET = "test-secret";
+
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
   return {
@@ -57,10 +59,13 @@ function mockSdk() {
   };
 }
 
-function makeReq(body?: unknown, headers?: Record<string, string>) {
+function makeReq(body?: unknown, headers?: Record<string, string> | null) {
   return {
     body,
-    headers: headers || {},
+    headers:
+      headers === null
+        ? {}
+        : { authorization: `Bearer ${MCP_TEST_SECRET}`, ...(headers || {}) },
     query_params: {},
   };
 }
@@ -72,7 +77,7 @@ describe("MCP Resources", () => {
   beforeEach(() => {
     sdk = mockSdk();
     kv = mockKV();
-    registerMcpEndpoints(sdk as never, kv as never);
+    registerMcpEndpoints(sdk as never, kv as never, MCP_TEST_SECRET);
   });
 
   it("lists 6 resources", async () => {
@@ -246,17 +251,27 @@ describe("MCP Resources", () => {
     expect(result.status_code).toBe(404);
   });
 
+  it("returns 503 when auth is not configured", async () => {
+    const unconfiguredSdk = mockSdk();
+    const unconfiguredKv = mockKV();
+    registerMcpEndpoints(unconfiguredSdk as never, unconfiguredKv as never);
+
+    const fn = unconfiguredSdk.getFunction("mcp::resources::list")!;
+    const result = (await fn(makeReq())) as { status_code: number };
+    expect(result.status_code).toBe(503);
+  });
+
   it("returns 401 when auth fails", async () => {
     const authedSdk = mockSdk();
     const authedKv = mockKV();
-    registerMcpEndpoints(authedSdk as never, authedKv as never, "test-secret");
+    registerMcpEndpoints(authedSdk as never, authedKv as never, MCP_TEST_SECRET);
 
     const fn = authedSdk.getFunction("mcp::resources::list")!;
-    const result = (await fn(makeReq())) as { status_code: number };
+    const result = (await fn(makeReq(undefined, null))) as { status_code: number };
     expect(result.status_code).toBe(401);
 
     const authedResult = (await fn(
-      makeReq(undefined, { authorization: "Bearer test-secret" }),
+      makeReq(undefined, { authorization: `Bearer ${MCP_TEST_SECRET}` }),
     )) as { status_code: number };
     expect(authedResult.status_code).toBe(200);
   });

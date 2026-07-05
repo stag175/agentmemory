@@ -678,8 +678,7 @@ describe("IndexPersistence", () => {
 
     await expect(kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).resolves.toBeNull();
 
-    vi.advanceTimersByTime(5000);
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(5000);
 
     const saved = await kv.get<string>(BM25_SCOPE, BM25_MANIFEST_KEY);
     expect(saved).not.toBeNull();

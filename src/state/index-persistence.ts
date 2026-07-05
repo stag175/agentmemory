@@ -83,9 +83,10 @@ export class IndexPersistence {
     // save() would surface as unhandledRejection and crash the process
     // under sustained iii-engine write timeouts (issue #204). Funnel
     // rejections through logFailure() instead.
-    this.timer = setTimeout(() => {
-      this.save().catch((err) => this.logFailure(err));
-    }, DEBOUNCE_MS);
+    this.timer = setTimeout(
+      () => this.save().catch((err) => this.logFailure(err)),
+      DEBOUNCE_MS,
+    );
   }
 
   async save(): Promise<void> {

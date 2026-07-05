@@ -15,6 +15,37 @@ import type {
 } from "../types.js";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { request as httpsRequest } from "node:https";
+
+const MESH_ALLOWED_PROTOCOLS = new Set(["https:"]);
+const MESH_REQUEST_TIMEOUT_MS = 30_000;
+const MESH_RESPONSE_MAX_BYTES = 10 * 1024 * 1024;
+
+type MeshAddressResolver = (host: string) => Promise<Array<{ address: string }>>;
+type MeshHttpResponse<T> = {
+  ok: boolean;
+  status: number;
+  json: () => Promise<T>;
+};
+type MeshHttpRequester = <T>(
+  peerUrl: string,
+  path: string,
+  init: {
+    method?: "GET" | "POST";
+    headers?: Record<string, string>;
+    body?: string;
+  },
+  resolveHost: MeshAddressResolver,
+) => Promise<MeshHttpResponse<T>>;
+
+type ResolvedMeshUrl = {
+  url: URL;
+  addresses: string[];
+};
+
+async function defaultResolveHost(host: string): Promise<Array<{ address: string }>> {
+  return lookup(host, { all: true });
+}
 
 function isPrivateIP(ip: string): boolean {
   if (ip === "127.0.0.1" || ip === "::1" || ip === "0.0.0.0") return true;
@@ -29,29 +60,116 @@ function isPrivateIP(ip: string): boolean {
   return false;
 }
 
-async function isAllowedUrl(urlStr: string): Promise<boolean> {
+async function resolveAllowedMeshUrl(
+  urlStr: string,
+  resolveHost: MeshAddressResolver = defaultResolveHost,
+): Promise<ResolvedMeshUrl | null> {
   try {
     const parsed = new URL(urlStr);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-    if (parsed.username || parsed.password) return false;
+    if (!MESH_ALLOWED_PROTOCOLS.has(parsed.protocol)) return null;
+    if (parsed.username || parsed.password) return null;
+    if (parsed.hash || parsed.search) return null;
     const host = parsed.hostname.toLowerCase();
 
-    if (host === "localhost") return false;
-    if (isIP(host) && isPrivateIP(host)) return false;
-
-    if (!isIP(host)) {
-      try {
-        const resolved = await lookup(host, { all: true });
-        if (resolved.some((r) => isPrivateIP(r.address))) return false;
-      } catch {
-        // DNS resolution failed — allow the URL (the actual fetch will fail if unreachable)
-      }
+    if (host === "localhost") return null;
+    if (isIP(host)) {
+      if (isPrivateIP(host)) return null;
+      return { url: parsed, addresses: [host] };
     }
 
-    return true;
+    const resolved = await resolveHost(host);
+    if (resolved.length === 0) return null;
+    if (resolved.some((r) => isPrivateIP(r.address))) return null;
+
+    return { url: parsed, addresses: resolved.map((r) => r.address) };
   } catch {
-    return false;
+    return null;
   }
+}
+
+async function isAllowedUrl(
+  urlStr: string,
+  resolveHost: MeshAddressResolver = defaultResolveHost,
+): Promise<boolean> {
+  return (await resolveAllowedMeshUrl(urlStr, resolveHost)) !== null;
+}
+
+function endpointForPeer(peerUrl: URL, path: string): URL {
+  const base = peerUrl.href.replace(/\/+$/, "");
+  return new URL(`${base}${path}`);
+}
+
+function pinnedMeshRequest<T>(
+  peerUrl: string,
+  path: string,
+  init: {
+    method?: "GET" | "POST";
+    headers?: Record<string, string>;
+    body?: string;
+  },
+  resolveHost: MeshAddressResolver,
+): Promise<MeshHttpResponse<T>> {
+  return new Promise((resolveRequest, reject) => {
+    resolveAllowedMeshUrl(peerUrl, resolveHost)
+      .then((allowed) => {
+        if (!allowed) {
+          reject(new Error("peer URL blocked: HTTPS public address required"));
+          return;
+        }
+
+        const endpoint = endpointForPeer(allowed.url, path);
+        const address = allowed.addresses[0];
+        if (!address) {
+          reject(new Error("peer URL blocked: host resolution failed"));
+          return;
+        }
+
+        const request = httpsRequest(
+          {
+            protocol: endpoint.protocol,
+            hostname: address,
+            servername: endpoint.hostname,
+            port: endpoint.port || 443,
+            method: init.method || "GET",
+            path: `${endpoint.pathname}${endpoint.search}`,
+            headers: {
+              ...init.headers,
+              Host: endpoint.host,
+            },
+            timeout: MESH_REQUEST_TIMEOUT_MS,
+          },
+          (response) => {
+            const chunks: Buffer[] = [];
+            let total = 0;
+            response.on("data", (chunk: Buffer) => {
+              total += chunk.length;
+              if (total > MESH_RESPONSE_MAX_BYTES) {
+                request.destroy(new Error("mesh response too large"));
+                return;
+              }
+              chunks.push(chunk);
+            });
+            response.on("end", () => {
+              const text = Buffer.concat(chunks).toString("utf-8");
+              resolveRequest({
+                ok:
+                  response.statusCode !== undefined &&
+                  response.statusCode >= 200 &&
+                  response.statusCode < 300,
+                status: response.statusCode || 0,
+                json: async () => JSON.parse(text || "{}") as T,
+              });
+            });
+          },
+        );
+
+        request.on("error", reject);
+        request.on("timeout", () => request.destroy(new Error("mesh request timed out")));
+        if (init.body !== undefined) request.write(init.body);
+        request.end();
+      })
+      .catch(reject);
+  });
 }
 
 const DEFAULT_SHARED_SCOPES = [
@@ -140,7 +258,14 @@ export function registerMeshFunction(
   sdk: ISdk,
   kv: StateKV,
   meshAuthToken?: string,
+  options: {
+    resolveHost?: MeshAddressResolver;
+    requestJson?: MeshHttpRequester;
+  } = {},
 ): void {
+  const resolveHost = options.resolveHost ?? defaultResolveHost;
+  const requestJson = options.requestJson ?? pinnedMeshRequest;
+
   sdk.registerFunction("mem::mesh-register",
     async (data: {
       url: string;
@@ -155,8 +280,8 @@ export function registerMeshFunction(
         return { success: false, error: "url and name are required" };
       }
 
-      if (!(await isAllowedUrl(data.url))) {
-        return { success: false, error: "URL blocked: private/local address not allowed" };
+      if (!(await isAllowedUrl(data.url, resolveHost))) {
+        return { success: false, error: "URL blocked: HTTPS public address required" };
       }
 
       const existing = await kv.list<MeshPeer>(KV.mesh);
@@ -244,13 +369,13 @@ export function registerMeshFunction(
         const scopes = data.scopes || peer.sharedScopes;
 
         try {
-          if (!(await isAllowedUrl(peer.url))) {
-            result.errors.push("peer URL blocked: private/local address not allowed");
+          if (!(await isAllowedUrl(peer.url, resolveHost))) {
+            result.errors.push("peer URL blocked: HTTPS public address required");
             peer.status = "error";
             await kv.set(KV.mesh, peer.id, peer);
             await recordAudit(kv, "mesh_sync", "mem::mesh-sync", [peer.id], {
               action: "mesh.sync.error",
-              error: "peer URL blocked: private/local address not allowed",
+              error: "peer URL blocked: HTTPS public address required",
             });
             results.push(result);
             continue;
@@ -259,18 +384,16 @@ export function registerMeshFunction(
           if (direction === "push" || direction === "both") {
             const pushData = await collectSyncData(kv, scopes, peer.lastSyncAt, peer.syncFilter);
             try {
-              const response = await fetch(`${peer.url}/agentmemory/mesh/receive`, {
+              const response = await requestJson<{ accepted: number }>(peer.url, "/agentmemory/mesh/receive", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
                   Authorization: `Bearer ${meshAuthToken}`,
                 },
                 body: JSON.stringify(pushData),
-                signal: AbortSignal.timeout(30000),
-                redirect: "error",
-              });
+              }, resolveHost);
               if (response.ok) {
-                const body = (await response.json()) as { accepted: number };
+                const body = await response.json();
                 result.pushed = body.accepted || 0;
               } else {
                 result.errors.push(`push failed: HTTP ${response.status}`);
@@ -282,21 +405,21 @@ export function registerMeshFunction(
 
           if (direction === "pull" || direction === "both") {
             try {
-              const response = await fetch(
-                `${peer.url}/agentmemory/mesh/export?since=${peer.lastSyncAt || ""}`,
+              const response = await requestJson<{
+                memories?: Memory[];
+                actions?: Action[];
+              }>(
+                peer.url,
+                `/agentmemory/mesh/export?since=${encodeURIComponent(peer.lastSyncAt || "")}`,
                 {
                   headers: {
                     Authorization: `Bearer ${meshAuthToken}`,
                   },
-                  signal: AbortSignal.timeout(30000),
-                  redirect: "error",
                 },
+                resolveHost,
               );
               if (response.ok) {
-                const pullData = (await response.json()) as {
-                  memories?: Memory[];
-                  actions?: Action[];
-                };
+                const pullData = await response.json();
                 result.pulled = await applySyncData(kv, pullData, scopes);
               } else {
                 result.errors.push(`pull failed: HTTP ${response.status}`);

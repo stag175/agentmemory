@@ -16,6 +16,9 @@ import { handleToolCall } from "../src/mcp/standalone.js";
 import { resetHandleForTests, setLivezProbe } from "../src/mcp/rest-proxy.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 
+const TEST_SECRET = "test-secret";
+const AUTH_HEADERS = { authorization: `Bearer ${TEST_SECRET}` };
+
 const tempRoots: string[] = [];
 
 function tempDir(): string {
@@ -46,7 +49,7 @@ describe("rules resolver public adapters", () => {
   function registerRestForRoot(root: string) {
     const sdk = mockSdk();
     registerRulesResolverFunction(sdk as never, { allowedRoots: [root] });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
     return sdk;
   }
 
@@ -58,7 +61,7 @@ describe("rules resolver public adapters", () => {
     const sdk = registerRestForRoot(root);
 
     const response = await sdk.trigger("api::rules-resolve", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: {
         workspaceRoot: root,
         // Caller-supplied glob must be IGNORED on the network surface, so the
@@ -91,7 +94,7 @@ describe("rules resolver public adapters", () => {
     const sdk = registerRestForRoot(root);
 
     const response = await sdk.trigger("api::rules-resolve-get", {
-      headers: {},
+      headers: AUTH_HEADERS,
       query_params: {
         workspaceRoot: root,
         // Caller asks for content; network surface must still strip it.
@@ -115,7 +118,7 @@ describe("rules resolver public adapters", () => {
     const sdk = registerRestForRoot(allowedRoot);
 
     const forbidden = await sdk.trigger("api::rules-resolve", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { workspaceRoot: outsideRoot },
     }) as { status_code: number; body: { success: boolean; code: string; error: string } };
     expect(forbidden.status_code).toBe(400);
@@ -129,14 +132,14 @@ describe("rules resolver public adapters", () => {
     const sdk = registerRestForRoot(root);
 
     const missing = await sdk.trigger("api::rules-resolve", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { workspaceRoot: join(root, "missing") },
     }) as { status_code: number; body: { error: string } };
     expect(missing.status_code).toBe(400);
     expect(missing.body.error).toContain("workspaceRoot could not be read");
 
     const badGlob = await sdk.trigger("api::rules-resolve", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: { workspaceRoot: root, instructionGlobs: ["../secret.md"] },
     }) as { status_code: number; body: { error: string } };
     expect(badGlob.status_code).toBe(400);
@@ -155,10 +158,10 @@ describe("rules resolver public adapters", () => {
     // resolution succeeds while content stays stripped.
     const sdk = mockSdk();
     registerRulesResolverFunction(sdk as never, { allowedRoots: [root] });
-    registerMcpEndpoints(sdk as never, mockKV() as never, undefined);
+    registerMcpEndpoints(sdk as never, mockKV() as never, TEST_SECRET);
 
     const response = await sdk.trigger("mcp::tools::call", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: {
         name: "memory_rules_resolve",
         arguments: {
@@ -210,7 +213,7 @@ describe("import REST adapter boundary", () => {
       importPayload = payload as Record<string, unknown>;
       return { success: true };
     });
-    registerApiTriggers(sdk as never, mockKV() as never, undefined);
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
 
     const exportData = {
       version: "0.9.27",
@@ -221,7 +224,7 @@ describe("import REST adapter boundary", () => {
       summaries: [],
     };
     const response = await sdk.trigger("api::import", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: {
         exportData,
         strategy: "merge",
@@ -239,7 +242,7 @@ describe("import REST adapter boundary", () => {
     });
 
     const rejected = await sdk.trigger("api::import", {
-      headers: {},
+      headers: AUTH_HEADERS,
       body: {
         exportData,
         strategy: "overwrite",

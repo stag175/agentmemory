@@ -92,16 +92,18 @@ PRs with commits lacking sign-off will not merge.
 
 ## Release process
 
-Maintainers cut releases. Every bump touches 8 files in lockstep:
+Maintainers cut releases. Every bump touches versioned files in lockstep:
 
 1. `package.json`
-2. `package-lock.json` (top + `packages[""].version`)
-3. `plugin/.claude-plugin/plugin.json`
+2. `plugin/.claude-plugin/plugin.json`
+3. `plugin/plugin.json`
 4. `packages/mcp/package.json` (self + `~x.y.z` pin on the main package)
 5. `src/version.ts` (extend the union, assign)
 6. `src/types.ts` (`ExportData.version` union)
 7. `src/functions/export-import.ts` (`supportedVersions` Set)
 8. `test/export-import.test.ts` (assertion)
+
+Do not commit lockfiles. CI and publish jobs generate a temporary `package-lock.json` with `npm install --package-lock-only --legacy-peer-deps --no-audit --no-fund`, install from it with `npm ci`, and leave it gitignored. For dependency security review, generate the same temporary lockfile locally and run `npm audit`; do not include the generated lockfile in the release PR.
 
 Then: CHANGELOG section, PR, merge, tag, GitHub release. The `Publish to npm` workflow picks up the release trigger and publishes `@agentmemory/agentmemory`, `@agentmemory/mcp`, and `@agentmemory/fs-watcher` to npm with provenance.
 

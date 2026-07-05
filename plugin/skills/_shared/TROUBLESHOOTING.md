@@ -20,7 +20,8 @@ API directly:
 
 1. Set `AGENTMEMORY_URL` to the daemon base URL (default `http://localhost:3111`).
 2. Add `Authorization: Bearer $AGENTMEMORY_SECRET` ONLY when `AGENTMEMORY_SECRET`
-   is set. The default localhost daemon is open and rejects a stray header.
+   is set. The default loopback-only daemon is open and rejects a stray header;
+   set a secret before exposing it beyond `127.0.0.1`/`localhost`.
 
 Endpoint map by skill:
 

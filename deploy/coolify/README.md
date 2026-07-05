@@ -18,6 +18,9 @@ provisioning, log aggregation, and the deploy webhook for you.
 - An HTTP health-check at `/agentmemory/livez` declared in the
   Dockerfile (`HEALTHCHECK` directive). Coolify reuses it for
   rolling-deploy decisions.
+- `AGENTMEMORY_SECRET` is required by the Compose file before the
+  public endpoint starts, so the REST API never comes up
+  unauthenticated behind the proxy.
 
 ## One-time setup
 
@@ -30,11 +33,13 @@ provisioning, log aggregation, and the deploy webhook for you.
 3. **Build Pack**: select *Docker Compose*.
 4. **Base Directory**: `deploy/coolify`
 5. **Compose Path**: `docker-compose.yml`
-6. Click **Save**, then on the application settings screen set a
+6. Add an environment variable named `AGENTMEMORY_SECRET` with a strong
+   random value, for example the output of `openssl rand -hex 32`.
+7. Click **Save**, then on the application settings screen set a
    **Domain** in the form `https://<your-fqdn>:3111` (the `:3111`
    suffix tells Coolify's proxy which container port to forward to;
    it still serves over 443/80 publicly).
-7. Click **Deploy**.
+8. Click **Deploy**.
 
 That's it. Coolify clones the repo, builds the Dockerfile under
 `deploy/coolify/`, provisions the `agentmemory-data` named volume on
@@ -42,13 +47,11 @@ the host, attaches Traefik (or Caddy) for the public domain, and starts
 the service. The container is reachable only through the proxy — there
 is no published host port.
 
-## Capture the HMAC secret
+## Set the HMAC secret
 
-Once the deploy logs show the service is up, open the application's
-**Logs** tab in Coolify and search for `AGENTMEMORY_SECRET=`. You will
-see exactly one line of the form `AGENTMEMORY_SECRET=<64 hex chars>`.
-Copy it into your client environment (`~/.bashrc`, Claude Desktop
-config, etc.). The secret is never printed again on subsequent boots.
+Coolify stores `AGENTMEMORY_SECRET` as an application environment
+variable. Save the value when you create it, then copy the same value
+into your client environment (`~/.bashrc`, Claude Desktop config, etc.).
 
 ## Verify the deployment
 
@@ -90,14 +93,9 @@ share the viewer with a teammate without giving them SSH.
 
 ## Rotate the HMAC secret
 
-```bash
-ssh <user>@<coolify-host>
-docker exec -it <container-name> sh -c "rm /data/.hmac"
-exit
-```
-
-Then click **Redeploy** in the Coolify dashboard. The next boot prints
-a fresh secret to the logs.
+Update `AGENTMEMORY_SECRET` in the Coolify application environment and
+click **Redeploy**. Update every client with the new value. Old tokens
+stop working immediately.
 
 ## Back up `/data`
 

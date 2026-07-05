@@ -4,12 +4,13 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        AGENTMEMORY_VERSION: "0.9.27"
+        AGENTMEMORY_VERSION: "0.9.28"
         III_VERSION: "0.11.2"
         III_SDK_VERSION: "0.11.2"
     restart: unless-stopped
     environment:
       SERVICE_FQDN_AGENTMEMORY_3111: ${SERVICE_FQDN_AGENTMEMORY_3111}
+      AGENTMEMORY_SECRET: ${AGENTMEMORY_SECRET:?Set AGENTMEMORY_SECRET before deploying the public Coolify endpoint}
     expose:
       - "3111"
     volumes:

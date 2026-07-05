@@ -1217,6 +1217,13 @@ async function deleteOneMemory(data: {
   const auditDetails = sourceLinkedAuditDetails(data.auditContext);
   if (data.mode === "hard") {
     const history = await memoryHistory(data.kv, data.existing.id);
+    const now = new Date().toISOString();
+    await recordAudit(data.kv, "delete", "mem::memory-delete", [data.existing.id], {
+      action: "hard_delete",
+      reason: data.meta.reason,
+      purgedRevisionCount: history.length,
+      ...auditDetails,
+    });
     await Promise.all(
       history.map((revision) =>
         data.kv.delete(KV.memoryHistory, revision.id),
@@ -1227,13 +1234,6 @@ async function deleteOneMemory(data: {
     getSearchIndex().remove(data.existing.id);
     vectorIndexRemove(data.existing.id);
     await flushIndexSave();
-    const now = new Date().toISOString();
-    await recordAudit(data.kv, "delete", "mem::memory-delete", [data.existing.id], {
-      action: "hard_delete",
-      reason: data.meta.reason,
-      purgedRevisionCount: history.length,
-      ...auditDetails,
-    });
     await safeRecordAgentEvent(data.kv, {
       type: "memory_deleted",
       timestamp: now,

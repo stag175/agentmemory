@@ -76,6 +76,27 @@ function makeObs(
   };
 }
 
+async function expectAccessCount(
+  kv: ReturnType<typeof mockKV>,
+  memoryId: string,
+  count: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const log = (await kv.get("mem:access", memoryId)) as {
+      count: number;
+    } | null;
+    if (log?.count === count) {
+      expect(log.count).toBe(count);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const log = (await kv.get("mem:access", memoryId)) as {
+    count: number;
+  } | null;
+  expect(log?.count).toBe(count);
+}
+
 describe("Smart Search Function", () => {
   let sdk: ReturnType<typeof mockSdk>;
   let kv: ReturnType<typeof mockKV>;
@@ -932,28 +953,13 @@ describe("Smart Search Function", () => {
 
   it("compact mode records access for every returned observation id (#119)", async () => {
     await sdk.trigger("mem::smart-search", { query: "auth" });
-    // recordAccessBatch is fire-and-forget — let the microtask queue drain.
-    await new Promise((r) => setImmediate(r));
-
-    const log1 = (await kv.get("mem:access", "obs_1")) as {
-      count: number;
-    } | null;
-    const log2 = (await kv.get("mem:access", "obs_2")) as {
-      count: number;
-    } | null;
-
-    expect(log1?.count).toBe(1);
-    expect(log2?.count).toBe(1);
+    await expectAccessCount(kv, "obs_1", 1);
+    await expectAccessCount(kv, "obs_2", 1);
   });
 
   it("expand mode records access for expanded observation ids (#119)", async () => {
     await sdk.trigger("mem::smart-search", { expandIds: ["obs_1"] });
-    await new Promise((r) => setImmediate(r));
-
-    const log = (await kv.get("mem:access", "obs_1")) as {
-      count: number;
-    } | null;
-    expect(log?.count).toBe(1);
+    await expectAccessCount(kv, "obs_1", 1);
   });
 
   describe("lesson inclusion (#lesson-visibility)", () => {

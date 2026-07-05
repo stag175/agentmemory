@@ -236,6 +236,11 @@ export async function vectorIndexAddBatchGuarded(
 
   let ok = 0
   let fail = 0
+  const externalPoints: Array<{
+    id: string
+    vector: number[]
+    payload: { sessionId: string }
+  }> = []
   for (let i = 0; i < items.length; i++) {
     const item = items[i]
     const embedding = embeddings[i]
@@ -252,6 +257,11 @@ export async function vectorIndexAddBatchGuarded(
     }
     try {
       vi.add(item.id, item.sessionId, embedding)
+      externalPoints.push({
+        id: item.id,
+        vector: Array.from(embedding),
+        payload: { sessionId: item.sessionId },
+      })
       ok++
     } catch (err) {
       logger.warn("vector-index add batch: index write failed — skipping item", {
@@ -260,6 +270,17 @@ export async function vectorIndexAddBatchGuarded(
         error: err instanceof Error ? err.message : String(err),
       })
       fail++
+    }
+  }
+  const store = retrievalStore
+  if (store && externalPoints.length > 0) {
+    try {
+      await store.upsert(externalPoints)
+    } catch (err) {
+      logger.warn("retrieval store batch upsert failed — local adds kept", {
+        batchSize: externalPoints.length,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
   return { ok, fail }

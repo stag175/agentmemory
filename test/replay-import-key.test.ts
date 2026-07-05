@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,6 +62,12 @@ describe("import-jsonl re-key on parsed.sessionId (#775)", () => {
 
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), "replay-import-key-"));
+    process.env["AGENTMEMORY_REPLAY_IMPORT_ROOTS"] = tmpRoot;
+  });
+
+  afterEach(() => {
+    delete process.env["AGENTMEMORY_REPLAY_IMPORT_ROOTS"];
+    rmSync(tmpRoot, { recursive: true, force: true });
   });
 
   function writeFixture(sessionId: string, ts = "2026-04-17T10:00:00.000Z") {

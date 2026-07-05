@@ -1,9 +1,9 @@
 # Deploy agentmemory on Railway
 
 This template runs agentmemory on a single Railway service with a
-persistent volume mounted at `/data`. The HMAC secret is generated on
-first boot and persisted to the volume — you read it once from the
-deploy logs and copy it into your client.
+persistent volume mounted at `/data`. Because the REST API is published
+through Railway's HTTPS edge, the container refuses to start until
+`AGENTMEMORY_SECRET` is set on the service.
 
 ## What you get
 
@@ -11,9 +11,8 @@ deploy logs and copy it into your client.
 - A persistent Railway Volume at `/data` for memories, BM25 index, and
   stream backlog
 - Railway healthcheck against `/agentmemory/livez`
-- The HMAC bearer secret is generated on first boot inside the
-  container and persisted to `/data/.hmac` (chmod 600); the operator
-  copies it from the deploy logs once.
+- The HMAC bearer secret is supplied from Railway Variables and
+  propagated to agentmemory at runtime.
 - The deploy uses `requiredMountPath: /data` so Railway refuses to
   start the service if no volume is attached at that path — first
   deploy must create the volume from the dashboard.
@@ -22,13 +21,17 @@ deploy logs and copy it into your client.
 
 1. Click **Deploy from GitHub** in the Railway dashboard and pick the
    `rohitg00/agentmemory` repo.
-2. Set the **Config-as-Code Path** under the service Settings to
-   `deploy/railway/railway.json`. Railway picks up the Dockerfile path
-   from there.
-3. Open the service's **Volumes** tab and add a volume mounted at
+2. Set the service **Root Directory** to `deploy/railway`. The
+   `railway.json`, Dockerfile, and Docker build context are then all
+   relative to that directory.
+3. Add service variables:
+   - `PORT=3111`
+   - `AGENTMEMORY_SECRET=<64+ random chars>` (for example, the output
+     of `openssl rand -hex 32`)
+4. Open the service's **Volumes** tab and add a volume mounted at
    `/data` (Railway volumes are configured in the dashboard or via
    `railway volume add`, not in `railway.json`).
-4. Click **Deploy**.
+5. Click **Deploy**.
 
 ## Deploy via Railway CLI
 
@@ -36,22 +39,21 @@ deploy logs and copy it into your client.
 # Install: https://docs.railway.com/guides/cli
 railway login
 railway init                                            # link a new project
+railway variables --set "PORT=3111"
+railway variables --set "AGENTMEMORY_SECRET=$(openssl rand -hex 32)"
 railway up --service agentmemory                        # builds + deploys
 railway volume add --service agentmemory --mount /data  # attach persistent volume
 railway redeploy                                        # restart with the volume
 ```
 
-## Capture the HMAC secret
+Run the CLI commands from `deploy/railway` so Railway uses that
+directory as the Docker build context.
 
-After the first deploy succeeds, open the service's **Deploy Logs**:
+## Set the HMAC secret
 
-```bash
-railway logs --service agentmemory | grep AGENTMEMORY_SECRET=
-```
-
-You will see exactly one line of the form `AGENTMEMORY_SECRET=<64 hex chars>`.
-Copy it into your client environment. The secret is never printed again
-on subsequent boots.
+Railway treats `AGENTMEMORY_SECRET` as a service variable. Save the
+value when you run `railway variables --set`, then copy the same value
+into your client environment.
 
 ## Verify the deployment
 
@@ -65,7 +67,7 @@ For an authenticated call, your client must send `Authorization: Bearer <secret>
 ## Viewer access (port 3113 stays internal)
 
 Railway only exposes the single public port from your service's
-`PORT` env var (which we map to 3111). The viewer stays bound to
+`PORT` env var (`3111`). The viewer stays bound to
 localhost inside the container. `railway ssh` is an interactive shell
 only — it does not support `-L`-style port forwarding, so reach the
 viewer with one of the following.
@@ -93,11 +95,8 @@ This is the heavier path; option A is what most users will want.
 ## Rotate the HMAC secret
 
 ```bash
-railway ssh --service agentmemory
-rm /data/.hmac
-exit
+railway variables --set "AGENTMEMORY_SECRET=$(openssl rand -hex 32)"
 railway redeploy --service agentmemory
-railway logs --service agentmemory | grep AGENTMEMORY_SECRET=
 ```
 
 Update every client with the new secret. Old tokens stop working
