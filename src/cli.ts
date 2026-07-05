@@ -2274,6 +2274,13 @@ type DemoSession = {
 
 type SearchResult = { query: string; hits: number; topTitle: string };
 
+function demoJsonHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const secret = process.env["AGENTMEMORY_SECRET"];
+  if (secret) headers["Authorization"] = `Bearer ${secret}`;
+  return headers;
+}
+
 function buildDemoSessions(): DemoSession[] {
   return [
     {
@@ -2340,7 +2347,7 @@ async function postJson<T = unknown>(
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: demoJsonHeaders(),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -2358,7 +2365,7 @@ async function postJsonStrict<T = unknown>(
 ): Promise<T | null> {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: demoJsonHeaders(),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -2400,7 +2407,7 @@ async function seedDemoSession(
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: demoJsonHeaders(),
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(5000),
       });
@@ -2607,6 +2614,9 @@ async function runDemoBody(base: string) {
 
   sQuery.stop("Search complete");
 
+  const cleanupAuthHeader = process.env["AGENTMEMORY_SECRET"]
+    ? ' -H "Authorization: Bearer $AGENTMEMORY_SECRET"'
+    : "";
   const lines = [
     `Project:       ${demoProject}`,
     `Sessions:      ${sessions.length} seeded (${totalObs} observations)`,
@@ -2621,7 +2631,7 @@ async function runDemoBody(base: string) {
     c.accent(`found the N+1 query fix — keyword matching can't do that.`),
     "",
     `Viewer:        ${c.url(getViewerUrl())}`,
-    `Clean up with: ${c.dim(`curl -X DELETE "${base}/agentmemory/sessions?project=${demoProject}"`)}`,
+    `Clean up with: ${c.dim(`curl${cleanupAuthHeader} -X DELETE "${base}/agentmemory/sessions?project=${demoProject}"`)}`,
   ];
 
   p.note(lines.join("\n"), "demo complete");
