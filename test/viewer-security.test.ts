@@ -134,10 +134,10 @@ describe("viewer request handler DNS rebinding defence (e2e)", () => {
     for (const c of cleanups) await c();
   });
 
-  async function spinUpViewer(): Promise<{ port: number }> {
+  async function spinUpViewer(restPort = 0): Promise<{ port: number }> {
     // Start on port 0 so the OS assigns a free port; passing a real port
     // exercises buildAllowedHosts() with the live listen value.
-    const server = startViewerServer(0, {}, {}, undefined, 0);
+    const server = startViewerServer(0, {}, {}, undefined, restPort);
     await new Promise<void>((resolve) => server.once("listening", () => resolve()));
     const addr = server.address() as AddressInfo;
     cleanups.push(
@@ -207,6 +207,16 @@ describe("viewer request handler DNS rebinding defence (e2e)", () => {
     expect(res.status === 200 || res.status === 404).toBe(true);
     if (res.status === 200) {
       expect(res.body).toContain("agentmemory viewer");
+    }
+  });
+
+  it("injects the stream port instead of deriving it from fallback viewer ports", async () => {
+    const { port } = await spinUpViewer(3111);
+    const res = await request(port, `localhost:${port}`, "/");
+    expect(res.status === 200 || res.status === 404).toBe(true);
+    if (res.status === 200) {
+      expect(res.body).toContain("parseInt('3112', 10)");
+      expect(res.body).not.toContain("__AGENTMEMORY_STREAM_PORT__");
     }
   });
 

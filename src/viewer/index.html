@@ -25,7 +25,7 @@
       --ink: #111111;
       --ink-secondary: #333333;
       --ink-muted: #666666;
-      --ink-faint: #999999;
+      --ink-faint: #666666;
       --accent: #CC0000;
       --accent-light: #FF1A1A;
       --cream: #F5F0E8;
@@ -60,7 +60,7 @@
       --ink: #eee;
       --ink-secondary: #ccc;
       --ink-muted: #999;
-      --ink-faint: #777;
+      --ink-faint: #AAAAAA;
       --cream: #2a2520;
     }
     html[data-theme="dark"] body {
@@ -103,15 +103,19 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 16px;
       background: var(--bg);
       flex: 0 0 auto;
       position: relative;
       z-index: 3;
+      min-width: 0;
     }
     .app-header .brand {
       display: flex;
       align-items: baseline;
       gap: 10px;
+      min-width: 0;
+      flex-shrink: 0;
       color: inherit;
       text-decoration: none;
       cursor: pointer;
@@ -138,6 +142,9 @@
       display: flex;
       align-items: center;
       gap: 12px;
+      justify-content: flex-end;
+      min-width: 0;
+      overflow: hidden;
     }
     .ws-status {
       font-size: 10px;
@@ -150,6 +157,11 @@
       letter-spacing: 0.08em;
       font-weight: 600;
       border: 1px solid var(--border-light);
+      max-width: 150px;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .ws-status::before {
       content: '';
@@ -209,6 +221,7 @@
       padding: 16px 20px;
       border-right: 1px solid var(--border-light);
       border-bottom: 1px solid var(--border-light);
+      min-width: 0;
     }
     .stat-card:last-child { border-right: none; }
     .stat-card .label {
@@ -240,6 +253,8 @@
       padding: 20px;
       margin-bottom: 16px;
       transition: box-shadow 0.15s;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .card:hover {
       box-shadow: 4px 4px 0px 0px var(--border);
@@ -673,10 +688,10 @@
     .flag-summary .flag-count { color: var(--ink); font-weight: 600; }
     .flag-summary .flag-pill {
       display: inline-block; padding: 1px 8px; border-radius: 10px;
-      background: #f59e0b20; color: #d97706; font-size: 11px; font-weight: 600;
+      background: #fff4d6; color: #7c4a03; font-size: 11px; font-weight: 600;
       margin-right: 6px;
     }
-    .flag-summary .flag-pill.info { background: var(--border-light); color: var(--ink-muted); }
+    .flag-summary .flag-pill.info { background: var(--bg-inset); color: var(--ink-secondary); }
     .flag-summary .flag-toggle { margin-left: auto; font-size: 11px; opacity: 0.7; }
     .flag-list {
       display: none; flex-direction: column; gap: 6px;
@@ -894,8 +909,75 @@
     }
     @media (max-width: 768px) {
       .two-col { grid-template-columns: 1fr; }
-      .graph-sidebar { width: 200px; }
+      .graph-container {
+        flex-direction: column;
+        height: auto;
+        min-height: calc(100vh - 130px);
+      }
+      .graph-canvas-wrap {
+        flex: 0 0 320px;
+        min-height: 260px;
+        border-top: 2px solid var(--border);
+      }
+      .graph-sidebar {
+        order: -1;
+        width: 100%;
+        border-left: none;
+        border-bottom: 2px solid var(--border);
+        max-height: none;
+      }
       .stats-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+    }
+
+    @media (max-width: 700px) {
+      .replay-grid { grid-template-columns: 1fr; }
+      .replay-list,
+      .replay-detail { max-height: none; }
+      .replay-event { grid-template-columns: minmax(72px, auto) minmax(0, 1fr) auto; }
+      .replay-event-label { min-width: 0; }
+    }
+
+    @media (max-width: 640px) {
+      .app-header { padding: 8px 16px; }
+      .dateline { display: none; }
+      .header-right { gap: 8px; }
+      .ws-status { max-width: 104px; padding: 3px 6px; font-size: 9px; }
+      .flag-summary { gap: 8px; }
+      .viewer-footer {
+        height: auto;
+        min-height: 58px;
+        padding: 10px 16px;
+        flex-wrap: wrap;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .view { padding: 16px 24px; }
+      .stats-grid { grid-template-columns: 1fr; }
+      .metric-table {
+        table-layout: fixed;
+        word-break: break-word;
+      }
+      .metric-table th,
+      .metric-table td { padding: 5px 4px; }
+      .metric-fn {
+        overflow-wrap: anywhere;
+        font-size: 10px;
+      }
+      .graph-container { margin: -16px -24px; }
+      .graph-canvas-wrap {
+        flex-basis: 260px;
+        min-height: 220px;
+      }
+      .graph-sidebar { padding: 16px 24px; }
+      .replay-controls { align-items: flex-start; }
+      .replay-controls .sep { display: none; }
+    }
+
+    @media (max-width: 360px) {
+      .app-header .brand .version { display: none; }
+      .ws-status { display: none; }
+      .viewer-footer { column-gap: 8px; }
     }
 
     .section-rule {
@@ -1096,16 +1178,17 @@
     var locPort = window.location.port;
     var wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     var REST, WS_URL, WS_DIRECT_URL, wsPort;
+    var VIEWER_STREAM_PORT = parseInt('__AGENTMEMORY_STREAM_PORT__', 10);
     if (paramPort) {
       var resolvedPort = parseInt(paramPort) === 3111 ? '3113' : paramPort;
       REST = window.location.protocol + '//' + window.location.hostname + ':' + resolvedPort;
-      wsPort = params.get('wsPort') || String(parseInt(resolvedPort) - 1);
+      wsPort = params.get('wsPort') || (Number.isFinite(VIEWER_STREAM_PORT) ? String(VIEWER_STREAM_PORT) : String(parseInt(resolvedPort) - 1));
       WS_URL = wsProto + '//' + window.location.hostname + ':' + wsPort;
       WS_DIRECT_URL = WS_URL + '/stream/mem-live/viewer';
     } else if (locPort) {
       var resolvedPort = parseInt(locPort) === 3111 ? '3113' : locPort;
       REST = window.location.protocol + '//' + window.location.hostname + ':' + resolvedPort;
-      wsPort = params.get('wsPort') || String(parseInt(resolvedPort) - 1);
+      wsPort = params.get('wsPort') || (Number.isFinite(VIEWER_STREAM_PORT) ? String(VIEWER_STREAM_PORT) : String(parseInt(resolvedPort) - 1));
       WS_URL = wsProto + '//' + window.location.hostname + ':' + wsPort;
       WS_DIRECT_URL = WS_URL + '/stream/mem-live/viewer';
     } else {
@@ -4342,7 +4425,7 @@
     var wsReconnectTimer = null;
     var wsRetries = 0;
     var WS_MAX_RETRIES = 4;
-    var directFailed = false;
+    var directFailed = Number.isFinite(VIEWER_STREAM_PORT);
     var directFailures = 0;
     var DIRECT_FAILURE_THRESHOLD = 2;
     var pollTimer = null;

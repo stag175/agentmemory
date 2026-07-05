@@ -276,7 +276,12 @@ export function startViewerServer(
           "Content-Security-Policy": rendered.csp,
           "Cache-Control": "no-cache",
         });
-        res.end(rendered.html);
+        res.end(
+          rendered.html.replaceAll(
+            "__AGENTMEMORY_STREAM_PORT__",
+            String(resolvedRestPort + 1),
+          ),
+        );
         return;
       }
       res.writeHead(404, { "Content-Type": "text/plain" });
