@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { handleToolCall } from "../src/mcp/standalone.js";
@@ -25,7 +25,7 @@ const BASE = "http://localhost:3111";
 const tempRoots: string[] = [];
 
 function tempDir(): string {
-  const root = mkdtempSync(join(tmpdir(), "rules-resolver-standalone-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "rules-resolver-standalone-")));
   tempRoots.push(root);
   return root;
 }

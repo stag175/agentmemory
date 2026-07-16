@@ -250,7 +250,7 @@ describe("Copilot hook scripts", () => {
           ...process.env,
           AGENTMEMORY_URL: `http://127.0.0.1:${address.port}`,
           AGENTMEMORY_SECRET: "",
-          AGENTMEMORY_PROJECT_NAME: "",
+          AGENTMEMORY_PROJECT_NAME: "repo",
           ...env,
         },
         stdio: ["pipe", "pipe", "pipe"],
@@ -369,11 +369,15 @@ describe("Copilot hook scripts", () => {
     try {
       mkdirSync(join(repo, ".git"));
       mkdirSync(nested, { recursive: true });
-      const result = await runHook("scripts/prompt-submit.mjs", {
-        sessionId: "copilot-session",
-        cwd: nested,
-        userPrompt: "remember this prompt",
-      });
+      const result = await runHook(
+        "scripts/prompt-submit.mjs",
+        {
+          sessionId: "copilot-session",
+          cwd: nested,
+          userPrompt: "remember this prompt",
+        },
+        { AGENTMEMORY_PROJECT_NAME: "" },
+      );
 
       const request = requestByPath(result, "/agentmemory/observe");
       expect(request.body).toMatchObject({
