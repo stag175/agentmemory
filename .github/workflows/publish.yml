@@ -17,7 +17,17 @@ permissions:
   contents: read
 
 jobs:
+  fork-release-notice:
+    if: github.repository != 'rohitg00/agentmemory'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm registry publication is intentionally skipped
+        run: |
+          echo "GitHub release created for $GITHUB_REPOSITORY."
+          echo "npm publication is restricted to rohitg00/agentmemory because the @agentmemory namespace is upstream-owned."
+
   publish:
+    if: github.repository == 'rohitg00/agentmemory'
     runs-on: ubuntu-latest
     permissions:
       contents: read
