@@ -172,7 +172,7 @@ describe("resolveRulesRequest allowed-roots constraint", () => {
 
   it("rejects a well-known host path with a wildcard glob", async () => {
     const allowed = realpathSync(tempDir());
-    const hostPath = process.platform === "win32" ? "C:/Users" : "/etc";
+    const hostPath = realpathSync(process.platform === "win32" ? "C:/Users" : "/etc");
 
     const result = await resolveRulesRequest(
       { workspaceRoot: hostPath, instructionGlobs: ["**/*"], includeContent: true },

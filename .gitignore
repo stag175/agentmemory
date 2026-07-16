@@ -1,5 +1,7 @@
 node_modules/
 dist/
+!vendor/iii-sdk-compat/dist/
+!vendor/iii-sdk-compat/dist/**
 *.tsbuildinfo
 
 .env

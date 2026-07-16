@@ -69,6 +69,8 @@ describe("Consistency checks", () => {
     const pkg = JSON.parse(readText("package.json"));
     const ci = readText(".github/workflows/ci.yml");
 
+    expect(pkg.scripts.prebuild).toBe("node scripts/prepare-bundled-deps.mjs");
+    expect(pkg.scripts.pretest).toBe("node scripts/prepare-bundled-deps.mjs");
     expect(pkg.scripts["pretest:integration"]).toBe("npm run build");
     expect(pkg.scripts["test:integration"]).toBe(
       "node scripts/run-integration-tests.mjs",

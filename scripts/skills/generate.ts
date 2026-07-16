@@ -23,7 +23,8 @@ function block(key: string, body: string): { open: string; close: string; full: 
 
 function applyBlock(file: string, key: string, body: string): void {
   const { open, close, full } = block(key, body);
-  const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const existingRaw = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const existing = existingRaw.replace(/\r\n/g, "\n");
   let next: string;
   if (existing.includes(open) && existing.includes(close)) {
     const start = existing.indexOf(open);
@@ -41,7 +42,7 @@ function applyBlock(file: string, key: string, body: string): void {
     }
     return;
   }
-  if (existing !== next) {
+  if (existingRaw !== next) {
     writeFileSync(file, next);
     console.log(`wrote AUTOGEN:${key} -> ${file.replace(ROOT + "/", "")}`);
   }

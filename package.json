@@ -18,11 +18,13 @@
     "agentmemory": "dist/cli.mjs"
   },
   "scripts": {
+    "prebuild": "node scripts/prepare-bundled-deps.mjs",
     "build": "tsdown && node scripts/copy-build-assets.mjs",
     "prepack": "node scripts/prepare-bundled-deps.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/cli.mjs",
     "migrate": "node dist/cli.mjs migrate",
+    "pretest": "node scripts/prepare-bundled-deps.mjs",
     "test": "vitest run --exclude test/integration.test.ts",
     "test:watch": "vitest --exclude test/integration.test.ts",
     "pretest:integration": "npm run build",

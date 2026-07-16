@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -41,7 +41,7 @@ describe("install method classification", () => {
 
     expect(method.kind).toBe("source-checkout");
     expect(method.plan).toBe("source");
-    expect(method.packageRoot).toBe(root);
+    expect(method.packageRoot).toBe(realpathSync(root));
   });
 
   it("does not treat an arbitrary package.json as a source checkout", () => {
@@ -83,7 +83,7 @@ describe("install method classification", () => {
 
     expect(method.kind).toBe("global-npm");
     expect(method.plan).toBe("global-npm");
-    expect(method.packageRoot).toBe(root);
+    expect(method.packageRoot).toBe(realpathSync(root));
   });
 
   it("lets Homebrew Cellar paths win over generic node_modules heuristics", () => {
