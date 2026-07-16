@@ -40,9 +40,20 @@ describe("Tool count consistency", () => {
   });
 
   it("README advertises the same tool count as the registry", () => {
-    const readme = readText("README.md");
-    expect(readme).toContain(`${EXPECTED_TOOL_COUNT} MCP tools`);
-    expect(readme).not.toContain("51 MCP tools");
+    const activeSurfaces = [
+      "README.md",
+      "integrations/hermes/README.md",
+      "integrations/openclaw/README.md",
+      "assets/tags/stat-tools.svg",
+      "assets/tags/light/stat-tools.svg",
+      "assets/tags/section-mcp.svg",
+      "assets/tags/light/section-mcp.svg",
+    ];
+    for (const path of activeSurfaces) {
+      const content = readText(path);
+      expect(content, path).toContain(String(EXPECTED_TOOL_COUNT));
+      expect(content, path).not.toMatch(/(?:MCP[- ]|all )43(?:_tools| memory tools| MCP tools)?/);
+    }
   });
 
   it("skill count claims match the plugin/skills directory", () => {

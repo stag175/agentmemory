@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   ObserveInputSchema,
   CompressOutputSchema,
@@ -23,6 +23,7 @@ import { MetricsStore } from "../src/eval/metrics-store.js";
 import {
   evaluateRetrievalArenaGate,
   runRetrievalArenaSmoke,
+  thresholdsFromEnv,
 } from "../benchmark/retrieval-arena-smoke.js";
 import { generateDataset, generateScaleDataset } from "../benchmark/dataset.js";
 
@@ -422,6 +423,7 @@ describe("Release Gate Eval Helpers", () => {
       minHybridRecallAt5: 0,
       minHybridRecallAt10: 0,
       minHybridLiftAt5: -1,
+      minHybridLiftAt10: -1,
       maxHybridLatencyMs: 10_000,
     });
 
@@ -438,10 +440,34 @@ describe("Release Gate Eval Helpers", () => {
       minHybridRecallAt5: 1.01,
       minHybridRecallAt10: 1.01,
       minHybridLiftAt5: 1.01,
+      minHybridLiftAt10: 1.01,
       maxHybridLatencyMs: 0,
     });
 
     expect(strictGate.status).toBe("fail");
     expect(strictGate.failures.length).toBeGreaterThan(0);
+  });
+
+  it("pins the default Retrieval Arena release thresholds", () => {
+    for (const name of [
+      "ARENA_MIN_HYBRID_RECALL_AT_5",
+      "ARENA_MIN_HYBRID_RECALL_AT_10",
+      "ARENA_MIN_HYBRID_LIFT_AT_5",
+      "ARENA_MIN_HYBRID_LIFT_AT_10",
+      "ARENA_MAX_HYBRID_LATENCY_MS",
+    ]) {
+      vi.stubEnv(name, "");
+    }
+    try {
+      expect(thresholdsFromEnv()).toEqual({
+        minHybridRecallAt5: 0.425,
+        minHybridRecallAt10: 0.585,
+        minHybridLiftAt5: 0,
+        minHybridLiftAt10: 0,
+        maxHybridLatencyMs: 50,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

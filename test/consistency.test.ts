@@ -57,6 +57,45 @@ describe("Consistency checks", () => {
     expect(readme).toContain(`${restEndpointCount} endpoints on port`);
     expect(agents).toContain(`${restEndpointCount} REST endpoints`);
     expect(index).toContain(`REST API: ${restEndpointCount} endpoints`);
+    expect(readText("assets/tags/section-api.svg")).toContain(
+      `${restEndpointCount} REST endpoints`,
+    );
+    expect(readText("assets/tags/light/section-api.svg")).toContain(
+      `${restEndpointCount} REST endpoints`,
+    );
+  });
+
+  it("keeps production CI and release gates wired", () => {
+    const pkg = JSON.parse(readText("package.json"));
+    const ci = readText(".github/workflows/ci.yml");
+
+    expect(pkg.scripts["pretest:integration"]).toBe("npm run build");
+    expect(pkg.scripts["test:integration"]).toBe(
+      "node scripts/run-integration-tests.mjs",
+    );
+    expect(pkg.scripts["release:preflight"]).toBe(
+      "node scripts/release-preflight.mjs",
+    );
+    expect(ci).toContain("windows-latest");
+    expect(ci).toContain("npm run test:integration");
+    expect(ci).toContain("npm run bench:retrieval-smoke");
+  });
+
+  it("keeps shipped integration manifests on the package version", () => {
+    const pkg = JSON.parse(readText("package.json"));
+    for (const path of [
+      "integrations/openclaw/package.json",
+      "integrations/openclaw/openclaw.plugin.json",
+      "plugin/opencode/plugin.json",
+    ]) {
+      expect(JSON.parse(readText(path)).version, path).toBe(pkg.version);
+    }
+    for (const path of [
+      "integrations/hermes/plugin.yaml",
+      "integrations/openclaw/plugin.yaml",
+    ]) {
+      expect(readText(path), path).toContain(`version: ${pkg.version}`);
+    }
   });
 
   it("all tool names are unique", () => {

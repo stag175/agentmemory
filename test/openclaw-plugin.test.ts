@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 type Capability = {
   promptBuilder?: (params: {
@@ -48,6 +49,14 @@ describe("openclaw plugin — memory capability registration (closes #286 follow
     const events = (api.on as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
     expect(events).toContain("before_agent_start");
     expect(events).toContain("agent_end");
+  });
+
+  it("keeps the legacy YAML hook list aligned with runtime registration", () => {
+    const manifest = readFileSync("integrations/openclaw/plugin.yaml", "utf8");
+    expect(manifest).toContain("  - before_agent_start");
+    expect(manifest).toContain("  - agent_end");
+    expect(manifest).not.toContain("  - on_pre_llm_call");
+    expect(manifest).not.toContain("  - on_post_tool_use");
   });
 
   it("promptBuilder returns lines that mention the configured base_url", async () => {

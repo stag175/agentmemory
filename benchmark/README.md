@@ -39,20 +39,25 @@ Run it directly:
 npm run bench:retrieval-smoke
 ```
 
-Include it in release preflight:
+Run the release preflight (the arena is included by default):
 
 ```bash
-npm run release:preflight:arena
+npm run release:preflight
 ```
 
-Default `npm run release:preflight` skips this optional gate and reports it
-as `not_run optional` so the release gate is honest without making every
-preflight pay benchmark cost. Thresholds can be adjusted with:
+`npm run release:preflight:arena` remains as a compatibility alias. The smoke
+is deterministic, local, and fast enough to gate every release. Thresholds can
+be adjusted with:
 
 - `ARENA_MIN_HYBRID_RECALL_AT_5`
 - `ARENA_MIN_HYBRID_RECALL_AT_10`
 - `ARENA_MIN_HYBRID_LIFT_AT_5`
+- `ARENA_MIN_HYBRID_LIFT_AT_10`
 - `ARENA_MAX_HYBRID_LATENCY_MS`
+
+The deterministic defaults require hybrid R@5 >= 42.5%, R@10 >= 58.5%, and
+non-negative lift at both cutoffs. The 50 ms average-latency ceiling is a
+catastrophic-regression guard for this small local smoke, not a production SLO.
 
 ## load-100k.ts
 

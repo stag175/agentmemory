@@ -60,7 +60,7 @@
   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-tools.svg"><img src="assets/tags/stat-tools.svg" alt="74 MCP tools" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-hooks.svg"><img src="assets/tags/stat-hooks.svg" alt="12 auto hooks" height="38" /></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-deps.svg"><img src="assets/tags/stat-deps.svg" alt="0 external DBs" height="38" /></picture>
-  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-tests.svg"><img src="assets/tags/stat-tests.svg" alt="1,669 tests passing" height="38" /></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/stat-tests.svg"><img src="assets/tags/stat-tests.svg" alt="1,800+ tests passing" height="38" /></picture>
 </p>
 
 <p align="center">
@@ -540,6 +540,8 @@ runtime entrypoints, placeholder checksums, and local daemon configuration. This
 does not require npm, Smithery, Homebrew, or VS Code Marketplace publish
 credentials; it proves that the metadata is internally consistent before a
 credentialed release job replaces template placeholders or uploads artifacts.
+The default preflight also runs the deterministic Retrieval Arena smoke, so a
+release cannot silently regress hybrid recall or exceed its latency budget.
 
 ### Claude Code (one block, paste it)
 
@@ -1247,7 +1249,7 @@ Full registry: [workers.iii.dev](https://workers.iii.dev). Every worker there co
 | Prometheus / Grafana | iii OTEL + health monitor |
 | Custom plugin systems | `iii worker add <name>` |
 
-**174 source files · ~37,800 LOC · 1,669 tests · 258 functions · 44 KV scopes** — all on three primitives. No `agentmemory plugin install`. The plugin system is iii itself.
+**174 source files · ~37,800 LOC · 1,800+ tests · 258 functions · 44 KV scopes** — all on three primitives. No `agentmemory plugin install`. The plugin system is iii itself.
 
 ---
 
@@ -1573,8 +1575,8 @@ Full endpoint list: [`src/triggers/api.ts`](src/triggers/api.ts)
 ```bash
 npm run dev               # Hot reload
 npm run build             # Production build
-npm test                  # 1,669 tests
-npm run test:integration  # API tests (requires running services)
+npm test                  # 1,800+ unit and component tests
+npm run test:integration  # Builds and runs an isolated Docker-backed API suite
 ```
 
 **Prerequisites:** Node.js >= 20, [iii-engine](https://iii.dev/docs) or Docker

@@ -37,8 +37,8 @@ describe("release preflight", () => {
     expect(script).toContain("missing iii-sdk type");
     expect(script).toContain("sdk-logs compatibility missing addLogRecordProcessor");
     expect(script).toContain("AGENTMEMORY_PREFLIGHT_SKIP_TEMP_INSTALL");
-    expect(script).toContain("AGENTMEMORY_PREFLIGHT_RETRIEVAL_ARENA");
-    expect(script).toContain("--with-retrieval-arena");
+    expect(script).toContain("const retrievalArenaEnabled = true");
+    expect(script).toContain("runRetrievalArena(summary)");
     expect(script).toContain("RELEASE_PREFLIGHT_SUMMARY_JSON");
     expect(script).toContain("AGENTMEMORY_PREFLIGHT_SUMMARY_PATH");
     expect(script).toContain("version lockstep check crashed");
@@ -91,7 +91,7 @@ describe("release preflight", () => {
     expect(releaseGate.redactionForget.status).toBe("blocked");
     expect(releaseGate.retrievalScope.status).toBe("blocked");
     expect(releaseGate.retrievalArena.status).toBe("blocked");
-    expect(releaseGate.retrievalArena.optional).toBe(true);
+    expect(releaseGate.retrievalArena.optional).toBe(false);
     expect(releaseGate.restMcpParity.status).toBe("blocked");
     expect(releaseGate.encryptionReadiness.status).toBe("pass");
     expect(releaseGate.encryptionReadiness.optional).toBe(true);
@@ -121,10 +121,7 @@ describe("release preflight", () => {
     expect(releaseGate.redactionForget.status).toBe("not_run");
     expect(releaseGate.retrievalScope.status).toBe("not_run");
     expect(releaseGate.retrievalArena.status).toBe("not_run");
-    expect(releaseGate.retrievalArena.optional).toBe(true);
-    expect(releaseGate.retrievalArena.warnings[0]).toContain(
-      "Retrieval Arena smoke is optional",
-    );
+    expect(releaseGate.retrievalArena.optional).toBe(false);
     expect(releaseGate.restMcpParity.status).toBe("not_run");
     expect(releaseGate.encryptionReadiness.status).toBe("not_run");
     expect(releaseGate.encryptionReadiness.optional).toBe(true);
@@ -133,7 +130,7 @@ describe("release preflight", () => {
     );
   });
 
-  it("does not make skipped optional Retrieval Arena block a complete default gate", async () => {
+  it("does not allow a skipped Retrieval Arena to pass a complete gate", async () => {
     const scriptPath = join(ROOT, "scripts", "release-preflight.mjs");
     const preflight = await import(pathToFileURL(scriptPath).href);
     const summary = preflight.createPreflightSummary({
@@ -166,7 +163,7 @@ describe("release preflight", () => {
     });
 
     expect(releaseGate.retrievalArena.status).toBe("not_run");
-    expect(releaseGate.retrievalArena.optional).toBe(true);
+    expect(releaseGate.retrievalArena.optional).toBe(false);
     expect(releaseGate.encryptionReadiness.status).toBe("pass");
     expect(releaseGate.encryptionReadiness.optional).toBe(true);
     expect(releaseGate.encryptionReadiness.evidence).toEqual([
@@ -183,7 +180,7 @@ describe("release preflight", () => {
     expect(releaseGate.encryptionReadiness.warnings).toEqual([
       "Encryption readiness still depends on running the targeted encryption/export tests in this checkout.",
     ]);
-    expect(preflight.releaseGateOverallForPreflight(releaseGate)).toBe("pass");
+    expect(preflight.releaseGateOverallForPreflight(releaseGate)).toBe("not_run");
   });
 
   it("prints the non-gating encryption readiness warning in the release report", async () => {
@@ -365,6 +362,7 @@ describe("release preflight", () => {
       "test",
       "docs",
       "packSmoke",
+      "retrievalArena",
       "finalCleanTree",
     ]) {
       summary.steps[key] = {
@@ -428,6 +426,7 @@ describe("release preflight", () => {
       "test",
       "docs",
       "packSmoke",
+      "retrievalArena",
       "finalCleanTree",
     ]) {
       summary.steps[key] = {

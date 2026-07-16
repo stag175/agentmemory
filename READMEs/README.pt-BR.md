@@ -1324,7 +1324,7 @@ Crie `~/.agentmemory/.env`:
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-api.svg"><img src="../assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-124 endpoints na porta `3111`. A REST API faz bind em `127.0.0.1` por padrão. Endpoints protegidos exigem `Authorization: Bearer <secret>` quando `AGENTMEMORY_SECRET` está definido, e endpoints de mesh sync exigem `AGENTMEMORY_SECRET` em ambos os peers.
+166 endpoints na porta `3111`. A REST API faz bind em `127.0.0.1` por padrão. Endpoints protegidos exigem `Authorization: Bearer <secret>` quando `AGENTMEMORY_SECRET` está definido, e endpoints de mesh sync exigem `AGENTMEMORY_SECRET` em ambos os peers.
 
 <details>
 <summary>Endpoints principais</summary>

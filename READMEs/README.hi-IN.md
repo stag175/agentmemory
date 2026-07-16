@@ -1334,7 +1334,7 @@ CONSOLIDATION_ENABLED=true
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="../assets/tags/light/section-api.svg"><img src="../assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-Port `3111` पर 124 endpoints। REST API default रूप से `127.0.0.1` से bind होता है। `AGENTMEMORY_SECRET` set होने पर protected endpoints `Authorization: Bearer <secret>` की आवश्यकता रखते हैं, और mesh sync endpoints दोनों peers पर `AGENTMEMORY_SECRET` की आवश्यकता रखते हैं।
+Port `3111` पर 166 endpoints। REST API default रूप से `127.0.0.1` से bind होता है। `AGENTMEMORY_SECRET` set होने पर protected endpoints `Authorization: Bearer <secret>` की आवश्यकता रखते हैं, और mesh sync endpoints दोनों peers पर `AGENTMEMORY_SECRET` की आवश्यकता रखते हैं।
 
 <details>
 <summary>मुख्य endpoints</summary>

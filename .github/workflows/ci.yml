@@ -38,6 +38,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -47,12 +50,20 @@ jobs:
       # whether a flake is platform-specific or universal).
       fail-fast: false
       matrix:
-        # Windows held back: test/obsidian-export.test.ts has hardcoded
-        # POSIX paths (`/tmp/...`) that fail on D:\ drive runners.
-        # src/functions/obsidian-export.ts needs os.tmpdir() + path.join
-        # rework before Windows can be added back. Tracked as follow-up.
-        os: [ubuntu-latest, macos-latest]
-        node-version: [20, 22]
+        # Cover both supported Node lines on Unix and keep one Windows
+        # lane for path, process, and packaging regressions without
+        # multiplying the full matrix unnecessarily.
+        include:
+          - os: ubuntu-latest
+            node-version: "20"
+          - os: ubuntu-latest
+            node-version: "22"
+          - os: macos-latest
+            node-version: "20"
+          - os: macos-latest
+            node-version: "22"
+          - os: windows-latest
+            node-version: "22"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -68,3 +79,21 @@ jobs:
       - run: npm run build
       - run: npm run skills:check
       - run: npm test
+      - name: Retrieval regression smoke
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22'
+        run: npm run bench:retrieval-smoke
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - run: npm install --package-lock-only --legacy-peer-deps --no-audit --no-fund
+      - run: npm ci --legacy-peer-deps --no-audit --no-fund
+      - name: Run isolated live API integration suite
+        run: npm run test:integration

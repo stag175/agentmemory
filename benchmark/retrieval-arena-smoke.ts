@@ -9,6 +9,7 @@ export interface RetrievalArenaThresholds {
   minHybridRecallAt5: number;
   minHybridRecallAt10: number;
   minHybridLiftAt5: number;
+  minHybridLiftAt10: number;
   maxHybridLatencyMs: number;
 }
 
@@ -40,9 +41,10 @@ export interface RetrievalArenaSummary {
 }
 
 const DEFAULT_THRESHOLDS: RetrievalArenaThresholds = {
-  minHybridRecallAt5: 0.4,
-  minHybridRecallAt10: 0.55,
-  minHybridLiftAt5: -0.05,
+  minHybridRecallAt5: 0.425,
+  minHybridRecallAt10: 0.585,
+  minHybridLiftAt5: 0,
+  minHybridLiftAt10: 0,
   maxHybridLatencyMs: 50,
 };
 
@@ -66,6 +68,10 @@ export function thresholdsFromEnv(): RetrievalArenaThresholds {
     minHybridLiftAt5: numberFromEnv(
       "ARENA_MIN_HYBRID_LIFT_AT_5",
       DEFAULT_THRESHOLDS.minHybridLiftAt5,
+    ),
+    minHybridLiftAt10: numberFromEnv(
+      "ARENA_MIN_HYBRID_LIFT_AT_10",
+      DEFAULT_THRESHOLDS.minHybridLiftAt10,
     ),
     maxHybridLatencyMs: numberFromEnv(
       "ARENA_MAX_HYBRID_LATENCY_MS",
@@ -223,6 +229,11 @@ export function evaluateRetrievalArenaGate(
   if (lift.recallAt5 < thresholds.minHybridLiftAt5) {
     failures.push(
       `hybrid recall@5 lift ${lift.recallAt5.toFixed(3)} below ${thresholds.minHybridLiftAt5}`,
+    );
+  }
+  if (lift.recallAt10 < thresholds.minHybridLiftAt10) {
+    failures.push(
+      `hybrid recall@10 lift ${lift.recallAt10.toFixed(3)} below ${thresholds.minHybridLiftAt10}`,
     );
   }
   if (systems.hybrid.avgLatencyMs > thresholds.maxHybridLatencyMs) {

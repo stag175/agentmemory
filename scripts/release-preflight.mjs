@@ -20,10 +20,7 @@ const cliArgs = new Set(process.argv.slice(2));
 const allowDirty = /^(1|true|yes)$/i.test(
   process.env.AGENTMEMORY_PREFLIGHT_ALLOW_DIRTY ?? "",
 );
-const retrievalArenaEnabled =
-  /^(1|true|yes)$/i.test(process.env.AGENTMEMORY_PREFLIGHT_RETRIEVAL_ARENA ?? "") ||
-  cliArgs.has("--with-retrieval-arena") ||
-  cliArgs.has("--benchmark");
+const retrievalArenaEnabled = true;
 const skipTempInstallSmoke =
   /^(1|true|yes)$/i.test(process.env.AGENTMEMORY_PREFLIGHT_SKIP_TEMP_INSTALL ?? "") ||
   cliArgs.has("--skip-temp-install-smoke");
@@ -57,7 +54,6 @@ const RELEASE_GATE_KEYS = [
 
 const OPTIONAL_RELEASE_GATE_KEYS = new Set([
   "encryptionReadiness",
-  "retrievalArena",
 ]);
 const PUBLISH_CREDENTIAL_MARKERS = [
   "NPM_TOKEN",
@@ -254,10 +250,9 @@ export function deriveReleaseGate(summary, options = {}) {
       fileExists,
     ),
     encryptionReadiness: encryptionReadinessGate(root, fileExists),
-    retrievalArena: fromOptionalStep(
+    retrievalArena: fromStep(
       summary.steps.retrievalArena,
       "npm run bench:retrieval-smoke",
-      "Retrieval Arena smoke is optional and skipped by default; run npm run bench:retrieval-smoke or npm run release:preflight:arena to include it.",
     ),
     restMcpParity: targetedTestGate(
       summary.steps.test,
@@ -297,16 +292,6 @@ function fromStep(source, evidence) {
     optional: Boolean(source.optional),
     warnings: source.warnings,
   });
-}
-
-function fromOptionalStep(source, evidence, skippedWarning) {
-  if (!source || source.status === "not_run") {
-    return step("not_run", evidence, {
-      optional: true,
-      warnings: [...new Set([skippedWarning, ...(source?.warnings ?? [])])],
-    });
-  }
-  return fromStep({ ...source, optional: true }, evidence);
 }
 
 function targetedTestGate(testStep, evidenceFiles, root, fileExists) {
@@ -1130,13 +1115,11 @@ function runPackSmoke(summary) {
 
 function runRetrievalArena(summary) {
   if (!summary.options.retrievalArenaEnabled) {
-    summary.steps.retrievalArena = step("not_run", "retrieval arena smoke", {
-      optional: true,
-      warnings: [
-        "optional Retrieval Arena skipped by default; run npm run bench:retrieval-smoke or npm run release:preflight:arena",
-      ],
+    summary.steps.retrievalArena = step("fail", "retrieval arena smoke", {
+      failures: ["Retrieval Arena is required for release preflight"],
+      exitCode: 1,
     });
-    return true;
+    return false;
   }
 
   const result = run(
@@ -1146,7 +1129,6 @@ function runRetrievalArena(summary) {
   );
   if (!result.ok) {
     summary.steps.retrievalArena = step("fail", "retrieval arena smoke", {
-      optional: true,
       failures: [`npm run bench:retrieval-smoke exited ${result.status}`],
       exitCode: result.status,
     });
@@ -1154,7 +1136,6 @@ function runRetrievalArena(summary) {
   }
 
   summary.steps.retrievalArena = step("pass", "retrieval arena smoke", {
-    optional: true,
     evidence: ["npm run bench:retrieval-smoke"],
   });
   return true;
