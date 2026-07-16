@@ -6,9 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [0.9.28] — 2026-07-05
+## [0.9.28] — 2026-07-16
 
 Hardening release focused on production readiness for REST/MCP deployments, local file handling, first-run packaging, and iii-sdk runtime compatibility. No intentional breaking changes.
+
+### Added
+
+- End-to-end memory lifecycle controls now cover proposals, review, write gates, retention, tombstoning, deletion propagation, export/import, and audit evidence.
+- Audit-integrity, compliance-evidence, agent-event, lineage, rules-resolution, and sync-control-plane surfaces are available through the registered iii-engine function, REST, and MCP paths.
+- Encryption-at-rest policy and runtime support cover primary, sharded, and derived state scopes, with envelope-key handling and explicit readiness diagnostics.
+- Retrieval now includes a context router, pluggable retrieval backends, Qdrant integration, quality metrics, and a deterministic regression arena.
+- CLI onboarding can inspect and repair agent integrations, diagnose installation/runtime issues, and manage memory lifecycle operations directly.
+- Distribution surfaces now include MCP registry metadata, Smithery, MCPB, Homebrew templates, a VS Code extension, framework-adapter documentation, and the GitHub watcher connector.
+
+### Interface
+
+- The browser viewer now supports memory-proposal review, handoff status visibility, clearer trust-state feedback, and a responsive mobile layout.
+- Hook lineage and telemetry normalize project, session, framework, agent, and native identifiers across Claude Code, Codex, Copilot, OpenCode, and other supported adapters.
+
+### Reliability
+
+- CI now exercises Node 20 and 22 across Ubuntu, macOS, and Windows, plus an isolated Docker-backed live API integration suite.
+- Release preflight now requires clean-tree validation, generated-skill consistency, package/tarball installability, REST/MCP parity, and retrieval-quality thresholds.
+- Fresh checkouts reconstruct the pinned iii-sdk/OpenTelemetry compatibility bundle before build and test, preventing local-only dependency state from masking release failures.
 
 ### Security
 
