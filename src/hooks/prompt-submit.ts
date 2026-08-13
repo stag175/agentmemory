@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { buildLineage, eventFields, safeString } from "./_lineage.js";
+import { deliverHookRequests } from "./_delivery.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -9,12 +10,6 @@ function isSdkChildContext(payload: unknown): boolean {
 
 const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
 const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (SECRET) h["Authorization"] = `Bearer ${SECRET}`;
-  return h;
-}
 
 async function main() {
   let input = "";
@@ -34,18 +29,20 @@ async function main() {
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
   const lineage = buildLineage(data, "prompt_submit", { sessionId });
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      hookType: "prompt_submit",
-      ...eventFields(lineage),
-      timestamp: new Date().toISOString(),
-      data: { prompt: safeString(data.prompt ?? data.userPrompt, 20_000), lineage },
-    }),
-    signal: AbortSignal.timeout(3000),
-  }).catch(() => {});
-  setTimeout(() => process.exit(0), 500).unref();
+  await deliverHookRequests({
+    restUrl: REST_URL,
+    secret: SECRET,
+    requests: [{
+      path: "/agentmemory/observe",
+      kind: "observation",
+      body: {
+        hookType: "prompt_submit",
+        ...eventFields(lineage),
+        timestamp: new Date().toISOString(),
+        data: { prompt: safeString(data.prompt ?? data.userPrompt, 20_000), lineage },
+      },
+    }],
+  });
 }
 
 main();

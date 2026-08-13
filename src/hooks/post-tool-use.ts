@@ -8,6 +8,7 @@ import {
   summarizeValue,
   targetIdsFor,
 } from "./_lineage.js";
+import { deliverHookRequests } from "./_delivery.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -49,38 +50,41 @@ async function main() {
 
   const { imageData, cleanOutput } = extractImageData(toolOutput(data));
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      hookType: "post_tool_use",
+  await Promise.all([
+    deliverHookRequests({
+      restUrl: REST_URL,
+      secret: SECRET,
+      requests: [{
+        path: "/agentmemory/observe",
+        kind: "observation",
+        body: {
+          hookType: "post_tool_use",
+          ...fields,
+          timestamp,
+          data: {
+            tool_name: toolName,
+            tool_input: safeMetadata(toolInput),
+            tool_output: safeMetadata(truncate(cleanOutput, 8000)),
+            lineage,
+            ...(imageData ? { image_data: imageData } : {}),
+          },
+        },
+      }],
+    }),
+    sendAgentEvent(REST_URL, headers, {
+      type: "tool_completed",
+      status: "ok",
       ...fields,
-      timestamp,
-      data: {
-        tool_name: toolName,
-        tool_input: safeMetadata(toolInput),
-        tool_output: safeMetadata(truncate(cleanOutput, 8000)),
-        lineage,
-        ...(imageData ? { image_data: imageData } : {}),
+      functionId: `tool:${toolName}`,
+      targetIds: targetIdsFor(lineage.toolCallId, toolName),
+      metadata: {
+        hookType: "post_tool_use",
+        toolName,
+        toolInput: summarizeValue(toolInput),
+        toolOutput: summarizeValue(cleanOutput),
       },
     }),
-    signal: AbortSignal.timeout(3000),
-  }).catch(() => {});
-
-  sendAgentEvent(REST_URL, headers, {
-    type: "tool_completed",
-    status: "ok",
-    ...fields,
-    functionId: `tool:${toolName}`,
-    targetIds: targetIdsFor(lineage.toolCallId, toolName),
-    metadata: {
-      hookType: "post_tool_use",
-      toolName,
-      toolInput: summarizeValue(toolInput),
-      toolOutput: summarizeValue(cleanOutput),
-    },
-  });
-  setTimeout(() => process.exit(0), 500).unref();
+  ]);
 }
 
 function toolOutput(data: Record<string, unknown>): unknown {

@@ -20,6 +20,20 @@ export function mockKV() {
       const entries = store.get(scope);
       return entries ? (Array.from(entries.values()) as T[]) : [];
     },
+    update: async <T>(
+      scope: string,
+      key: string,
+      operations: Array<{ type: "set"; path: string; value: unknown }>,
+    ): Promise<T> => {
+      const current = (store.get(scope)?.get(key) ?? {}) as Record<string, unknown>;
+      const next = { ...current };
+      for (const operation of operations) {
+        if (operation.type === "set") next[operation.path] = operation.value;
+      }
+      if (!store.has(scope)) store.set(scope, new Map());
+      store.get(scope)!.set(key, next);
+      return next as T;
+    },
   };
 }
 

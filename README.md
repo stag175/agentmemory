@@ -1469,6 +1469,19 @@ Create `~/.agentmemory/.env`:
                                           # with v0.9.17.
                                           # Increase for slow networks or large batch calls;
                                           # decrease to fail-fast on rate-limit holds.
+# AGENTMEMORY_LLM_JOB_MAX_ATTEMPTS=10   # Durable per-observation compression attempts;
+#                                        # capped at the compression queue's 10-retry budget.
+# AGENTMEMORY_LLM_STALE_RUNNING_MS=1800000
+#                                        # Crash recovery: requeue a running compression job
+#                                        # after this age (defaults to invocation timeout).
+# AGENTMEMORY_LLM_FAILED_RETRY_COOLDOWN_MS=1800000
+#                                        # Reopen a terminal compression failure after this
+#                                        # cooling period; the synthetic fallback stays searchable.
+# AGENTMEMORY_HOOK_DELIVERY_TIMEOUT_MS=30000
+#                                        # Automatic-hook delivery attempt timeout (minimum 30s).
+# AGENTMEMORY_HOOK_OUTBOX_DIR=~/.agentmemory/hook-outbox
+#                                        # Mode-0700 atomic spool; requests stay until REST returns 2xx.
+# AGENTMEMORY_HOOK_OUTBOX_MAX_BATCH=8    # New requests plus oldest pending deliveries retried per hook.
 
 # Search tuning
 # BM25_WEIGHT=0.4
@@ -1539,7 +1552,7 @@ Create `~/.agentmemory/.env`:
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"><img src="assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-166 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
+167 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
 
 <details>
 <summary>Key endpoints</summary>
@@ -1547,6 +1560,7 @@ Create `~/.agentmemory/.env`:
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/agentmemory/health` | Health check (always public) |
+| `GET` | `/agentmemory/llm-status` | Durable compression queue, retry, provider, and recovery status |
 | `POST` | `/agentmemory/session/start` | Start session + get context |
 | `POST` | `/agentmemory/session/end` | End session |
 | `POST` | `/agentmemory/observe` | Capture observation |

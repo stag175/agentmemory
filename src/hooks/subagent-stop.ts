@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { resolveProject } from "./_project.js";
+import { deliverHookRequests } from "./_delivery.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -9,12 +10,6 @@ function isSdkChildContext(payload: unknown): boolean {
 
 const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
 const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (SECRET) h["Authorization"] = `Bearer ${SECRET}`;
-  return h;
-}
 
 async function main() {
   let input = "";
@@ -39,24 +34,26 @@ async function main() {
       ? data.last_assistant_message.slice(0, 4000)
       : "";
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      hookType: "subagent_stop",
-      sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
-      timestamp: new Date().toISOString(),
-      data: {
-        agent_id: agentId,
-        agent_type: agentType,
-        last_message: lastMsg,
+  await deliverHookRequests({
+    restUrl: REST_URL,
+    secret: SECRET,
+    requests: [{
+      path: "/agentmemory/observe",
+      kind: "observation",
+      body: {
+        hookType: "subagent_stop",
+        sessionId,
+        project: resolveProject(data.cwd as string | undefined),
+        cwd: (data.cwd as string | undefined) || process.cwd(),
+        timestamp: new Date().toISOString(),
+        data: {
+          agent_id: agentId,
+          agent_type: agentType,
+          last_message: lastMsg,
+        },
       },
-    }),
-    signal: AbortSignal.timeout(2000),
-  }).catch(() => {});
-  setTimeout(() => process.exit(0), 500).unref();
+    }],
+  });
 }
 
 main();

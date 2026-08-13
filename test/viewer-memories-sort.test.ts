@@ -5,7 +5,8 @@ import { readFileSync } from "node:fs";
 // entries at the bottom of long lists (#674). loadMemories() now sorts
 // the response newest-first on `createdAt` (fallback `updatedAt`) before
 // renderMemories sees it. Matches the pattern already used by Sessions
-// and Metrics tabs which sort on `startedAt` desc via localeCompare.
+// and Sessions/Metrics tabs, while Sessions now use their latest
+// `updatedAt` activity (falling back to `startedAt`).
 describe("viewer Memories tab sorts newest first (#674)", () => {
   const viewer = readFileSync("src/viewer/index.html", "utf-8");
 
@@ -24,9 +25,9 @@ describe("viewer Memories tab sorts newest first (#674)", () => {
     );
   });
 
-  it("Memories sort mirrors the Sessions/Metrics localeCompare descending pattern", () => {
-    expect(viewer).toMatch(
-      /sessions\.sort\(function\(a, b\) \{ return \(b\.startedAt \|\| ''\)\.localeCompare\(a\.startedAt \|\| ''\); \}\)/,
-    );
+  it("Sessions sort by updatedAt with a startedAt fallback", () => {
+    expect(viewer).toMatch(/function sessionActivityAt\(s\)/);
+    expect(viewer).toMatch(/s\.updatedAt \|\| s\.startedAt/);
+    expect(viewer).toMatch(/sort\(compareSessionActivity\)/);
   });
 });

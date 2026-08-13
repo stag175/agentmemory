@@ -2,6 +2,7 @@ import type {
   RawObservation,
   CompressedObservation,
   ObservationType,
+  SearchableRawObservation,
 } from "../types.js";
 
 // Zero-LLM compression path. Converts a RawObservation into a
@@ -103,4 +104,37 @@ export function buildSyntheticCompression(
   if (raw.imageData) result.imageData = raw.imageData;
   if (raw.agentId) result.agentId = raw.agentId;
   return result;
+}
+
+/**
+ * Build a searchable placeholder without calling the compression LLM or the
+ * embedding provider. Spreading `raw` first retains every sanitized source
+ * field; the synthetic fields make that same KV row immediately BM25-ready.
+ */
+export function buildSearchableRawObservation(
+  raw: RawObservation,
+  enrichmentStatus: "queued" | "running" | "retrying" | "failed",
+  metadata: {
+    queuedAt?: string;
+    startedAt?: string;
+    finishedAt?: string;
+    error?: string;
+  } = {},
+): SearchableRawObservation {
+  return {
+    ...raw,
+    ...buildSyntheticCompression(raw),
+    enrichmentMode: "synthetic",
+    enrichmentStatus,
+    ...(metadata.queuedAt
+      ? { enrichmentQueuedAt: metadata.queuedAt }
+      : {}),
+    ...(metadata.startedAt
+      ? { enrichmentStartedAt: metadata.startedAt }
+      : {}),
+    ...(metadata.finishedAt
+      ? { enrichmentFinishedAt: metadata.finishedAt }
+      : {}),
+    ...(metadata.error ? { enrichmentError: metadata.error } : {}),
+  };
 }

@@ -2,6 +2,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { deliverHookRequests } from "./_delivery.js";
 
 const exec = promisify(execFile);
 
@@ -13,14 +14,6 @@ function isSdkChildContext(payload: unknown): boolean {
 
 const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
 const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-const TIMEOUT_MS = 1500;
-
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (SECRET) h["Authorization"] = `Bearer ${SECRET}`;
-  return h;
-}
-
 async function git(args: string[], cwd: string): Promise<string | null> {
   try {
     const { stdout } = await exec("git", args, { cwd, timeout: 1500 });
@@ -83,16 +76,15 @@ async function main() {
     files,
   };
 
-  try {
-    await fetch(`${REST_URL}/agentmemory/session/commit`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-  } catch {
-    // best-effort
-  }
+  await deliverHookRequests({
+    restUrl: REST_URL,
+    secret: SECRET,
+    requests: [{
+      path: "/agentmemory/session/commit",
+      kind: "commit_link",
+      body,
+    }],
+  });
 }
 
 main();

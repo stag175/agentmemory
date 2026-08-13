@@ -198,6 +198,37 @@ describe("encrypted StateKV adapter", () => {
     await expect(kv.get("mem:image-embeddings", "image_1")).resolves.toEqual(value);
   });
 
+  it("encrypts the durable LLM job ledger by default", async () => {
+    const base = memoryKV();
+    const kv = createEncryptedStateKV(base, "correct horse battery", {
+      encryption: {
+        keyRef: "test:key",
+        now: () => new Date("2026-01-01T00:00:00.000Z"),
+        scrypt: fastScrypt,
+      },
+    });
+    const job = {
+      id: "obs_private",
+      observationId: "obs_private",
+      sessionId: "session_private",
+      status: "retrying",
+      attempt: 2,
+      maxAttempts: 10,
+      provider: "openai",
+      model: "private-local-model",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:01:00.000Z",
+      error: "private provider error",
+    };
+
+    await kv.set("mem:llm-jobs", job.id, job);
+
+    const raw = base.raw("mem:llm-jobs", job.id);
+    expect(isEncryptedStateValue(raw)).toBe(true);
+    expect(JSON.stringify(raw)).not.toContain("private provider error");
+    await expect(kv.get("mem:llm-jobs", job.id)).resolves.toEqual(job);
+  });
+
   it("fails closed for plaintext reads and encrypted state::update attempts", async () => {
     const base = memoryKV();
     const kv = encryptedKV(base);

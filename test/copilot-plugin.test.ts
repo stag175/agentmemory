@@ -45,6 +45,17 @@ const KNOWN_SKILL_DIRS = [
   "commit-history",
 ];
 
+describe("long-running lifecycle hook timeouts", () => {
+  it("spools model-backed lifecycle work and requests server-side async execution", () => {
+    for (const hook of ["stop.ts", "session-end.ts"]) {
+      const source = readFileSync(join(repoRoot, "src", "hooks", hook), "utf-8");
+      expect(source).toContain("deliverHookRequests");
+      expect(source).toContain("async: true");
+      expect(source).not.toContain("AbortSignal.timeout");
+    }
+  });
+});
+
 describe("Copilot plugin manifest (plugin/plugin.json)", () => {
   it("manifest exists with kebab-case name, version, and required fields", () => {
     const manifestPath = join(pluginRoot, "plugin.json");
@@ -219,6 +230,7 @@ describe("Copilot hook scripts", () => {
     env: Record<string, string> = {},
   ): Promise<{ requests: ObservedRequest[]; stdout: string }> {
     const requests: ObservedRequest[] = [];
+    const hookOutbox = mkdtempSync(join(tmpdir(), "amem-hook-outbox-"));
     const server = createServer((req, res) => {
       let raw = "";
       req.on("data", (chunk) => {
@@ -251,6 +263,7 @@ describe("Copilot hook scripts", () => {
           AGENTMEMORY_URL: `http://127.0.0.1:${address.port}`,
           AGENTMEMORY_SECRET: "",
           AGENTMEMORY_PROJECT_NAME: "repo",
+          AGENTMEMORY_HOOK_OUTBOX_DIR: hookOutbox,
           ...env,
         },
         stdio: ["pipe", "pipe", "pipe"],
@@ -283,6 +296,7 @@ describe("Copilot hook scripts", () => {
       await new Promise<void>((resolveClose) => {
         server.close(() => resolveClose());
       });
+      rmSync(hookOutbox, { recursive: true, force: true });
     }
   }
 
@@ -585,7 +599,7 @@ describe("Copilot hook scripts", () => {
     });
   });
 
-  it("stop sends shaped session and hook trace payloads", async () => {
+  it("stop summarizes without ending the session and sends hook trace payloads", async () => {
     const result = await runHook("scripts/stop.mjs", {
       sessionId: "copilot-session",
       cwd: "C:\\repo",
@@ -596,16 +610,14 @@ describe("Copilot hook scripts", () => {
 
     expect(requestByPath(result, "/agentmemory/summarize").body).toMatchObject({
       sessionId: "copilot-session",
+      async: true,
       agentId: "codex-worker",
       framework: "copilot",
       nativeId: "native-session-1",
     });
-    expect(requestByPath(result, "/agentmemory/session/end").body).toMatchObject({
-      sessionId: "copilot-session",
-      agentId: "codex-worker",
-      framework: "copilot",
-      nativeId: "native-session-1",
-    });
+    expect(
+      result.requests.some((request) => request.path === "/agentmemory/session/end"),
+    ).toBe(false);
     expect(requestByPath(result, "/agentmemory/agent-events").body).toMatchObject({
       type: "custom",
       status: "ok",
@@ -617,6 +629,7 @@ describe("Copilot hook scripts", () => {
       metadata: {
         hookType: "stop",
         summarizeRequested: true,
+        sessionEndRequested: false,
       },
     });
   });

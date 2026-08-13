@@ -118,6 +118,7 @@ describe("mem::observe auto-compress gate (#138)", () => {
     expect(result.observationId).toBeTruthy();
     const compressCalls = sdk.triggered.filter((t) => t.id === "mem::compress");
     expect(compressCalls).toHaveLength(0);
+    expect(kv.store.get("mem:llm-jobs")).toBeUndefined();
   });
 
   it("default: stores a synthetic CompressedObservation with the raw-derived fields", async () => {
@@ -155,15 +156,41 @@ describe("mem::observe auto-compress gate (#138)", () => {
     );
     const sdk = mockSdk();
     const kv = mockKV();
-    registerObserveFunction(sdk as never, kv as never);
+    registerObserveFunction(
+      sdk as never,
+      kv as never,
+      undefined,
+      undefined,
+      { provider: "openai", model: "local-model" },
+    );
 
-    await sdk.trigger("mem::observe", validPayload());
+    const result = (await sdk.trigger(
+      "mem::observe",
+      validPayload(),
+    )) as { observationId: string };
 
     const compressCalls = sdk.triggered.filter((t) => t.id === "mem::compress");
     expect(compressCalls).toHaveLength(1);
     expect(compressCalls[0]?.action).toEqual({
       type: "enqueue",
       queue: "agentmemory-compression",
+    });
+    expect(kv.store.get("mem:llm-jobs")?.get(result.observationId)).toMatchObject({
+      observationId: result.observationId,
+      sessionId: "ses_test",
+      status: "queued",
+      attempt: 0,
+      provider: "openai",
+      model: "local-model",
+    });
+    expect(
+      kv.store.get("mem:obs:ses_test")?.get(result.observationId),
+    ).toMatchObject({
+      raw: { tool_name: "Read" },
+      toolOutput: "file contents here",
+      title: "Read",
+      enrichmentMode: "synthetic",
+      enrichmentStatus: "queued",
     });
   });
 

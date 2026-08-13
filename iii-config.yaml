@@ -21,7 +21,10 @@ workers:
           max_retries: 10
           concurrency: 2
           type: standard
-          backoff_ms: 1000
+          # The provider circuit stays open for 30s after three failures.
+          # Back off beyond that window so queue retries reach half-open
+          # recovery instead of exhausting ten deliveries while still open.
+          backoff_ms: 35000
           poll_interval_ms: 100
         agentmemory-session-lifecycle:
           max_retries: 10

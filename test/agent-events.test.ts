@@ -38,6 +38,7 @@ const CAPTURE_CONTROL_ENV_KEYS = [
   "AGENTMEMORY_ENABLE_CAPTURE",
   "AGENTMEMORY_CAPTURE_ENABLED",
   "AGENTMEMORY_REQUIRE_CAPTURE_CONSENT",
+  "AGENTMEMORY_AUTO_COMPRESS",
 ] as const;
 
 const ORIGINAL_CAPTURE_ENV = Object.fromEntries(
@@ -66,6 +67,8 @@ function forceCaptureEnabledEnv(): void {
   process.env["AGENTMEMORY_ENABLE_CAPTURE"] = "true";
   process.env["AGENTMEMORY_CAPTURE_ENABLED"] = "true";
   process.env["AGENTMEMORY_REQUIRE_CAPTURE_CONSENT"] = "false";
+  // Unit behavior must not depend on a developer's live ~/.agentmemory/.env.
+  process.env["AGENTMEMORY_AUTO_COMPRESS"] = "false";
 }
 
 describe("agent event lineage ledger", () => {
@@ -113,6 +116,59 @@ describe("agent event lineage ledger", () => {
     expect(listed.success).toBe(true);
     expect(listed.total).toBe(1);
     expect(listed.events[0].id).toBe(event.id);
+  });
+
+  it("deduplicates response-lost hook retries for observations and agent events", async () => {
+    sdk.registerFunction("stream::set", async () => ({ success: true }));
+    sdk.registerFunction("stream::send", async () => ({ success: true }));
+    registerObserveFunction(sdk as never, kv as never);
+    registerApiTriggers(sdk as never, kv as never, "secret");
+    const headers = {
+      authorization: "Bearer secret",
+      "x-agentmemory-delivery-id": "delivery-response-lost-0001",
+    };
+    const eventRequest = {
+      headers,
+      query_params: {},
+      body: {
+        type: "custom",
+        sessionId: "ses_retry",
+        functionId: "plugin::stop",
+        metadata: { hookType: "stop", captureSource: "automatic_hook" },
+      },
+    };
+
+    const firstEvent = await sdk.trigger("api::agent-event-record", eventRequest);
+    const retriedEvent = await sdk.trigger("api::agent-event-record", eventRequest);
+    expect(firstEvent).toEqual(retriedEvent);
+    const customEvents = (await kv.list<AgentEvent>(KV.agentEvents)).filter(
+      (event) => event.type === "custom",
+    );
+    expect(customEvents).toHaveLength(1);
+    expect(customEvents[0].id).toMatch(/^agevt_hook_/);
+
+    const observeHeaders = {
+      authorization: "Bearer secret",
+      "x-agentmemory-delivery-id": "delivery-response-lost-0002",
+    };
+    const observeRequest = {
+      headers: observeHeaders,
+      query_params: {},
+      body: {
+        hookType: "prompt_submit",
+        sessionId: "ses_retry",
+        project: "billing",
+        cwd: "/repo/billing",
+        timestamp: "2026-08-13T12:00:00.000Z",
+        data: { prompt: "retain this once" },
+      },
+    };
+    const firstObservation = await sdk.trigger("api::observe", observeRequest);
+    const retriedObservation = await sdk.trigger("api::observe", observeRequest);
+    expect(firstObservation).toEqual(retriedObservation);
+    const raw = await kv.list(KV.observations("ses_retry"));
+    expect(raw).toHaveLength(1);
+    expect((raw[0] as { id: string }).id).toMatch(/^obs_hook_/);
   });
 
   it("exports redacted OpenTelemetry spans without changing the default list shape", async () => {

@@ -22,6 +22,21 @@ import { scoreCompression } from "../eval/quality.js";
 import { compressWithRetry } from "../eval/self-correct.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import { logger } from "../logger.js";
+import { withKeyedLock } from "../state/keyed-mutex.js";
+import type { LlmJob } from "../types.js";
+import {
+  beginCompressionAttempt,
+  getLlmStaleRunningMs,
+  isFailedJobCooled,
+  isCompressedObservation,
+  markCompressionFailed,
+  markCompressionSucceeded,
+  reopenCompressionJob,
+  scheduleTerminalCompressionRetry,
+  type CompressionJobPayload,
+  type LlmJobMetadata,
+} from "./llm-jobs.js";
+import { buildSearchableRawObservation } from "./compress-synthetic.js";
 
 const VALID_TYPES = new Set<string>([
   "file_read",
@@ -69,57 +84,135 @@ export function registerCompressFunction(
   kv: StateKV,
   provider: MemoryProvider,
   metricsStore?: MetricsStore,
+  modelName?: string,
 ): void {
-  sdk.registerFunction("mem::compress", 
-    async (data: {
-      observationId: string;
-      sessionId: string;
-      raw: RawObservation;
-    }) => {
-      const startMs = Date.now();
+  const metadata: LlmJobMetadata = {
+    // The provider wrapper is the actual execution path (and may include a
+    // fallback chain); do not label attempts as merely the configured primary.
+    provider: provider.name,
+    model: modelName ?? provider.name,
+  };
+  const compressionLockMs = getLlmStaleRunningMs();
 
-      let imageDescription: string | undefined;
-      const hasImage = data.raw.modality === "image" || data.raw.modality === "mixed";
-
-      if (hasImage && data.raw.imageData && provider.describeImage) {
-        try {
-          let base64Data = data.raw.imageData;
-          let mimeType = "image/png";
-
-          if (!data.raw.imageData.startsWith("/9j/") && !data.raw.imageData.startsWith("iVBOR")) {
-            if (!isManagedImagePath(data.raw.imageData)) {
-              throw new Error(`Refusing to read image outside managed store: ${data.raw.imageData}`);
-            }
-            const fileBuffer = readFileSync(data.raw.imageData);
-            base64Data = fileBuffer.toString("base64");
-            if (data.raw.imageData.endsWith(".jpg") || data.raw.imageData.endsWith(".jpeg")) mimeType = "image/jpeg";
-            else if (data.raw.imageData.endsWith(".webp")) mimeType = "image/webp";
-            else if (data.raw.imageData.endsWith(".gif")) mimeType = "image/gif";
+  sdk.registerFunction(
+    "mem::compress",
+    async (data: CompressionJobPayload) =>
+      withKeyedLock(
+        `llm-compress:${data.sessionId}:${data.observationId}`,
+        async () => {
+          // A persisted iii queue item and startup redrive can briefly overlap.
+          // Re-check inside the lock so duplicate deliveries never double-call
+          // the provider.
+          const stored = await kv.get<RawObservation | CompressedObservation>(
+            KV.observations(data.sessionId),
+            data.observationId,
+          );
+          if (isCompressedObservation(stored)) {
+            await markCompressionSucceeded(kv, data, metadata);
+            return {
+              success: true,
+              compressed: stored,
+              qualityScore: Math.round((stored.confidence ?? 0) * 100),
+              idempotent: true,
+            };
           }
 
-          imageDescription = await provider.describeImage(base64Data, mimeType, VISION_DESCRIPTION_PROMPT);
-          logger.info("Image described by vision model", { obsId: data.observationId });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.warn("Vision model call failed, falling back to text-only compression", {
-            obsId: data.observationId,
-            error: msg,
+          let priorJob = await kv.get<LlmJob>(
+            KV.llmJobs,
+            data.observationId,
+          );
+          if (
+            priorJob?.status === "failed" &&
+            priorJob.attempt >= priorJob.maxAttempts
+          ) {
+            if (data.force || isFailedJobCooled(priorJob)) {
+              priorJob = await reopenCompressionJob(kv, priorJob);
+            } else {
+              return {
+                success: false,
+                error: "compression_failed",
+                terminal: true,
+                attempts: priorJob.attempt,
+              };
+            }
+          }
+
+          const raw =
+            stored && !isCompressedObservation(stored) ? stored : data.raw;
+          const effectiveData: CompressionJobPayload = { ...data, raw };
+          const job = await beginCompressionAttempt(kv, effectiveData, metadata);
+          const runningFallback = buildSearchableRawObservation(raw, "running", {
+            queuedAt: job.queuedAt,
+            startedAt: job.startedAt,
           });
-        }
-      }
+          await kv.set(
+            KV.observations(data.sessionId),
+            data.observationId,
+            runningFallback,
+          );
+          getSearchIndex().add(runningFallback);
+          const startMs = Date.now();
 
-      const prompt = buildCompressionPrompt({
-        hookType: data.raw.hookType,
-        toolName: data.raw.toolName,
-        toolInput: data.raw.toolInput,
-        toolOutput: imageDescription
-          ? `[Image Description]: ${imageDescription}\n\n${data.raw.toolOutput ?? ""}`
-          : data.raw.toolOutput,
-        userPrompt: data.raw.userPrompt,
-        timestamp: data.raw.timestamp,
-      });
+          try {
+            let imageDescription: string | undefined;
+            const hasImage =
+              raw.modality === "image" || raw.modality === "mixed";
 
-      try {
+            if (hasImage && raw.imageData && provider.describeImage) {
+              try {
+                let base64Data = raw.imageData;
+                let mimeType = "image/png";
+
+                if (
+                  !raw.imageData.startsWith("/9j/") &&
+                  !raw.imageData.startsWith("iVBOR")
+                ) {
+                  if (!isManagedImagePath(raw.imageData)) {
+                    throw new Error(
+                      `Refusing to read image outside managed store: ${raw.imageData}`,
+                    );
+                  }
+                  const fileBuffer = readFileSync(raw.imageData);
+                  base64Data = fileBuffer.toString("base64");
+                  if (
+                    raw.imageData.endsWith(".jpg") ||
+                    raw.imageData.endsWith(".jpeg")
+                  )
+                    mimeType = "image/jpeg";
+                  else if (raw.imageData.endsWith(".webp"))
+                    mimeType = "image/webp";
+                  else if (raw.imageData.endsWith(".gif"))
+                    mimeType = "image/gif";
+                }
+
+                imageDescription = await provider.describeImage(
+                  base64Data,
+                  mimeType,
+                  VISION_DESCRIPTION_PROMPT,
+                );
+                logger.info("Image described by vision model", {
+                  obsId: data.observationId,
+                });
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                logger.warn(
+                  "Vision model call failed, falling back to text-only compression",
+                  { obsId: data.observationId, error: msg },
+                );
+              }
+            }
+
+            const prompt = buildCompressionPrompt({
+              hookType: raw.hookType,
+              toolName: raw.toolName,
+              toolInput: raw.toolInput,
+              toolOutput: imageDescription
+                ? `[Image Description]: ${imageDescription}\n\n${raw.toolOutput ?? ""}`
+                : raw.toolOutput,
+              userPrompt: raw.userPrompt,
+              timestamp: raw.timestamp,
+            });
+
         const validator = (response: string) => {
           const parsed = parseCompressionXml(response);
           if (!parsed) return { valid: false, errors: ["xml_parse_failed"] };
@@ -142,16 +235,21 @@ export function registerCompressFunction(
         );
 
         const parsed = parseCompressionXml(response);
-        if (!parsed) {
-          const latencyMs = Date.now() - startMs;
-          if (metricsStore) {
-            await metricsStore.record("mem::compress", latencyMs, false);
-          }
-          logger.warn("Failed to parse compression XML", {
+        const validated = parsed
+          ? validateOutput(CompressOutputSchema, parsed, "mem::compress")
+          : null;
+        if (!parsed || !validated?.valid) {
+          logger.warn("Invalid compression output", {
             obsId: data.observationId,
             retried,
+            errors:
+              validated && !validated.valid
+                ? validated.result.errors
+                : ["xml_parse_failed"],
           });
-          return { success: false, error: "parse_failed" };
+          throw new Error(
+            parsed ? "schema_validation_failed" : "parse_failed",
+          );
         }
 
         const qualityScore = scoreCompression(parsed);
@@ -159,13 +257,18 @@ export function registerCompressFunction(
         const compressed: CompressedObservation = {
           id: data.observationId,
           sessionId: data.sessionId,
-          timestamp: data.raw.timestamp,
+          timestamp: raw.timestamp,
           ...parsed,
           confidence: qualityScore / 100,
-          ...(hasImage ? { modality: data.raw.modality } : {}),
+          enrichmentMode: "llm",
+          enrichmentStatus: "succeeded",
+          enrichmentQueuedAt: job.queuedAt,
+          enrichmentStartedAt: job.startedAt,
+          enrichmentFinishedAt: new Date().toISOString(),
+          ...(hasImage ? { modality: raw.modality } : {}),
           ...(imageDescription ? { imageDescription } : {}),
-          ...(data.raw.imageData ? { imageRef: data.raw.imageData } : {}),
-          ...(data.raw.agentId ? { agentId: data.raw.agentId } : {}),
+          ...(raw.imageData ? { imageRef: raw.imageData } : {}),
+          ...(raw.agentId ? { agentId: raw.agentId } : {}),
         };
 
         await kv.set(
@@ -241,6 +344,8 @@ export function registerCompressFunction(
           );
         }
 
+        await markCompressionSucceeded(kv, effectiveData, metadata, job);
+
         logger.info("Observation compressed", {
           obsId: data.observationId,
           type: compressed.type,
@@ -259,9 +364,60 @@ export function registerCompressFunction(
         logger.error("Compression failed", {
           obsId: data.observationId,
           error: msg,
+          attempt: job.attempt,
+          maxAttempts: job.maxAttempts,
         });
-        return { success: false, error: "compression_failed" };
+        const failed = await markCompressionFailed(
+          kv,
+          effectiveData,
+          metadata,
+          job,
+          err,
+        );
+        const searchableFailure = buildSearchableRawObservation(
+          raw,
+          failed.status === "failed" ? "failed" : "retrying",
+          {
+            queuedAt: failed.queuedAt,
+            startedAt: failed.startedAt,
+            ...(failed.status === "failed"
+              ? { finishedAt: new Date().toISOString() }
+              : {}),
+            error: failed.error ?? msg,
+          },
+        );
+        await kv.set(
+          KV.observations(data.sessionId),
+          data.observationId,
+          searchableFailure,
+        );
+        // SearchIndex.add replaces the same ID. Keep the fallback recallable
+        // without issuing a second embedding while the provider is unhealthy.
+        getSearchIndex().add(searchableFailure);
+        if (failed.status === "retrying") {
+          // Throwing is intentional: iii-queue only retries rejected
+          // invocations. Returning {success:false} acknowledged and dropped
+          // transient provider failures in previous releases.
+          throw new Error(`compression_retryable: ${msg}`);
+        }
+        scheduleTerminalCompressionRetry(
+          sdk,
+          kv,
+          effectiveData,
+          metadata,
+        );
+        return {
+          success: false,
+          error: "compression_failed",
+          terminal: true,
+          attempts: failed.attempt,
+        };
       }
-    },
+        },
+        {
+          timeoutMs: compressionLockMs,
+          staleMs: compressionLockMs + 60_000,
+        },
+      ),
   );
 }

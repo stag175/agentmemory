@@ -51,6 +51,9 @@ export const KV = {
   auditChainHead: "mem:audit:chain-head",
   agentEvents: "mem:agent-events",
   agentEventIndexes: "mem:agent-events:indexes",
+  // Durable idempotency receipts for automatic hook outbox deliveries.
+  // Key = sha256(route + delivery ID); values never contain auth headers.
+  hookDeliveries: "mem:hook-deliveries",
   actions: "mem:actions",
   actionEdges: "mem:action-edges",
   leases: "mem:leases",
@@ -80,6 +83,12 @@ export const KV = {
   // #771: tracks the most recent smart-search call per session, used by
   // the followup-rate diagnostic. Key = sessionId. TTL-swept hourly.
   recentSearches: "mem:recent-searches",
+  // Durable control-plane ledger for per-observation LLM compression.
+  // Key = observation id. The iii queue remains the execution transport;
+  // this scope is the source of truth for user-visible job state, retry
+  // attempts, and crash/restart reconciliation.
+  llmJobs: "mem:llm-jobs",
+  llmPipeline: "mem:llm-pipeline",
 } as const;
 
 export const STREAM = {

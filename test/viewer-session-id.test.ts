@@ -216,7 +216,8 @@ describe("viewer session rendering", () => {
       memoriesAvailable: true,
       memories: [],
       graphStats: null,
-      recentAudit: [],
+      recentEventsAvailable: true,
+      recentEvents: [],
       lessons: [],
       crystals: [],
     };
@@ -235,7 +236,8 @@ describe("viewer session rendering", () => {
       memoriesAvailable: true,
       memories: [],
       graphStats: { totalNodes: 0, totalEdges: 0 },
-      recentAudit: [],
+      recentEventsAvailable: true,
+      recentEvents: [],
       lessons: [],
       crystals: [],
     };
@@ -248,7 +250,7 @@ describe("viewer session rendering", () => {
     sandbox.renderDashboard();
     expect(getElement("view-dashboard").innerHTML).not.toContain("First run");
 
-    sandbox.state.dashboard = { ...baseline, recentAudit: [{ id: "audit_1" }] };
+    sandbox.state.dashboard = { ...baseline, recentEvents: [{ id: "event_1" }] };
     sandbox.renderDashboard();
     expect(getElement("view-dashboard").innerHTML).not.toContain("First run");
   });
@@ -263,7 +265,8 @@ describe("viewer session rendering", () => {
       memoriesAvailable: true,
       memories: [],
       graphStats: null,
-      recentAudit: [],
+      recentEventsAvailable: true,
+      recentEvents: [],
       lessons: [],
       crystals: [],
     };
@@ -290,5 +293,283 @@ describe("viewer session rendering", () => {
     expect(tabButtons.length).toBeGreaterThan(0);
     expect(() => sandbox.switchTab("sessions")).not.toThrow();
     expect(tabButtons.some((button: any) => button.classList.contains("active"))).toBe(true);
+  });
+
+  it("loads dashboard activity from agent events and exposes truthful LLM queue state", async () => {
+    const { sandbox, getElement } = loadViewerSandbox();
+    const requests: string[] = [];
+    const responses: Record<string, unknown> = {
+      health: {
+        status: "healthy",
+        health: {},
+        functionMetrics: [
+          {
+            functionId: "mem::compress",
+            totalCalls: 4,
+            successCount: 3,
+            failureCount: 1,
+            avgLatencyMs: 2_500,
+            maxLatencyMs: 7_500,
+            avgQualityScore: 0,
+            lastCallAt: "2026-08-13T17:00:00.000Z",
+            lastSuccessAt: "2026-08-13T16:59:00.000Z",
+          },
+        ],
+      },
+      "sessions?agentId=*": {
+        sessions: [
+          {
+            id: "session-live",
+            project: "current-project",
+            status: "active",
+            observationCount: 4,
+            startedAt: "2026-08-13T10:00:00.000Z",
+            updatedAt: "2026-08-13T17:00:00.000Z",
+          },
+        ],
+      },
+      "memories?latest=true&limit=500&agentId=*": { memories: [] },
+      "graph/stats": { totalNodes: 1, totalEdges: 0 },
+      "agent-events?limit=10": {
+        events: [
+          {
+            id: "event-1",
+            type: "observation_recorded",
+            timestamp: "2026-08-13T17:00:00.000Z",
+            functionId: "mem::observe",
+            metadata: {
+              toolName: "Read",
+              hookType: "post_tool_use",
+              compression: "llm",
+            },
+          },
+          {
+            id: "event-2",
+            type: "tool_failed",
+            timestamp: "2026-08-13T16:59:30.000Z",
+            functionId: "tool:Bash",
+          },
+        ],
+      },
+      semantic: { facts: [] },
+      procedural: { procedures: [] },
+      relations: { relations: [] },
+      lessons: { lessons: [] },
+      crystals: { crystals: [] },
+      "llm-status": {
+        enabled: true,
+        reason: "auto_compress_enabled",
+        waiting: 2,
+        inFlight: 1,
+        retrying: 1,
+        failed: 3,
+        succeeded: 8,
+        rawOrphans: 0,
+        oldestAge: 75,
+        throughputPerMinute: 3.6,
+        lastSuccess: "2026-08-13T16:59:00.000Z",
+        provider: "openai-compatible",
+        model: "local-model",
+      },
+    };
+    sandbox.fetch = async (url: string) => {
+      const path = url.split("/agentmemory/")[1];
+      requests.push(path);
+      return { ok: true, json: async () => responses[path] ?? {} };
+    };
+
+    await sandbox.loadDashboard();
+
+    expect(requests).toContain("agent-events?limit=10");
+    expect(requests).toContain("llm-status");
+    expect(requests).not.toContain("audit?limit=5");
+    const html = getElement("view-dashboard").innerHTML;
+    expect(html).toContain("Observation captured");
+    expect(html).toContain("Read · post tool use · LLM enrichment requested");
+    expect(html).toContain("Tool failed");
+    expect(html).toContain("LLM Jobs");
+    expect(html).toContain("openai-compatible · local-model");
+    expect(html).toContain("Live durable queue state");
+    expect(html).toContain("Enrichment: Enabled");
+    expect(html).toContain("3.6/min");
+    expect(html).toContain("raw orphans 0");
+    expect(html).toContain("Max Latency");
+    expect(html).toContain("7500 ms");
+    expect(html).toContain("Last Call");
+  });
+
+  it("falls back to LLM function metrics without inventing zero queue counts", () => {
+    const { sandbox } = loadViewerSandbox();
+    const jobs = sandbox.normalizeLlmJobs(null, [
+      {
+        functionId: "mem::compress",
+        successCount: 7,
+        failureCount: 2,
+        lastCallAt: "2026-08-13T17:00:00.000Z",
+        lastSuccessAt: "2026-08-13T16:59:00.000Z",
+        lastFailureAt: "2026-08-13T16:58:00.000Z",
+      },
+    ]);
+
+    expect(jobs.queueAvailable).toBe(false);
+    expect(jobs.queued).toBeNull();
+    expect(jobs.running).toBeNull();
+    expect(jobs.retrying).toBeNull();
+    expect(jobs.completed).toBe(7);
+    expect(jobs.failed).toBe(2);
+    expect(jobs.lastSuccessAt).toBe("2026-08-13T16:59:00.000Z");
+
+    const html = sandbox.renderLlmJobsCard(null, [
+      { functionId: "mem::compress", successCount: 7, failureCount: 2 },
+    ]);
+    expect(html).toContain("Queue status unavailable");
+    expect(html).toContain("completed/failed inferred from function metrics");
+    expect(html).toMatch(/<div class="label">Queued<\/div><div class="value">&mdash;<\/div>/);
+    expect(html).not.toContain("HTTP");
+
+    const unavailable = sandbox.normalizeLlmJobs(null, []);
+    expect(unavailable.completed).toBeNull();
+    expect(unavailable.failed).toBeNull();
+    const unavailableHtml = sandbox.renderLlmJobsCard(null, []);
+    expect(unavailableHtml).toMatch(/<div class="label">Completed<\/div><div class="value">&mdash;<\/div>/);
+    expect(unavailableHtml).toMatch(/<div class="label">Failed<\/div><div class="value">&mdash;<\/div>/);
+  });
+
+  it("orders sessions by latest activity and labels updated time", () => {
+    const { sandbox, getElement } = loadViewerSandbox();
+    const sessions = [
+      {
+        id: "new-start-old-activity",
+        project: "started-later",
+        status: "completed",
+        observationCount: 1,
+        startedAt: "2026-08-13T15:00:00.000Z",
+        updatedAt: "2026-08-13T15:01:00.000Z",
+      },
+      {
+        id: "old-start-new-activity",
+        project: "active-now",
+        status: "active",
+        observationCount: 2,
+        startedAt: "2026-08-13T10:00:00.000Z",
+        updatedAt: "2026-08-13T17:00:00.000Z",
+      },
+    ];
+    sandbox.state.dashboard = {
+      loaded: true,
+      health: { status: "healthy", health: {}, functionMetrics: [] },
+      sessionsAvailable: true,
+      sessions,
+      memoriesAvailable: true,
+      memories: [],
+      graphStats: { totalNodes: 1, totalEdges: 0 },
+      recentEventsAvailable: true,
+      recentEvents: [],
+      llmStatus: null,
+      lessons: [],
+      crystals: [],
+    };
+
+    sandbox.renderDashboard();
+    const dashboardHtml = getElement("view-dashboard").innerHTML;
+    expect(dashboardHtml).toContain("<th>Activity</th>");
+    expect(dashboardHtml.indexOf("active-now")).toBeLessThan(
+      dashboardHtml.indexOf("started-later"),
+    );
+
+    sandbox.state.sessions.items = sessions;
+    sandbox.renderSessions();
+    const sessionsHtml = getElement("view-sessions").innerHTML;
+    expect(sessionsHtml.indexOf("active-now")).toBeLessThan(
+      sessionsHtml.indexOf("started-later"),
+    );
+    expect(sessionsHtml).toContain("Updated");
+    expect(sessionsHtml).toContain("Started");
+
+    sandbox.renderTimelineToolbar(sessions);
+    const timelineHtml = getElement("view-timeline").innerHTML;
+    expect(timelineHtml.indexOf("active-now")).toBeLessThan(
+      timelineHtml.indexOf("started-later"),
+    );
+  });
+
+  it("loads twenty recent session histories by updatedAt and deduplicates observations", async () => {
+    const { sandbox } = loadViewerSandbox();
+    const sessions = Array.from({ length: 8 }, (_, index) => ({
+      id: `session-${index}`,
+      project: `project-${index}`,
+      status: "completed",
+      startedAt: `2026-08-${String(index + 1).padStart(2, "0")}T10:00:00.000Z`,
+      updatedAt: `2026-08-${String(index + 10).padStart(2, "0")}T17:00:00.000Z`,
+    }));
+    const paths: string[] = [];
+    sandbox.apiGet = async (path: string) => {
+      paths.push(path);
+      if (path === "sessions?agentId=*") return { sessions };
+      const id = new URLSearchParams(path.split("?")[1]).get("sessionId");
+      if (id === "session-7") {
+        return {
+          observations: [
+            { id: "shared", sessionId: id, timestamp: "2026-08-17T17:00:00.000Z", hookType: "post_tool_use", toolName: "Read" },
+            { id: "shared", sessionId: id, timestamp: "2026-08-17T17:00:00.000Z", type: "file_read", narrative: "Compressed result" },
+          ],
+        };
+      }
+      return { observations: [{ id: `obs-${id}`, sessionId: id, timestamp: "2026-08-13T17:00:00.000Z" }] };
+    };
+
+    await sandbox.loadActivity();
+
+    const observationPaths = paths.filter((path) => path.startsWith("observations?"));
+    expect(observationPaths).toHaveLength(8);
+    expect(observationPaths[0]).toContain("sessionId=session-7");
+    expect(observationPaths.every((path) => path.endsWith("&agentId=*"))).toBe(true);
+    expect(sandbox.state.activity.observations).toHaveLength(8);
+    expect(sandbox.state.activity.observations.find((o: any) => o.id === "shared").narrative).toBe(
+      "Compressed result",
+    );
+  });
+
+  it("replaces a streamed raw observation with its compressed form instead of duplicating it", () => {
+    const { sandbox } = loadViewerSandbox();
+    sandbox.state.activeTab = "activity";
+    sandbox.state.activity.observations = [
+      {
+        id: "obs-1",
+        sessionId: "session-1",
+        timestamp: "2026-08-13T17:00:00.000Z",
+        hookType: "post_tool_use",
+        toolName: "Read",
+        enrichmentStatus: "queued",
+      },
+    ];
+
+    sandbox.routeWsMessage({
+      observation: {
+        id: "obs-1",
+        sessionId: "session-1",
+        timestamp: "2026-08-13T17:00:00.000Z",
+        type: "file_read",
+        narrative: "Read the active configuration",
+        enrichmentStatus: "succeeded",
+      },
+    });
+    sandbox.routeWsMessage({
+      observation: {
+        id: "obs-1",
+        sessionId: "session-1",
+        timestamp: "2026-08-13T17:00:00.000Z",
+        hookType: "post_tool_use",
+        toolName: "Read",
+        enrichmentStatus: "queued",
+      },
+    });
+
+    expect(sandbox.state.activity.observations).toHaveLength(1);
+    expect(sandbox.state.activity.observations[0]).toMatchObject({
+      id: "obs-1",
+      narrative: "Read the active configuration",
+      enrichmentStatus: "succeeded",
+    });
   });
 });

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { buildLineage, eventFields } from "./_lineage.js";
 import { resolveProject } from "./_project.js";
+import { deliverHookRequests, hookDeliveryTimeoutMs } from "./_delivery.js";
 
 // Inlined from ./sdk-guard so each hook bundles to a single self-contained
 // .mjs (matches the pattern used by every other hook entry in tsdown.config).
@@ -21,13 +22,6 @@ const INJECT_CONTEXT = process.env["AGENTMEMORY_INJECT_CONTEXT"] === "true";
 
 const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
 const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-
-// When the server is unreachable a 5s timeout multiplies hard under
-// concurrent fan-out (Slack bots, multi-agent harnesses) and becomes a
-// positive feedback loop that OOM-kills iii-engine (#221). Cap tight on
-// both paths and skip the await entirely when the response is unused.
-const INJECT_TIMEOUT_MS = 1500;
-const REGISTER_TIMEOUT_MS = 800;
 
 function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
@@ -61,35 +55,31 @@ async function main() {
     project,
   });
 
-  const url = `${REST_URL}/agentmemory/session/start`;
-  const init: RequestInit = {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
+  const registration = {
+    path: "/agentmemory/session/start",
+    kind: "session_start",
+    body: {
       ...eventFields(lineage),
       sessionId,
       project,
       cwd,
       captureSource: "automatic_hook",
       hookType: "session_start",
-    }),
+    },
   };
-
-  if (!INJECT_CONTEXT) {
-    // Pure telemetry path: caller never reads the response, so don't
-    // block on it. AbortSignal.timeout caps the wait the event loop
-    // gives the pending socket before exit.
-    fetch(url, {
-      ...init,
-      signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS),
-    }).catch(() => {});
-    return;
-  }
+  const report = await deliverHookRequests({
+    restUrl: REST_URL,
+    secret: SECRET,
+    requests: [registration],
+  });
+  if (!INJECT_CONTEXT || report.delivered === 0) return;
 
   try {
-    const res = await fetch(url, {
-      ...init,
-      signal: AbortSignal.timeout(INJECT_TIMEOUT_MS),
+    const res = await fetch(`${REST_URL}/agentmemory/context`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ sessionId, project, budget: 1500 }),
+      signal: AbortSignal.timeout(hookDeliveryTimeoutMs()),
     });
     if (res.ok) {
       const result = (await res.json()) as { context?: string };

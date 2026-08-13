@@ -420,6 +420,13 @@ describe("Release Gate Eval Helpers", () => {
     expect(await metrics.get("mem::remember")).toMatchObject({
       avgLatencyMs: 30,
       maxLatencyMs: 45,
+      lastCallAt: expect.any(String),
+      lastSuccessAt: expect.any(String),
+    });
+    expect(await metrics.get("mem::remember")).not.toHaveProperty("lastFailureAt");
+    expect(await metrics.get("mem::forget")).toMatchObject({
+      lastCallAt: expect.any(String),
+      lastFailureAt: expect.any(String),
     });
   });
 

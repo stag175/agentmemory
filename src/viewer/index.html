@@ -1251,7 +1251,7 @@
 
     var state = {
       activeTab: 'dashboard',
-      dashboard: { loaded: false, health: null, sessions: [], sessionsAvailable: false, memories: [], memoriesAvailable: false, graphStats: null, recentAudit: [], lessons: [], crystals: [] },
+      dashboard: { loaded: false, health: null, sessions: [], sessionsAvailable: false, memories: [], memoriesAvailable: false, graphStats: null, recentEvents: [], recentEventsAvailable: false, llmStatus: null, lessons: [], crystals: [] },
       graph: { loaded: false, nodes: [], edges: [], stats: null, filters: {}, selectedNode: null, queryError: null, truncated: false, totalNodes: 0, totalEdges: 0 },
       memories: { loaded: false, items: [], search: '', typeFilter: '' },
       timeline: { loaded: false, observations: [], sessionId: '', minImportance: 0, page: 0, pageSize: 50 },
@@ -1310,6 +1310,42 @@
       var id = shortSessionId(s, 8);
       var name = sessionDisplayName(s);
       return id ? name + ' (' + id + ')' : name + ' (missing id)';
+    }
+    function sessionActivityAt(s) {
+      return (s && (s.updatedAt || s.startedAt)) || '';
+    }
+    function compareSessionActivity(a, b) {
+      return sessionActivityAt(b).localeCompare(sessionActivityAt(a));
+    }
+    function isCompressedObservation(o) {
+      return !!(o && (
+        o.enrichmentStatus === 'succeeded' ||
+        o.narrative ||
+        (Array.isArray(o.facts) && o.facts.length > 0) ||
+        (Array.isArray(o.concepts) && o.concepts.length > 0)
+      ));
+    }
+    function upsertObservation(items, observation, prepend) {
+      if (!observation) return items;
+      var id = observation.id !== undefined && observation.id !== null ? String(observation.id) : '';
+      var existing = id ? items.findIndex(function(o) { return String(o && o.id) === id; }) : -1;
+      if (existing >= 0) {
+        var current = items[existing];
+        var preferIncoming = isCompressedObservation(observation) || !isCompressedObservation(current);
+        items[existing] = preferIncoming
+          ? Object.assign({}, current, observation)
+          : Object.assign({}, observation, current);
+      } else if (prepend) {
+        items.unshift(observation);
+      } else {
+        items.push(observation);
+      }
+      return items;
+    }
+    function dedupeObservations(items) {
+      var deduped = [];
+      (items || []).forEach(function(o) { upsertObservation(deduped, o, false); });
+      return deduped;
     }
     function debounce(fn, ms) {
       var t;
@@ -1503,12 +1539,13 @@
           apiGet('sessions?agentId=*'),
           apiGet('memories?latest=true&limit=500&agentId=*'),
           apiGet('graph/stats'),
-          apiGet('audit?limit=5'),
+          apiGet('agent-events?limit=10'),
           apiGet('semantic'),
           apiGet('procedural'),
           apiGet('relations'),
           apiGet('lessons'),
-          apiGet('crystals')
+          apiGet('crystals'),
+          apiGet('llm-status')
         ]);
         // A websocket event, timer, and manual refresh can overlap. Only the
         // newest request may update the visible dashboard.
@@ -1519,12 +1556,14 @@
         state.dashboard.memoriesAvailable = !!(results[2] && Array.isArray(results[2].memories));
         if (state.dashboard.memoriesAvailable) state.dashboard.memories = results[2].memories;
         state.dashboard.graphStats = results[3];
-        state.dashboard.recentAudit = (results[4] && results[4].entries) || [];
+        state.dashboard.recentEventsAvailable = !!(results[4] && Array.isArray(results[4].events));
+        if (state.dashboard.recentEventsAvailable) state.dashboard.recentEvents = results[4].events;
         state.dashboard.semantic = (results[5] && results[5].facts) || (results[5] && results[5].semantic) || [];
         state.dashboard.procedural = (results[6] && results[6].procedures) || (results[6] && results[6].procedural) || [];
         state.dashboard.lessons = (results[8] && results[8].lessons) || [];
         state.dashboard.crystals = (results[9] && results[9].crystals) || [];
         state.dashboard.relations = (results[7] && results[7].relations) || [];
+        state.dashboard.llmStatus = results[10];
         state.dashboard.loaded = true;
         renderDashboard();
       } catch (err) {
@@ -1576,6 +1615,163 @@
       };
     }
 
+    function agentEventPresentation(event) {
+      var type = (event && event.type) || 'event';
+      var metadata = (event && event.metadata) || {};
+      var toolName = metadata.toolName || (event && event.functionId) || '';
+      var hook = metadata.hookType ? String(metadata.hookType).replace(/_/g, ' ') : '';
+      if (type === 'observation_recorded') {
+        var detail = [toolName, hook].filter(Boolean);
+        if (metadata.compression === 'llm') detail.push('LLM enrichment requested');
+        if (metadata.compression === 'synthetic') detail.push('synthetic enrichment');
+        return { badge: 'badge-blue', label: 'Observation captured', detail: detail.join(' · ') };
+      }
+      if (type === 'tool_requested') {
+        return { badge: 'badge-yellow', label: 'Tool requested', detail: toolName };
+      }
+      if (type === 'tool_completed') {
+        return { badge: 'badge-green', label: 'Tool completed', detail: toolName };
+      }
+      if (type === 'tool_failed') {
+        return { badge: 'badge-red', label: 'Tool failed', detail: toolName };
+      }
+      return {
+        badge: OP_BADGES[type] || 'badge-muted',
+        label: String(type).replace(/_/g, ' '),
+        detail: toolName
+      };
+    }
+
+    function firstFiniteNumber() {
+      for (var i = 0; i < arguments.length; i++) {
+        var value = Number(arguments[i]);
+        if (arguments[i] !== null && arguments[i] !== undefined && Number.isFinite(value)) return value;
+      }
+      return null;
+    }
+
+    function latestTimestamp(values) {
+      var latest = '';
+      var latestMs = -1;
+      (values || []).forEach(function(value) {
+        if (!value) return;
+        var ms = new Date(value).getTime();
+        if (!Number.isNaN(ms) && ms > latestMs) {
+          latest = String(value);
+          latestMs = ms;
+        }
+      });
+      return latest;
+    }
+
+    function isLlmFunctionMetric(metric) {
+      var id = String((metric && metric.functionId) || '');
+      return /^mem::(compress|summarize|enrich|reflect|consolidate|graph-extract|crystallize)/.test(id);
+    }
+
+    function normalizeLlmJobs(status, functionMetrics) {
+      var root = status && typeof status === 'object' ? status : null;
+      var details = root && root.llm && typeof root.llm === 'object'
+        ? Object.assign({}, root, root.llm)
+        : root;
+      var queue = details && details.queue && typeof details.queue === 'object'
+        ? details.queue
+        : details && details.jobs && typeof details.jobs === 'object'
+          ? details.jobs
+          : details && details.counts && typeof details.counts === 'object'
+            ? details.counts
+            : null;
+      var queued = firstFiniteNumber(queue && queue.queued, queue && queue.waiting, queue && queue.pending, details && details.queued, details && details.waiting, details && details.pending);
+      var running = firstFiniteNumber(queue && queue.running, queue && queue.active, queue && queue.inFlight, details && details.running, details && details.inFlight);
+      var retrying = firstFiniteNumber(queue && queue.retrying, queue && queue.retries, details && details.retrying, details && details.retries);
+      var queueFailed = firstFiniteNumber(queue && queue.failed, details && details.failed);
+      var completed = firstFiniteNumber(queue && queue.completed, queue && queue.succeeded, details && details.completed, details && details.succeeded);
+      var queueAvailable = !!(details && details.queueAvailable === true) ||
+        [queued, running, retrying].some(function(value) { return value !== null; });
+
+      var metrics = (functionMetrics || []).filter(isLlmFunctionMetric);
+      var inferredCompleted = metrics.length > 0
+        ? metrics.reduce(function(total, metric) { return total + (Number(metric.successCount) || 0); }, 0)
+        : null;
+      var inferredFailed = metrics.length > 0
+        ? metrics.reduce(function(total, metric) { return total + (Number(metric.failureCount) || 0); }, 0)
+        : null;
+      var providerValue = details && details.provider;
+      var provider = typeof providerValue === 'string'
+        ? providerValue
+        : providerValue && (providerValue.name || providerValue.id || providerValue.type);
+      provider = provider || (details && (details.providerName || details.providerId)) || '';
+      var model = (details && details.model) || (providerValue && providerValue.model) || '';
+      var metricLastCall = latestTimestamp(metrics.map(function(metric) { return metric.lastCallAt; }));
+      var metricLastSuccess = latestTimestamp(metrics.map(function(metric) { return metric.lastSuccessAt; }));
+      var metricLastFailure = latestTimestamp(metrics.map(function(metric) { return metric.lastFailureAt; }));
+
+      return {
+        endpointAvailable: !!root,
+        enabled: details && typeof details.enabled === 'boolean' ? details.enabled : null,
+        reason: (details && details.reason) || '',
+        queueAvailable: queueAvailable,
+        queued: queued,
+        running: running,
+        retrying: retrying,
+        completed: completed !== null ? completed : inferredCompleted,
+        failed: queueFailed !== null ? queueFailed : inferredFailed,
+        countsInferred: (completed === null && inferredCompleted !== null) || (queueFailed === null && inferredFailed !== null),
+        provider: provider,
+        model: model,
+        rawOrphans: firstFiniteNumber(details && details.rawOrphans),
+        oldestAge: firstFiniteNumber(details && details.oldestAge),
+        throughputPerMinute: firstFiniteNumber(details && details.throughputPerMinute),
+        lastCallAt: (details && (details.lastCallAt || details.lastDispatch || details.lastActivityAt)) || metricLastCall,
+        lastSuccessAt: (details && (details.lastSuccessAt || details.lastSuccess)) || metricLastSuccess,
+        lastFailureAt: (details && (details.lastFailureAt || details.lastFailure)) || metricLastFailure
+      };
+    }
+
+    function llmCount(value) {
+      return value === null || value === undefined ? '&mdash;' : String(value);
+    }
+
+    function renderLlmJobsCard(status, functionMetrics) {
+      var jobs = normalizeLlmJobs(status, functionMetrics);
+      var queueNote = jobs.enabled === false
+        ? 'Automatic LLM enrichment disabled'
+        : jobs.queueAvailable
+        ? 'Live durable queue state'
+        : 'Queue status unavailable';
+      if (jobs.countsInferred) queueNote += ' · completed/failed inferred from function metrics';
+      var providerLabel = [jobs.provider, jobs.model].filter(Boolean).join(' · ') || 'Provider/model unavailable';
+      var html = '<div class="card" style="margin-bottom:16px"><div class="card-title">LLM Jobs</div>';
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:10px;">';
+      html += '<div class="stat-card"><div class="label">Queued</div><div class="value">' + llmCount(jobs.queueAvailable ? jobs.queued : null) + '</div></div>';
+      html += '<div class="stat-card"><div class="label">Running</div><div class="value">' + llmCount(jobs.queueAvailable ? jobs.running : null) + '</div></div>';
+      html += '<div class="stat-card"><div class="label">Retrying</div><div class="value">' + llmCount(jobs.queueAvailable ? jobs.retrying : null) + '</div></div>';
+      html += '<div class="stat-card"><div class="label">Completed</div><div class="value">' + llmCount(jobs.completed) + '</div></div>';
+      html += '<div class="stat-card"><div class="label">Failed</div><div class="value">' + llmCount(jobs.failed) + '</div></div>';
+      html += '</div>';
+      html += '<div style="font-size:12px;color:var(--ink-muted);line-height:1.6;">' + esc(providerLabel) + '</div>';
+      html += '<div style="font-size:11px;color:var(--ink-faint);font-family:var(--font-mono);">' + esc(queueNote) + '</div>';
+      if (jobs.endpointAvailable) {
+        var enabledLabel = jobs.enabled === true ? 'Enabled' : jobs.enabled === false ? 'Disabled' : 'Unknown';
+        var details = ['Enrichment: ' + enabledLabel];
+        if (jobs.throughputPerMinute !== null) details.push(jobs.throughputPerMinute.toFixed(1) + '/min');
+        if (jobs.oldestAge !== null && jobs.oldestAge > 0) {
+          var ageLabel = jobs.oldestAge >= 3600
+            ? (jobs.oldestAge / 3600).toFixed(1) + 'h'
+            : jobs.oldestAge >= 60
+              ? Math.round(jobs.oldestAge / 60) + 'm'
+              : Math.round(jobs.oldestAge) + 's';
+          details.push('oldest ' + ageLabel);
+        }
+        if (jobs.rawOrphans !== null) details.push('raw orphans ' + jobs.rawOrphans);
+        html += '<div style="font-size:11px;color:var(--ink-faint);font-family:var(--font-mono);">' + esc(details.join(' · ')) + '</div>';
+      }
+      html += '<div style="font-size:11px;color:var(--ink-faint);font-family:var(--font-mono);">Last success: ' + esc(jobs.lastSuccessAt ? formatTime(jobs.lastSuccessAt) : 'unavailable') + '</div>';
+      if (jobs.lastFailureAt) html += '<div style="font-size:11px;color:var(--ink-faint);font-family:var(--font-mono);">Last failure: ' + esc(formatTime(jobs.lastFailureAt)) + '</div>';
+      html += '</div>';
+      return html;
+    }
+
     function renderDashboard() {
       var el = document.getElementById('view-dashboard');
       var d = state.dashboard;
@@ -1595,8 +1791,9 @@
       // First-run guidance is valid only after the sessions source succeeds.
       // Never turn a 5xx/timeout into a false claim that no sessions exist.
       var genuineFirstRun = d.sessionsAvailable && d.memoriesAvailable &&
+        d.recentEventsAvailable &&
         d.sessions.length === 0 && d.memories.length === 0 &&
-        nodeCount === 0 && d.recentAudit.length === 0;
+        nodeCount === 0 && d.recentEvents.length === 0;
       if (genuineFirstRun) {
         html += '<div class="card" style="margin-bottom:14px;padding:24px 28px;background:var(--bg-subtle);border-left:3px solid var(--accent);">' +
           '<div style="font-family:var(--font-ui);font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:8px;">First run &rarr; magical moment in 10 seconds</div>' +
@@ -1639,6 +1836,8 @@
         : contextEstimate.reason;
       html += '<div class="stat-card" title="Projection for one bounded memory retrieval versus loading the full observed history. This is not measured host-model token usage or a billing estimate."><div class="label">Context Reduction (est.)</div><div class="value">' + estimateValue + '</div><div class="sub">' + estimateSub + '</div></div>';
       html += '</div>';
+
+      html += renderLlmJobsCard(d.llmStatus, fMetrics);
 
       if (snap.memory || snap.cpu) {
         html += '<div class="card" style="margin-bottom:16px"><div class="card-title">System Resources</div>';
@@ -1697,30 +1896,31 @@
       if (d.sessions.length === 0) {
         html += '<div class="empty-state"><p>No sessions yet. Start a coding session with agentmemory hooks enabled.</p></div>';
       } else {
-        var recent = d.sessions.slice().sort(function(a, b) { return (b.startedAt || '').localeCompare(a.startedAt || ''); }).slice(0, 5);
-        html += '<table><tr><th>Project</th><th>Status</th><th>Obs</th><th>Started</th></tr>';
+        var recent = d.sessions.slice().sort(compareSessionActivity).slice(0, 5);
+        html += '<table><tr><th>Project</th><th>Status</th><th>Obs</th><th>Activity</th></tr>';
         recent.forEach(function(s) {
           var statusBadge = s.status === 'active' ? 'badge-green' : s.status === 'completed' ? 'badge-blue' : 'badge-muted';
           html += '<tr><td style="color:var(--ink);font-weight:500;">' + esc(sessionDisplayName(s)) + '</td>';
           html += '<td><span class="badge ' + statusBadge + '">' + esc(s.status) + '</span></td>';
           html += '<td style="color:var(--ink-muted);font-family:var(--font-mono);font-size:12px;">' + (s.observationCount || 0) + '</td>';
-          html += '<td style="font-family:var(--font-mono);font-size:11px;color:var(--ink-faint);">' + esc(shortTime(s.startedAt)) + '</td></tr>';
+          html += '<td style="font-family:var(--font-mono);font-size:11px;color:var(--ink-faint);" title="Updated ' + attr(formatTime(sessionActivityAt(s))) + '">' + esc(shortTime(sessionActivityAt(s))) + '</td></tr>';
         });
         html += '</table>';
       }
       html += '</div>';
 
       html += '<div class="card"><div class="card-title">Recent Activity</div>';
-      if (d.recentAudit.length === 0) {
+      if (!d.recentEventsAvailable) {
+        html += '<div class="empty-state"><p>Recent activity temporarily unavailable</p></div>';
+      } else if (d.recentEvents.length === 0) {
         html += '<div class="empty-state"><p>No activity recorded yet</p></div>';
       } else {
-        d.recentAudit.forEach(function(a) {
-          var badgeClass = OP_BADGES[a.operation] || 'badge-muted';
+        d.recentEvents.forEach(function(event) {
+          var presentation = agentEventPresentation(event);
           html += '<div style="padding:6px 0;border-bottom:1px solid var(--border-light);font-size:13px;">';
-          html += '<span class="badge ' + badgeClass + '">' + esc(a.operation) + '</span> ';
-          if (a.functionId) html += '<span style="font-size:11px;color:var(--ink-muted);font-family:var(--font-mono);">' + esc(a.functionId) + '</span> ';
-          html += '<span style="color:var(--ink-faint);font-size:10px;font-family:var(--font-mono);">' + esc(shortTime(a.timestamp)) + '</span>';
-          if (a.targetIds && a.targetIds.length) html += '<span style="font-size:10px;color:var(--ink-faint);margin-left:4px;">(' + a.targetIds.length + ' targets)</span>';
+          html += '<span class="badge ' + presentation.badge + '">' + esc(presentation.label) + '</span> ';
+          if (presentation.detail) html += '<span style="font-size:11px;color:var(--ink-muted);font-family:var(--font-mono);">' + esc(presentation.detail) + '</span> ';
+          html += '<span style="color:var(--ink-faint);font-size:10px;font-family:var(--font-mono);" title="' + attr(formatTime(event.timestamp)) + '">' + esc(formatTime(event.timestamp) || 'Timestamp unavailable') + '</span>';
           html += '</div>';
         });
       }
@@ -1731,21 +1931,24 @@
       if (fMetrics.length > 0) {
         var sorted = fMetrics.slice().sort(function(a, b) { return (b.totalCalls || 0) - (a.totalCalls || 0); });
         html += '<div class="card" style="margin-top:16px"><div class="card-title">Function Metrics (OTel)</div>';
-        html += '<table class="metric-table"><tr><th>Function</th><th style="text-align:right">Calls</th><th style="text-align:right">Success</th><th style="text-align:right">Fail</th><th style="text-align:right">Avg Latency</th><th style="text-align:right">Quality</th></tr>';
+        html += '<div style="overflow-x:auto;"><table class="metric-table"><tr><th>Function</th><th style="text-align:right">Calls</th><th style="text-align:right">Success</th><th style="text-align:right">Fail</th><th style="text-align:right">Avg Latency</th><th style="text-align:right">Max Latency</th><th style="text-align:right">Last Call</th><th style="text-align:right">Quality</th></tr>';
         sorted.forEach(function(m) {
           var successRate = m.totalCalls > 0 ? Math.round((m.successCount / m.totalCalls) * 100) : 0;
           var rateColor = successRate >= 95 ? 'var(--green)' : successRate >= 80 ? 'var(--yellow)' : 'var(--red)';
           var latencyColor = m.avgLatencyMs > 1000 ? 'var(--red)' : m.avgLatencyMs > 200 ? 'var(--yellow)' : 'var(--green)';
+          var maxLatency = firstFiniteNumber(m.maxLatencyMs);
           html += '<tr>';
           html += '<td class="metric-fn">' + esc(m.functionId) + '</td>';
           html += '<td class="metric-num">' + m.totalCalls + '</td>';
           html += '<td class="metric-num" style="color:' + rateColor + '">' + m.successCount + ' (' + successRate + '%)</td>';
           html += '<td class="metric-num" style="color:' + (m.failureCount > 0 ? 'var(--red)' : 'var(--ink-faint)') + '">' + m.failureCount + '</td>';
           html += '<td class="metric-num" style="color:' + latencyColor + '">' + Math.round(m.avgLatencyMs) + ' ms</td>';
+          html += '<td class="metric-num">' + (maxLatency !== null ? Math.round(maxLatency) + ' ms' : '&mdash;') + '</td>';
+          html += '<td class="metric-num" title="' + attr(formatTime(m.lastCallAt)) + '">' + esc(m.lastCallAt ? formatTime(m.lastCallAt) : 'unavailable') + '</td>';
           html += '<td class="metric-num">' + (m.avgQualityScore > 0 ? m.avgQualityScore.toFixed(2) : '-') + '</td>';
           html += '</tr>';
         });
-        html += '</table></div>';
+        html += '</table></div></div>';
       }
 
       if (workers.length > 0) {
@@ -2729,12 +2932,12 @@
     async function loadTimeline() {
       var el = document.getElementById('view-timeline');
       el.innerHTML = '<div class="loading">Loading timeline...</div>';
-      var sessResult = await apiGet('sessions');
+      var sessResult = await apiGet('sessions?agentId=*');
       var sessions = (sessResult && sessResult.sessions) || [];
       state.timeline.loaded = true;
 
       if (sessions.length > 0 && !state.timeline.sessionId) {
-        var sorted = sessions.slice().sort(function(a, b) { return (b.startedAt || '').localeCompare(a.startedAt || ''); });
+        var sorted = sessions.slice().sort(compareSessionActivity);
         var firstSelectable = sorted.find(function(s) { return sessionId(s); });
         state.timeline.sessionId = firstSelectable ? sessionId(firstSelectable) : '';
       }
@@ -2747,7 +2950,7 @@
       var el = document.getElementById('view-timeline');
       var html = '<div class="toolbar">';
       html += '<select id="tl-session"><option value="">Select session</option>';
-      sessions.sort(function(a, b) { return (b.startedAt || '').localeCompare(a.startedAt || ''); }).forEach(function(s) {
+      sessions.slice().sort(compareSessionActivity).forEach(function(s) {
         var id = sessionId(s);
         var disabled = id ? '' : ' disabled';
         html += '<option value="' + esc(id) + '"' + (id && state.timeline.sessionId === id ? ' selected' : '') + disabled + '>' + esc(sessionLabel(s)) + '</option>';
@@ -2780,7 +2983,7 @@
         return;
       }
       content.innerHTML = '<div class="loading">Loading observations...</div>';
-      var result = await apiGet('observations?sessionId=' + encodeURIComponent(state.timeline.sessionId));
+      var result = await apiGet('observations?sessionId=' + encodeURIComponent(state.timeline.sessionId) + '&agentId=*');
       state.timeline.observations = (result && result.observations) || [];
       renderObservations();
     }
@@ -2952,30 +3155,27 @@
       renderObservations();
     }
 
+    var ACTIVITY_SESSION_HISTORY_LIMIT = 20;
+
     async function loadActivity() {
       var el = document.getElementById('view-activity');
       el.innerHTML = '<div class="loading">Loading activity...</div>';
-      var results = await Promise.all([
-        apiGet('sessions'),
-        apiGet('audit?limit=200')
-      ]);
-      var sessions = (results[0] && results[0].sessions) || [];
-      var auditEntries = (results[1] && results[1].entries) || [];
+      var result = await apiGet('sessions?agentId=*');
+      var sessions = (result && result.sessions) || [];
 
       var allObs = [];
-      var sorted = sessions.slice().sort(function(a, b) { return (b.startedAt || '').localeCompare(a.startedAt || ''); });
-      var recentSessions = sorted.slice(0, 5);
+      var sorted = sessions.slice().sort(compareSessionActivity);
+      var recentSessions = sorted.slice(0, ACTIVITY_SESSION_HISTORY_LIMIT);
 
       var obsResults = await Promise.all(recentSessions.filter(function(s) { return sessionId(s); }).map(function(s) {
-        return apiGet('observations?sessionId=' + encodeURIComponent(sessionId(s)));
+        return apiGet('observations?sessionId=' + encodeURIComponent(sessionId(s)) + '&agentId=*');
       }));
       obsResults.forEach(function(r) {
         if (r && r.observations) allObs = allObs.concat(r.observations);
       });
 
       state.activity.sessions = sessions;
-      state.activity.observations = allObs;
-      state.activity.audit = auditEntries;
+      state.activity.observations = dedupeObservations(allObs);
       state.activity.loaded = true;
       renderActivity();
     }
@@ -3000,7 +3200,7 @@
       });
       sessions.forEach(function(s) {
         try {
-          var d = new Date(s.startedAt);
+          var d = new Date(sessionActivityAt(s));
           var key = d.toISOString().slice(0, 10);
           dayCounts[key] = (dayCounts[key] || 0) + 1;
         } catch(e) {}
@@ -3092,7 +3292,7 @@
     async function loadSessions() {
       var el = document.getElementById('view-sessions');
       el.innerHTML = '<div class="loading">Loading sessions...</div>';
-      var result = await apiGet('sessions');
+      var result = await apiGet('sessions?agentId=*');
       state.sessions.items = (result && result.sessions) || [];
       state.sessions.loaded = true;
       renderSessions();
@@ -3100,9 +3300,7 @@
 
     function renderSessions() {
       var el = document.getElementById('view-sessions');
-      var items = state.sessions.items.slice().sort(function(a, b) {
-        return (b.startedAt || '').localeCompare(a.startedAt || '');
-      });
+      var items = state.sessions.items.slice().sort(compareSessionActivity);
 
       var html = '<div class="session-list">';
       if (items.length === 0) {
@@ -3119,7 +3317,8 @@
           if (preview) {
             html += '<div class="session-preview" style="font-size:13px;color:var(--ink);margin:4px 0;line-height:1.4;">' + esc(truncate(preview, 140)) + '</div>';
           }
-          html += '<div class="session-meta">' + esc(shortSessionId(s, 12) || 'missing id') + ' &middot; ' + esc(formatTime(s.startedAt));
+          html += '<div class="session-meta">' + esc(shortSessionId(s, 12) || 'missing id') + ' &middot; Updated ' + esc(formatTime(sessionActivityAt(s)));
+          if (s.updatedAt && s.startedAt && s.updatedAt !== s.startedAt) html += ' &middot; Started ' + esc(formatTime(s.startedAt));
           html += ' &middot; ' + (s.observationCount || 0) + ' obs';
           if (s.model) html += ' &middot; ' + esc(s.model);
           html += '</div></div>';
@@ -3146,7 +3345,7 @@
 
       panel.innerHTML = '<div class="detail-panel"><h3>Loading session details…</h3></div>';
 
-      var obsRes = await apiGet('observations?sessionId=' + encodeURIComponent(id));
+      var obsRes = await apiGet('observations?sessionId=' + encodeURIComponent(id) + '&agentId=*');
       var obs = (obsRes && obsRes.observations) || [];
 
       var typeCounts = {};
@@ -3223,6 +3422,7 @@
       html += '<div><span style="color:var(--ink-muted);">id:</span> ' + esc(detailId || 'missing id') + '</div>';
       html += '<div><span style="color:var(--ink-muted);">cwd:</span> ' + esc(s.cwd || '-') + '</div>';
       html += '<div><span style="color:var(--ink-muted);">started:</span> ' + esc(formatTime(s.startedAt)) + '</div>';
+      if (s.updatedAt) html += '<div><span style="color:var(--ink-muted);">updated:</span> ' + esc(formatTime(s.updatedAt)) + '</div>';
       if (s.endedAt) html += '<div><span style="color:var(--ink-muted);">ended:</span> ' + esc(formatTime(s.endedAt)) + '</div>';
       if (s.model) html += '<div><span style="color:var(--ink-muted);">model:</span> ' + esc(s.model) + '</div>';
       if (s.tags && s.tags.length) html += '<div><span style="color:var(--ink-muted);">tags:</span> ' + s.tags.map(esc).join(', ') + '</div>';
@@ -4360,7 +4560,7 @@
     async function loadProfile() {
       var el = document.getElementById('view-profile');
       el.innerHTML = '<div class="loading">Loading profile...</div>';
-      var sessResult = await apiGet('sessions');
+      var sessResult = await apiGet('sessions?agentId=*');
       var sessions = (sessResult && sessResult.sessions) || [];
 
       var projects = {};
@@ -4655,12 +4855,7 @@
     function routeWsMessage(msg) {
       if (state.activeTab === 'timeline' && msg.observation) {
         if (!state.timeline.sessionId || msg.observation.sessionId === state.timeline.sessionId) {
-          var existing = state.timeline.observations.findIndex(function(o) { return o.id === msg.observation.id; });
-          if (existing >= 0) {
-            state.timeline.observations[existing] = msg.observation;
-          } else {
-            state.timeline.observations.unshift(msg.observation);
-          }
+          upsertObservation(state.timeline.observations, msg.observation, true);
           renderObservations();
         }
       }
@@ -4669,7 +4864,7 @@
         loadDashboard();
       }
       if (state.activeTab === 'activity' && msg.observation) {
-        state.activity.observations.unshift(msg.observation);
+        upsertObservation(state.activity.observations, msg.observation, true);
         renderActivity();
       }
     }
@@ -5016,7 +5211,7 @@
 
     function renderReplay() {
       var el = document.getElementById('view-replay');
-      var sessions = state.replay.sessions || [];
+      var sessions = (state.replay.sessions || []).slice().sort(compareSessionActivity);
       var options = '<option value="">— pick a session —</option>' + sessions.map(function(s) {
         var id = sessionId(s);
         var label = sessionDisplayName(s) + ' · ' + (shortSessionId(s, 8) || 'missing id') + ' · ' + (s.observationCount || 0) + ' obs';

@@ -8,6 +8,7 @@ import {
   summarizeValue,
   targetIdsFor,
 } from "./_lineage.js";
+import { deliverHookRequests } from "./_delivery.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -49,44 +50,47 @@ async function main() {
   const headers = authHeaders();
   const timestamp = new Date().toISOString();
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      hookType: "post_tool_failure",
+  await Promise.all([
+    deliverHookRequests({
+      restUrl: REST_URL,
+      secret: SECRET,
+      requests: [{
+        path: "/agentmemory/observe",
+        kind: "observation",
+        body: {
+          hookType: "post_tool_failure",
+          ...fields,
+          timestamp,
+          data: {
+            tool_name: toolName,
+            tool_input: safeMetadata(
+              typeof toolInput === "string"
+                ? toolInput.slice(0, 4000)
+                : JSON.stringify(safeMetadata(toolInput) ?? "").slice(0, 4000),
+            ),
+            error:
+              typeof error === "string"
+                ? safeMetadata(error.slice(0, 4000))
+                : JSON.stringify(safeMetadata(error) ?? "").slice(0, 4000),
+            lineage,
+          },
+        },
+      }],
+    }),
+    sendAgentEvent(REST_URL, headers, {
+      type: "tool_failed",
+      status: "error",
       ...fields,
-      timestamp,
-      data: {
-        tool_name: toolName,
-        tool_input: safeMetadata(
-          typeof toolInput === "string"
-            ? toolInput.slice(0, 4000)
-            : JSON.stringify(safeMetadata(toolInput) ?? "").slice(0, 4000),
-        ),
-        error:
-          typeof error === "string"
-            ? safeMetadata(error.slice(0, 4000))
-            : JSON.stringify(safeMetadata(error) ?? "").slice(0, 4000),
-        lineage,
+      functionId: `tool:${toolName}`,
+      targetIds: targetIdsFor(lineage.toolCallId, toolName),
+      metadata: {
+        hookType: "post_tool_failure",
+        toolName,
+        toolInput: summarizeValue(toolInput),
+        error: summarizeValue(error),
       },
     }),
-    signal: AbortSignal.timeout(3000),
-  }).catch(() => {});
-
-  sendAgentEvent(REST_URL, headers, {
-    type: "tool_failed",
-    status: "error",
-    ...fields,
-    functionId: `tool:${toolName}`,
-    targetIds: targetIdsFor(lineage.toolCallId, toolName),
-    metadata: {
-      hookType: "post_tool_failure",
-      toolName,
-      toolInput: summarizeValue(toolInput),
-      error: summarizeValue(error),
-    },
-  });
-  setTimeout(() => process.exit(0), 500).unref();
+  ]);
 }
 
 main();

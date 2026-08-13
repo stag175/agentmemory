@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { buildLineage, eventFields, sendAgentEvent } from "./_lineage.js";
+import { deliverHookRequests } from "./_delivery.js";
 
 // Inlined — see src/hooks/sdk-guard.ts for canonical version. Kept local
 // per-hook so tsdown does not emit a shared hashed chunk that would churn
@@ -44,32 +45,29 @@ async function main() {
   const fields = eventFields(lineage);
   const headers = authHeaders();
 
-  fetch(`${REST_URL}/agentmemory/summarize`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ ...fields, sessionId }),
-    signal: AbortSignal.timeout(120000),
-  }).catch(() => {});
-
-  fetch(`${REST_URL}/agentmemory/session/end`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ ...fields, sessionId }),
-    signal: AbortSignal.timeout(5000),
-  }).catch(() => {});
-
-  sendAgentEvent(REST_URL, headers, {
-    type: "custom",
-    status: "ok",
-    ...fields,
-    functionId: "plugin::stop",
-    metadata: {
-      hookType: "stop",
-      summarizeRequested: true,
-    },
-  });
-
-  setTimeout(() => process.exit(0), 1500).unref();
+  await Promise.all([
+    deliverHookRequests({
+      restUrl: REST_URL,
+      secret: SECRET,
+      requests: [{
+        path: "/agentmemory/summarize",
+        kind: "session_summary_request",
+        body: { ...fields, sessionId, async: true },
+      }],
+    }),
+    sendAgentEvent(REST_URL, headers, {
+      type: "custom",
+      status: "ok",
+      ...fields,
+      functionId: "plugin::stop",
+      metadata: {
+        hookType: "stop",
+        summarizeRequested: true,
+        summarizeQueued: true,
+        sessionEndRequested: false,
+      },
+    }),
+  ]);
 }
 
 main();

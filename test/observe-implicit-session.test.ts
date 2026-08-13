@@ -141,4 +141,116 @@ describe("observe implicit session create (#638)", () => {
     expect(session.observationCount).toBe(8);
     expect(session.updatedAt).toBeTruthy();
   });
+
+  it("reopens a completed session for a strictly newer observation and reconciles its count", async () => {
+    const { registerObserveFunction } = await import("../src/functions/observe.js");
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerObserveFunction(sdk as never, kv as never);
+
+    await kv.set("mem:sessions", "ses_resumed", {
+      id: "ses_resumed",
+      project: "/orig/project",
+      cwd: "/orig/cwd",
+      startedAt: "2026-08-13T12:00:00.000Z",
+      endedAt: "2026-08-13T12:30:00.000Z",
+      updatedAt: "2026-08-13T12:30:00.000Z",
+      status: "completed",
+      observationCount: 99,
+      model: "model-that-must-survive",
+      tags: ["preserve-me"],
+      summary: "preserved summary",
+    });
+    await kv.set("mem:obs:ses_resumed", "obs_existing_1", { id: "obs_existing_1" });
+    await kv.set("mem:obs:ses_resumed", "obs_existing_2", { id: "obs_existing_2" });
+
+    await sdk.trigger("mem::observe", {
+      sessionId: "ses_resumed",
+      project: "/different/project",
+      cwd: "/different/cwd",
+      hookType: "post_tool_use",
+      timestamp: "2026-08-13T12:30:00.001Z",
+      data: { tool_name: "Read" },
+    });
+
+    const session = kv.store.get("mem:sessions")!.get("ses_resumed") as Record<string, unknown>;
+    expect(session).toMatchObject({
+      id: "ses_resumed",
+      project: "/orig/project",
+      cwd: "/orig/cwd",
+      startedAt: "2026-08-13T12:00:00.000Z",
+      updatedAt: "2026-08-13T12:30:00.001Z",
+      status: "active",
+      observationCount: 3,
+      model: "model-that-must-survive",
+      tags: ["preserve-me"],
+      summary: "preserved summary",
+    });
+    expect(session).not.toHaveProperty("endedAt");
+
+    const events = Array.from(
+      kv.store.get("mem:agent-events")?.values() ?? [],
+    ) as Array<Record<string, unknown>>;
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "session_started",
+        timestamp: "2026-08-13T12:30:00.001Z",
+        sessionId: "ses_resumed",
+        functionId: "mem::observe",
+        metadata: expect.objectContaining({
+          resumed: true,
+          previousEndedAt: "2026-08-13T12:30:00.000Z",
+          observationCount: 3,
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    "2026-08-13T12:30:00.000Z",
+    "2026-08-13T12:29:59.999Z",
+  ])("keeps a completed session closed for a delayed observation at %s", async (timestamp) => {
+    const { registerObserveFunction } = await import("../src/functions/observe.js");
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerObserveFunction(sdk as never, kv as never);
+
+    await kv.set("mem:sessions", "ses_delayed", {
+      id: "ses_delayed",
+      project: "/orig/project",
+      cwd: "/orig/cwd",
+      startedAt: "2026-08-13T12:00:00.000Z",
+      endedAt: "2026-08-13T12:30:00.000Z",
+      updatedAt: "2026-08-13T12:30:00.000Z",
+      status: "completed",
+      observationCount: 99,
+    });
+    await kv.set("mem:obs:ses_delayed", "obs_existing", { id: "obs_existing" });
+
+    await sdk.trigger("mem::observe", {
+      sessionId: "ses_delayed",
+      project: "/orig/project",
+      cwd: "/orig/cwd",
+      hookType: "post_tool_use",
+      timestamp,
+      data: { tool_name: "Read" },
+    });
+
+    const session = kv.store.get("mem:sessions")!.get("ses_delayed") as Record<string, unknown>;
+    expect(session).toMatchObject({
+      endedAt: "2026-08-13T12:30:00.000Z",
+      updatedAt: "2026-08-13T12:30:00.000Z",
+      status: "completed",
+      observationCount: 2,
+    });
+    const events = Array.from(
+      kv.store.get("mem:agent-events")?.values() ?? [],
+    ) as Array<Record<string, unknown>>;
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: "session_started",
+        metadata: expect.objectContaining({ resumed: true }),
+      }),
+    );
+  });
 });

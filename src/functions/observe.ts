@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { TriggerAction, type ISdk } from "iii-sdk";
-import type { RawObservation, HookPayload } from "../types.js";
+import type { RawObservation, HookPayload, Session } from "../types.js";
 import { KV, STREAM, generateId } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { stripPrivateData } from "./privacy.js";
@@ -10,12 +11,18 @@ import {
   getAutomaticCaptureControl,
   isAutoCompressEnabled,
 } from "../config.js";
-import { buildSyntheticCompression } from "./compress-synthetic.js";
+import {
+  buildSearchableRawObservation,
+  buildSyntheticCompression,
+} from "./compress-synthetic.js";
 import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
 import { logger } from "../logger.js";
-import { WORK_QUEUES } from "../backpressure.js";
 import { safeRecordAgentEvent } from "./agent-events.js";
 import { saveImageToDisk } from "../utils/image-store.js";
+import {
+  ensureCompressionJobDispatched,
+  type LlmJobMetadata,
+} from "./llm-jobs.js";
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -45,6 +52,7 @@ export function registerObserveFunction(
   kv: StateKV,
   dedupMap?: DedupMap,
   maxObservationsPerSession?: number,
+  llmMetadata?: LlmJobMetadata,
 ): void {
   sdk.registerFunction("mem::observe", 
     async (payload: HookPayload) => {
@@ -80,10 +88,19 @@ export function registerObserveFunction(
         };
       }
 
-      const obsId = generateId("obs");
+      const deliveryId =
+        typeof payload.deliveryId === "string" && payload.deliveryId.length > 0
+          ? payload.deliveryId
+          : undefined;
+      const obsId = deliveryId
+        ? `obs_hook_${createHash("sha256").update(deliveryId).digest("hex").slice(0, 32)}`
+        : generateId("obs");
 
       let dedupHash: string | undefined;
-      if (dedupMap) {
+      // Durable hook deliveries use a deterministic observation ID and must
+      // reach the in-lock repair path on retry. The short-lived generic dedup
+      // map cannot prove that the LLM ledger/dispatch also committed.
+      if (dedupMap && !deliveryId) {
         const d =
           typeof payload.data === "object" && payload.data !== null
             ? (payload.data as Record<string, unknown>)
@@ -146,12 +163,32 @@ export function registerObserveFunction(
       const pendingImageData = extractedImage;
 
       return withKeyedLock(`obs:${payload.sessionId}`, async () => {
-        if (maxObservationsPerSession && maxObservationsPerSession > 0) {
-          const existing = await kv.list(KV.observations(payload.sessionId));
-          if (existing.length >= maxObservationsPerSession) {
+        // A timed-out client may retry after the first request committed but
+        // before its HTTP response arrived. The delivery-derived observation
+        // id plus this in-lock check prevents a second raw row, counter bump,
+        // stream event, synthetic index write, or compression dispatch.
+        if (deliveryId) {
+          const existing = await kv.get(
+            KV.observations(payload.sessionId),
+            obsId,
+          );
+          if (existing) {
+            if (isAutoCompressEnabled()) {
+              await ensureCompressionJobDispatched(
+                sdk,
+                kv,
+                {
+                  observationId: obsId,
+                  sessionId: payload.sessionId,
+                  raw,
+                },
+                llmMetadata ?? { provider: "unknown", model: "unknown" },
+              );
+            }
             return {
-              success: false,
-              error: `Session observation limit reached (${maxObservationsPerSession})`,
+              observationId: obsId,
+              deduplicated: true,
+              deliveryId,
             };
           }
         }
@@ -160,11 +197,29 @@ export function registerObserveFunction(
         // undefined). Env AGENT_ID only fires when no session row
         // exists yet — otherwise an unscoped session would get
         // retroactively scoped by a later AGENT_ID export.
-        const existingSession = await kv.get<{
-          agentId?: string;
-          observationCount?: number;
-          firstPrompt?: string;
-        }>(KV.sessions, payload.sessionId);
+        const existingSession = await kv.get<Session>(
+          KV.sessions,
+          payload.sessionId,
+        );
+        const shouldReconcileObservationCount =
+          existingSession?.status === "completed" ||
+          Boolean(maxObservationsPerSession && maxObservationsPerSession > 0);
+        const existingObservations = shouldReconcileObservationCount
+          ? await kv.list(KV.observations(payload.sessionId))
+          : undefined;
+
+        if (maxObservationsPerSession && maxObservationsPerSession > 0) {
+          if (
+            existingObservations &&
+            existingObservations.length >= maxObservationsPerSession
+          ) {
+            return {
+              success: false,
+              error: `Session observation limit reached (${maxObservationsPerSession})`,
+            };
+          }
+        }
+
         const inheritedAgentId = existingSession
           ? existingSession.agentId
           : getAgentId();
@@ -248,25 +303,90 @@ export function registerObserveFunction(
 
         const session = existingSession;
         if (session) {
-          const updates: Array<{ type: "set"; path: string; value: unknown }> = [
-            { type: "set", path: "updatedAt", value: new Date().toISOString() },
-            {
-              type: "set",
-              path: "observationCount",
-              value: (session.observationCount || 0) + 1,
-            },
-          ];
-          if (!session.firstPrompt && typeof raw.userPrompt === "string") {
-            const trimmed = raw.userPrompt.replace(/\s+/g, " ").trim();
-            if (trimmed.length > 0) {
+          const observedAtMs = Date.parse(payload.timestamp);
+          const endedAtMs = session.endedAt
+            ? Date.parse(session.endedAt)
+            : Number.NaN;
+          const shouldResume =
+            session.status === "completed" &&
+            Number.isFinite(observedAtMs) &&
+            Number.isFinite(endedAtMs) &&
+            observedAtMs > endedAtMs;
+          const receivedAt = new Date().toISOString();
+          const activityAt = Number.isFinite(observedAtMs)
+            ? new Date(observedAtMs).toISOString()
+            : receivedAt;
+          const observationCount = existingObservations
+            ? existingObservations.length + 1
+            : (session.observationCount || 0) + 1;
+          const trimmedPrompt =
+            !session.firstPrompt && typeof raw.userPrompt === "string"
+              ? raw.userPrompt.replace(/\s+/g, " ").trim().slice(0, 200)
+              : undefined;
+
+          if (shouldResume) {
+            const resumedSession: Session = {
+              ...session,
+              status: "active",
+              updatedAt: activityAt,
+              observationCount,
+              ...(trimmedPrompt && trimmedPrompt.length > 0
+                ? { firstPrompt: trimmedPrompt }
+                : {}),
+            };
+            delete resumedSession.endedAt;
+            await kv.set(KV.sessions, payload.sessionId, resumedSession);
+            await safeRecordAgentEvent(kv, {
+              type: "session_started",
+              timestamp: activityAt,
+              sessionId: payload.sessionId,
+              project: session.project,
+              cwd: session.cwd,
+              agentId: session.agentId,
+              functionId: "mem::observe",
+              targetIds: [payload.sessionId],
+              metadata: {
+                resumed: true,
+                previousEndedAt: session.endedAt,
+                hookType: payload.hookType,
+                observationCount,
+              },
+            });
+          } else {
+            const updates: Array<{
+              type: "set";
+              path: string;
+              value: unknown;
+            }> = [
+              {
+                type: "set",
+                path: "observationCount",
+                value: observationCount,
+              },
+            ];
+            if (session.status === "active") {
+              const previousUpdatedAtMs = session.updatedAt
+                ? Date.parse(session.updatedAt)
+                : Number.NaN;
+              updates.push({
+                type: "set",
+                path: "updatedAt",
+                value:
+                  Number.isFinite(previousUpdatedAtMs) &&
+                  previousUpdatedAtMs > observedAtMs
+                    ? session.updatedAt
+                    : activityAt,
+              });
+            }
+            if (trimmedPrompt && trimmedPrompt.length > 0) {
               updates.push({
                 type: "set",
                 path: "firstPrompt",
-                value: trimmed.slice(0, 200),
+                value: trimmedPrompt,
               });
             }
+            await kv.update(KV.sessions, payload.sessionId, updates);
           }
-          await kv.update(KV.sessions, payload.sessionId, updates);
         } else if (
           typeof payload.project === "string" &&
           payload.project.trim().length > 0 &&
@@ -317,15 +437,28 @@ export function registerObserveFunction(
         // and BM25 search still work without burning the user's Claude
         // token allocation on every tool invocation.
         if (isAutoCompressEnabled()) {
-          await sdk.trigger({
-            function_id: "mem::compress",
-            payload: {
+          // Preserve the complete sanitized raw source while adding synthetic
+          // fields for immediate BM25 recall. Do not embed this placeholder:
+          // the LLM result will replace it and receive the single vector write.
+          const searchableRaw = buildSearchableRawObservation(raw, "queued", {
+            queuedAt: new Date().toISOString(),
+          });
+          await kv.set(
+            KV.observations(payload.sessionId),
+            obsId,
+            searchableRaw,
+          );
+          getSearchIndex().add(searchableRaw);
+          await ensureCompressionJobDispatched(
+            sdk,
+            kv,
+            {
               observationId: obsId,
               sessionId: payload.sessionId,
               raw,
             },
-            action: TriggerAction.Enqueue({ queue: WORK_QUEUES.compression }),
-          });
+            llmMetadata ?? { provider: "unknown", model: "unknown" },
+          );
         } else {
           const synthetic = buildSyntheticCompression(raw);
           await kv.set(

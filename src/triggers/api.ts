@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { TriggerAction, type ISdk, type ApiRequest } from "iii-sdk";
-import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary, SearchMode, RetrievalMode, ComplianceEvidenceInput } from "../types.js";
+import type { Session, CompressedObservation, HookPayload, HookDeliveryReceipt, CommitLink, SessionSummary, SearchMode, RetrievalMode, ComplianceEvidenceInput } from "../types.js";
 import type { AgentEventInput, AgentEventListFilter } from "../functions/agent-events.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV } from "../state/schema.js";
@@ -18,6 +19,10 @@ import { WORK_QUEUES } from "../backpressure.js";
 import { safeRecordAgentEvent } from "../functions/agent-events.js";
 import { registerRulesResolverFunction } from "../functions/rules-resolver.js";
 import {
+  getLlmPipelineStatus,
+  type LlmJobMetadata,
+} from "../functions/llm-jobs.js";
+import {
   isGraphExtractionEnabled,
   isConsolidationEnabled,
   isAutoCompressEnabled,
@@ -28,6 +33,7 @@ import {
   getAutomaticCaptureControl,
   isAgentScopeIsolated,
 } from "../config.js";
+import { getHookOutboxStatus } from "../hooks/outbox-status.js";
 
 type Response = {
   status_code: number;
@@ -124,6 +130,83 @@ function asNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+const HOOK_DELIVERY_ID_RE = /^[A-Za-z0-9._:-]{8,200}$/;
+
+function hookDeliveryId(
+  req: ApiRequest,
+): { id?: string; error?: string } {
+  const raw =
+    req.headers?.["x-agentmemory-delivery-id"] ??
+    req.headers?.["X-AgentMemory-Delivery-Id"] ??
+    req.headers?.["idempotency-key"] ??
+    req.headers?.["Idempotency-Key"];
+  if (raw === undefined) return {};
+  if (typeof raw !== "string" || !HOOK_DELIVERY_ID_RE.test(raw)) {
+    return { error: "invalid hook delivery id" };
+  }
+  return { id: raw };
+}
+
+function hookDeliveryEntityId(
+  prefix: "obs" | "agevt",
+  deliveryId: string,
+): string {
+  return `${prefix}_hook_${createHash("sha256").update(deliveryId).digest("hex").slice(0, 32)}`;
+}
+
+function hookDeliveryReceiptKey(route: string, deliveryId: string): string {
+  return createHash("sha256").update(`${route}\0${deliveryId}`).digest("hex");
+}
+
+function hookDeliveryRequestHash(body: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(body)).digest("hex");
+}
+
+async function priorHookDeliveryResponse(
+  kv: StateKV,
+  route: string,
+  deliveryId: string,
+  requestHash: string,
+): Promise<Response | null> {
+  const receipt = await kv.get<HookDeliveryReceipt>(
+    KV.hookDeliveries,
+    hookDeliveryReceiptKey(route, deliveryId),
+  );
+  if (!receipt) return null;
+  if (receipt.route !== route || receipt.requestHash !== requestHash) {
+    return {
+      status_code: 409,
+      body: { error: "hook delivery id was already used for a different request" },
+    };
+  }
+  return { status_code: receipt.statusCode, body: receipt.response };
+}
+
+async function recordHookDeliveryReceipt(
+  kv: StateKV,
+  input: {
+    route: string;
+    deliveryId: string;
+    requestHash: string;
+    entityId: string;
+    response: Response;
+  },
+): Promise<void> {
+  await kv.set<HookDeliveryReceipt>(
+    KV.hookDeliveries,
+    hookDeliveryReceiptKey(input.route, input.deliveryId),
+    {
+      deliveryId: input.deliveryId,
+      route: input.route,
+      requestHash: input.requestHash,
+      entityId: input.entityId,
+      statusCode: input.response.status_code,
+      response: input.response.body,
+      completedAt: new Date().toISOString(),
+    },
+  );
 }
 
 function parseOptionalFiniteNumber(value: unknown): number | undefined | null {
@@ -698,7 +781,8 @@ export function registerApiTriggers(
   kv: StateKV,
   secret?: string,
   metricsStore?: MetricsStore,
-  provider?: ResilientProvider | { circuitState?: unknown },
+  provider?: ResilientProvider | { name?: string; circuitState?: unknown },
+  llmMetadata?: LlmJobMetadata,
 ): void {
   const effectiveSecret = secret ?? process.env["AGENTMEMORY_SECRET"];
   sdk.registerFunction(
@@ -750,6 +834,41 @@ export function registerApiTriggers(
     type: "http",
     function_id: "api::liveness",
     config: { api_path: "/agentmemory/livez", http_method: "GET" },
+  });
+
+  sdk.registerFunction(
+    "api::llm-status",
+    async (req: ApiRequest = {} as ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, effectiveSecret);
+      if (authErr) return authErr;
+      const defaults: LlmJobMetadata = llmMetadata ?? {
+        provider:
+          provider && "name" in provider && provider.name
+            ? provider.name
+            : detectLlmProviderKind(),
+        model: "unknown",
+      };
+      const circuit =
+        provider && "circuitState" in provider
+          ? provider.circuitState
+          : undefined;
+      const status = await getLlmPipelineStatus(
+        kv,
+        defaults,
+        circuit,
+        isAutoCompressEnabled(),
+      );
+      return { status_code: 200, body: status };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::llm-status",
+    config: {
+      api_path: "/agentmemory/llm-status",
+      http_method: "GET",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
   });
 
   sdk.registerFunction("api::config-flags",
@@ -842,10 +961,12 @@ export function registerApiTriggers(
         const functionMetrics = metricsStore ? await metricsStore.getAll() : [];
         const circuitBreaker =
           provider && "circuitState" in provider ? provider.circuitState : null;
+        const hookDelivery = await getHookOutboxStatus();
         Object.assign(body, {
           health: health || null,
           functionMetrics,
           circuitBreaker,
+          hookDelivery,
           viewerPort: getBoundViewerPort(),
           viewerSkipped: getViewerSkipped(),
         });
@@ -869,30 +990,64 @@ export function registerApiTriggers(
   sdk.registerFunction("api::observe",
     async (req: ApiRequest<HookPayload>): Promise<Response> => {
       const body = (req.body ?? {}) as unknown as Record<string, unknown>;
-      const hookType = asNonEmptyString(body.hookType);
-      const sessionId = asNonEmptyString(body.sessionId);
-      const project = asNonEmptyString(body.project);
-      const cwd = asNonEmptyString(body.cwd);
-      const timestamp = asNonEmptyString(body.timestamp);
-      if (!hookType || !sessionId || !project || !cwd || !timestamp) {
-        return {
-          status_code: 400,
-          body: {
-            error:
-              "hookType, sessionId, project, cwd, and timestamp are required strings",
-          },
-        };
+      const delivery = hookDeliveryId(req);
+      if (delivery.error) {
+        return { status_code: 400, body: { error: delivery.error } };
       }
-      const payload: HookPayload = {
-        hookType: hookType as HookPayload["hookType"],
-        sessionId,
-        project,
-        cwd,
-        timestamp,
-        data: body.data,
+      const route = "/agentmemory/observe";
+      const requestHash = hookDeliveryRequestHash(body);
+      const recordObservation = async (): Promise<Response> => {
+        if (delivery.id) {
+          const prior = await priorHookDeliveryResponse(
+            kv,
+            route,
+            delivery.id,
+            requestHash,
+          );
+          if (prior) return prior;
+        }
+        const hookType = asNonEmptyString(body.hookType);
+        const sessionId = asNonEmptyString(body.sessionId);
+        const project = asNonEmptyString(body.project);
+        const cwd = asNonEmptyString(body.cwd);
+        const timestamp = asNonEmptyString(body.timestamp);
+        if (!hookType || !sessionId || !project || !cwd || !timestamp) {
+          return {
+            status_code: 400,
+            body: {
+              error:
+                "hookType, sessionId, project, cwd, and timestamp are required strings",
+            },
+          };
+        }
+        const payload: HookPayload = {
+          hookType: hookType as HookPayload["hookType"],
+          sessionId,
+          project,
+          cwd,
+          timestamp,
+          data: body.data,
+          ...(delivery.id ? { deliveryId: delivery.id } : {}),
+        };
+        const result = await sdk.trigger({ function_id: "mem::observe", payload });
+        const response: Response = { status_code: 201, body: result };
+        if (delivery.id) {
+          await recordHookDeliveryReceipt(kv, {
+            route,
+            deliveryId: delivery.id,
+            requestHash,
+            entityId: hookDeliveryEntityId("obs", delivery.id),
+            response,
+          });
+        }
+        return response;
       };
-      const result = await sdk.trigger({ function_id: "mem::observe", payload });
-      return { status_code: 201, body: result };
+      return delivery.id
+        ? withKeyedLock(
+            `hook-delivery:${route}:${delivery.id}`,
+            recordObservation,
+          )
+        : recordObservation();
     },
   );
   sdk.registerTrigger({
@@ -1205,29 +1360,64 @@ export function registerApiTriggers(
         typeof body.agentId === "string" && body.agentId.trim().length > 0
           ? body.agentId.trim().slice(0, 128)
           : undefined;
-      const agentId = requestAgentId ?? getAgentId();
-      const session: Session = {
-        id: sessionId,
-        project,
-        cwd,
-        startedAt: new Date().toISOString(),
-        status: "active",
-        observationCount: 0,
-        ...(title ? { summary: title.slice(0, 200) } : {}),
-        ...(title ? { firstPrompt: title.slice(0, 200) } : {}),
-        ...(agentId ? { agentId } : {}),
-      };
-      await kv.set(KV.sessions, sessionId, session);
+      const serverAgentId = getAgentId();
+      const now = new Date().toISOString();
+      const { session, existing } = await withKeyedLock(
+        `session-start:${sessionId}`,
+        async () => {
+          const prior = await kv.get<Session>(KV.sessions, sessionId);
+          const agentId = requestAgentId ?? prior?.agentId ?? serverAgentId;
+          const next: Session = prior
+            ? {
+                ...prior,
+                project,
+                cwd,
+                status: "active",
+                updatedAt: now,
+                ...(title && !prior.summary
+                  ? { summary: title.slice(0, 200) }
+                  : {}),
+                ...(title && !prior.firstPrompt
+                  ? { firstPrompt: title.slice(0, 200) }
+                  : {}),
+                ...(agentId ? { agentId } : {}),
+              }
+            : {
+                id: sessionId,
+                project,
+                cwd,
+                startedAt: now,
+                updatedAt: now,
+                status: "active",
+                observationCount: 0,
+                ...(title ? { summary: title.slice(0, 200) } : {}),
+                ...(title ? { firstPrompt: title.slice(0, 200) } : {}),
+                ...(agentId ? { agentId } : {}),
+              };
+          // A host may re-emit SessionStart after reconnecting or restoring a
+          // task. Full replacement removes a stale endedAt while preserving
+          // the original start time, observations, commits, and summary.
+          delete next.endedAt;
+          await kv.set(KV.sessions, sessionId, next);
+          return { session: next, existing: prior };
+        },
+      );
       await safeRecordAgentEvent(kv, {
         type: "session_started",
-        timestamp: session.startedAt,
+        timestamp: now,
         sessionId,
         project,
         cwd,
-        agentId,
+        agentId: session.agentId,
         functionId: "api::session::start",
         targetIds: [sessionId],
-        metadata: { title },
+        metadata: {
+          title,
+          resumed: existing?.status === "completed",
+          restarted: Boolean(existing),
+          previousStatus: existing?.status,
+          observationCount: session.observationCount,
+        },
       });
       const contextResult = await sdk.trigger<
         { sessionId: string; project: string },
@@ -1261,7 +1451,7 @@ export function registerApiTriggers(
           body: { error: "sessionId is required and must be a non-empty string" },
         };
       }
-      const existingSession = await kv.get<Session>(KV.sessions, sessionId).catch(() => null);
+      const existingSession = await kv.get<Session>(KV.sessions, sessionId);
       if (!existingSession || existingSession.id !== sessionId) {
         return {
           status_code: 404,
@@ -1277,6 +1467,7 @@ export function registerApiTriggers(
       const endedAt = new Date().toISOString();
       await kv.update(KV.sessions, sessionId, [
         { type: "set", path: "endedAt", value: endedAt },
+        { type: "set", path: "updatedAt", value: endedAt },
         { type: "set", path: "status", value: "completed" },
       ]);
       await safeRecordAgentEvent(kv, {
@@ -1318,10 +1509,30 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::summarize", 
-    async (req: ApiRequest<{ sessionId: string }>): Promise<Response> => {
-      const sessionId = asNonEmptyString((req.body as Record<string, unknown>)?.sessionId);
+    async (req: ApiRequest<{ sessionId: string; async?: boolean }>): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const sessionId = asNonEmptyString(body.sessionId);
       if (!sessionId) {
         return { status_code: 400, body: { error: "sessionId is required" } };
+      }
+      if (body.async !== undefined && typeof body.async !== "boolean") {
+        return { status_code: 400, body: { error: "async must be a boolean" } };
+      }
+      if (body.async === true) {
+        const receipt = await sdk.trigger({
+          function_id: "mem::summarize",
+          payload: { sessionId },
+          action: TriggerAction.Enqueue({ queue: WORK_QUEUES.sessionLifecycle }),
+        });
+        return {
+          status_code: 202,
+          body: {
+            accepted: true,
+            queued: true,
+            queue: WORK_QUEUES.sessionLifecycle,
+            receipt,
+          },
+        };
       }
       const result = await sdk.trigger({
         function_id: "mem::summarize",
@@ -2185,17 +2396,86 @@ export function registerApiTriggers(
       const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const built = buildAgentEventInput(body);
-      if (built.error || !built.input) {
-        return { status_code: 400, body: { error: built.error ?? "invalid agent event payload" } };
+      const delivery = hookDeliveryId(req);
+      if (delivery.error) {
+        return { status_code: 400, body: { error: delivery.error } };
       }
-      const result = await sdk.trigger({
-        function_id: "mem::agent-event-record",
-        payload: built.input,
-      });
-      const success = (result as { success?: boolean }).success !== false;
-      const skipped = (result as { skipped?: boolean }).skipped === true;
-      return { status_code: success ? (skipped ? 200 : 201) : 400, body: result };
+      const route = "/agentmemory/agent-events";
+      const requestHash = hookDeliveryRequestHash(body);
+      const recordEvent = async (): Promise<Response> => {
+        if (delivery.id) {
+          const prior = await priorHookDeliveryResponse(
+            kv,
+            route,
+            delivery.id,
+            requestHash,
+          );
+          if (prior) return prior;
+        }
+        const built = buildAgentEventInput(body);
+        if (built.error || !built.input) {
+          return {
+            status_code: 400,
+            body: { error: built.error ?? "invalid agent event payload" },
+          };
+        }
+        const eventId = delivery.id
+          ? hookDeliveryEntityId("agevt", delivery.id)
+          : undefined;
+        if (eventId) {
+          const existing = await kv.get(KV.agentEvents, eventId);
+          if (existing) {
+            const response: Response = {
+              status_code: 200,
+              body: { success: true, deduplicated: true, event: existing },
+            };
+            await recordHookDeliveryReceipt(kv, {
+              route,
+              deliveryId: delivery.id!,
+              requestHash,
+              entityId: eventId,
+              response,
+            });
+            return response;
+          }
+          built.input.id = eventId;
+          built.input.preserveId = true;
+        }
+        const result = await sdk.trigger({
+          function_id: "mem::agent-event-record",
+          payload: built.input,
+        });
+        let normalizedResult = result;
+        let success = (result as { success?: boolean }).success !== false;
+        if (!success && eventId) {
+          const existing = await kv.get(KV.agentEvents, eventId);
+          if (existing) {
+            normalizedResult = { success: true, deduplicated: true, event: existing };
+            success = true;
+          }
+        }
+        const skipped = (normalizedResult as { skipped?: boolean }).skipped === true;
+        const response: Response = {
+          status_code: success ? (skipped ? 200 : 201) : 400,
+          body: normalizedResult,
+        };
+        if (delivery.id && success) {
+          await recordHookDeliveryReceipt(kv, {
+            route,
+            deliveryId: delivery.id,
+            requestHash,
+            entityId: eventId!,
+            response,
+          });
+        }
+        return response;
+      };
+      return delivery.id
+        ? withKeyedLock(
+            `hook-delivery:${route}:${delivery.id}`,
+            recordEvent,
+          )
+        : recordEvent();
     },
   );
   sdk.registerTrigger({
@@ -3316,12 +3596,36 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::consolidate-pipeline",
-    async (req: ApiRequest<{ tier?: string }>): Promise<Response> => {
+    async (req: ApiRequest<{ tier?: string; async?: boolean }>): Promise<Response> => {
       const authErr = checkAuth(req, effectiveSecret);
       if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (body.async !== undefined && typeof body.async !== "boolean") {
+        return { status_code: 400, body: { error: "async must be a boolean" } };
+      }
+      const payload = { ...body };
+      delete payload.async;
       try {
-        const result = await sdk.trigger({ function_id: "mem::consolidate-pipeline", payload: req.body || {},
-         });
+        if (body.async === true) {
+          const receipt = await sdk.trigger({
+            function_id: "mem::consolidate-pipeline",
+            payload,
+            action: TriggerAction.Enqueue({ queue: WORK_QUEUES.sessionLifecycle }),
+          });
+          return {
+            status_code: 202,
+            body: {
+              accepted: true,
+              queued: true,
+              queue: WORK_QUEUES.sessionLifecycle,
+              receipt,
+            },
+          };
+        }
+        const result = await sdk.trigger({
+          function_id: "mem::consolidate-pipeline",
+          payload,
+        });
         return { status_code: 200, body: result };
       } catch {
         return consolidationDisabledResponse();
@@ -4683,8 +4987,29 @@ export function registerApiTriggers(
   sdk.registerFunction("api::auto-crystallize",  async (req: ApiRequest) => {
     const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
-    const body = req.body as Record<string, unknown>;
-    const result = await sdk.trigger({ function_id: "mem::auto-crystallize", payload: body || {} });
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.async !== undefined && typeof body.async !== "boolean") {
+      return { status_code: 400, body: { error: "async must be a boolean" } };
+    }
+    const payload = { ...body };
+    delete payload.async;
+    if (body.async === true) {
+      const receipt = await sdk.trigger({
+        function_id: "mem::auto-crystallize",
+        payload,
+        action: TriggerAction.Enqueue({ queue: WORK_QUEUES.sessionLifecycle }),
+      });
+      return {
+        status_code: 202,
+        body: {
+          accepted: true,
+          queued: true,
+          queue: WORK_QUEUES.sessionLifecycle,
+          receipt,
+        },
+      };
+    }
+    const result = await sdk.trigger({ function_id: "mem::auto-crystallize", payload });
     return { status_code: 200, body: result };
   });
   sdk.registerTrigger({ type: "http", function_id: "api::auto-crystallize", config: { api_path: "/agentmemory/crystals/auto", http_method: "POST" } });

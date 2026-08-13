@@ -10,6 +10,9 @@ describe("viewer dashboard first-run state", () => {
     expect(viewer).toMatch(/var genuineFirstRun = d\.sessionsAvailable && d\.memoriesAvailable/);
     expect(viewer).toContain("sessions?agentId=*");
     expect(viewer).toContain("memories?latest=true&limit=500&agentId=*");
+    expect(viewer).toContain("agent-events?limit=10");
+    expect(viewer).toContain("recentEventsAvailable");
+    expect(viewer).not.toContain("apiGet('audit?limit=5')");
   });
 
   it("renders a retryable unavailable state instead of lying about first run", () => {

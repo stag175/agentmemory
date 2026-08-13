@@ -42,6 +42,17 @@ export interface RawObservation {
   modality?: "text" | "image" | "mixed";
   imageData?: string;
   agentId?: string;
+  enrichmentMode?: "llm" | "synthetic";
+  enrichmentStatus?:
+    | "queued"
+    | "running"
+    | "retrying"
+    | "succeeded"
+    | "failed";
+  enrichmentQueuedAt?: string;
+  enrichmentStartedAt?: string;
+  enrichmentFinishedAt?: string;
+  enrichmentError?: string;
 }
 
 export interface CompressedObservation {
@@ -62,6 +73,115 @@ export interface CompressedObservation {
   imageDescription?: string;
   modality?: "text" | "image" | "mixed";
   agentId?: string;
+  enrichmentMode?: "llm" | "synthetic";
+  enrichmentStatus?:
+    | "queued"
+    | "running"
+    | "retrying"
+    | "succeeded"
+    | "failed";
+  enrichmentQueuedAt?: string;
+  enrichmentStartedAt?: string;
+  enrichmentFinishedAt?: string;
+  enrichmentError?: string;
+}
+
+/**
+ * BM25-ready placeholder retained while LLM enrichment is pending or failed.
+ * It deliberately contains the complete sanitized source observation so
+ * recovery never depends on reconstructing raw input from a lossy summary.
+ */
+export type SearchableRawObservation = RawObservation & CompressedObservation;
+
+export type LlmJobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "retrying"
+  | "failed";
+
+/** Durable state for one observation-compression job. */
+export interface LlmJob {
+  id: string;
+  observationId: string;
+  sessionId: string;
+  status: LlmJobStatus;
+  attempt: number;
+  maxAttempts: number;
+  provider: string;
+  model: string;
+  /** Ephemeral daemon generation that owns a running attempt. */
+  runtimeId?: string;
+  createdAt: string;
+  updatedAt: string;
+  queuedAt?: string;
+  dispatchConfirmedAt?: string;
+  startedAt?: string;
+  succeededAt?: string;
+  retryingAt?: string;
+  failedAt?: string;
+  lastFailureAt?: string;
+  error?: string;
+}
+
+/**
+ * Durable roll-up of the LLM job ledger. Dashboard reads use this single row
+ * instead of decrypting every historical job on each refresh.
+ */
+export interface LlmPipelineAggregate {
+  id: "aggregate";
+  version: 1;
+  updatedAt: string;
+  rebuiltAt?: string;
+  waiting: number;
+  inFlight: number;
+  retrying: number;
+  failed: number;
+  succeeded: number;
+  total: number;
+  /** Active job id -> the timestamp from which queue age is measured. */
+  pendingSince: Record<string, string>;
+  oldestPendingAt: string | null;
+  lastDispatch: string | null;
+  lastSuccess: string | null;
+  lastFailure: string | null;
+  /** Epoch-second buckets, bounded to the rolling five-minute window. */
+  successBuckets: Record<string, number>;
+  provider: string | null;
+  model: string | null;
+  latestJobUpdatedAt: string | null;
+}
+
+export interface LlmPipelineStatus {
+  enabled: boolean;
+  reason: "auto_compress_enabled" | "auto_compress_disabled";
+  waiting: number;
+  inFlight: number;
+  retrying: number;
+  failed: number;
+  succeeded: number;
+  total: number;
+  oldestAge: number;
+  oldestAgeMs: number;
+  lastDispatch: string | null;
+  lastSuccess: string | null;
+  lastFailure: string | null;
+  throughput5m: number;
+  throughputPerMinute: number;
+  rawOrphans: number;
+  provider: string;
+  model: string;
+  circuit?: unknown;
+}
+
+export interface LlmPipelineCheckpoint {
+  id: "reconciliation";
+  reconciledAt: string;
+  scanned: number;
+  queued: number;
+  skipped: number;
+  /** Raw observations with no ledger job left after the bounded redrive. */
+  untrackedRaw: number;
 }
 
 export type ObservationType =
@@ -238,6 +358,18 @@ export interface HookPayload {
   cwd: string;
   timestamp: string;
   data: unknown;
+  /** Stable client delivery key used to make durable hook retries idempotent. */
+  deliveryId?: string;
+}
+
+export interface HookDeliveryReceipt {
+  deliveryId: string;
+  route: string;
+  requestHash: string;
+  entityId: string;
+  statusCode: number;
+  response: unknown;
+  completedAt: string;
 }
 
 export interface ProviderConfig {
@@ -298,6 +430,9 @@ export interface FunctionMetrics {
   avgLatencyMs: number;
   maxLatencyMs?: number;
   avgQualityScore: number;
+  lastCallAt?: string;
+  lastSuccessAt?: string;
+  lastFailureAt?: string;
 }
 
 export interface HealthSnapshot {

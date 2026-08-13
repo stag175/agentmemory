@@ -106,7 +106,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop.mjs\"",
+            "timeout": 60
           }
         ]
       }
@@ -116,7 +117,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-end.mjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-end.mjs\"",
+            "timeout": 60
           }
         ]
       }

@@ -41,5 +41,16 @@ describe("long-running backpressure defaults", () => {
     }
     expect(config).toMatch(/store_method:\s*file_based/);
     expect(config).toMatch(/file_path:\s*\.\/data\/queue_store/);
+    const compressionBlock = config.match(
+      /agentmemory-compression:[\s\S]*?backoff_ms:\s*(\d+)/,
+    );
+    expect(Number(compressionBlock?.[1])).toBeGreaterThan(30_000);
+  });
+
+  it("does not keep a hidden 30-second consolidation timeout", () => {
+    const source = readFileSync("src/functions/consolidate.ts", "utf8");
+    expect(source).toContain('getEnvVar("AGENTMEMORY_LLM_TIMEOUT_MS")');
+    expect(source).not.toContain('new Error("compress timeout")');
+    expect(source).not.toMatch(/setTimeout\([\s\S]{0,120}30_000/);
   });
 });

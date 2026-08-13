@@ -7,6 +7,7 @@ import {
   sendAgentEvent,
   targetIdsFor,
 } from "./_lineage.js";
+import { deliverHookRequests } from "./_delivery.js";
 
 // Inlined from ./sdk-guard so each hook bundles to a single self-contained
 // .mjs (matches the pattern used by every other hook entry in tsdown.config).
@@ -18,12 +19,6 @@ function isSdkChildContext(payload: unknown): boolean {
 
 const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
 const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-
-// Passive telemetry only — nothing reads the response, so the previous
-// `await` was pure latency. Tightened from 2000ms to a defensive cap so a
-// slow/unreachable server can't stack onto every concurrent subagent
-// startup (#221).
-const TIMEOUT_MS = 800;
 
 function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
@@ -57,36 +52,39 @@ async function main() {
   const fields = eventFields(lineage);
   const headers = authHeaders();
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      hookType: "subagent_start",
+  await Promise.all([
+    deliverHookRequests({
+      restUrl: REST_URL,
+      secret: SECRET,
+      requests: [{
+        path: "/agentmemory/observe",
+        kind: "observation",
+        body: {
+          hookType: "subagent_start",
+          ...fields,
+          timestamp: new Date().toISOString(),
+          data: {
+            agent_id: lineage.agentId,
+            agent_type: agentType,
+            lineage,
+          },
+        },
+      }],
+    }),
+    sendAgentEvent(REST_URL, headers, {
+      type: "custom",
+      status: "pending",
       ...fields,
-      timestamp: new Date().toISOString(),
-      data: {
-        agent_id: lineage.agentId,
-        agent_type: agentType,
-        lineage,
+      functionId: "plugin::subagent_start",
+      fromAgentId: firstString(data.parent_agent_id, data.parentAgentId),
+      toAgentId: lineage.agentId,
+      targetIds: targetIdsFor(lineage.agentId),
+      metadata: {
+        hookType: "subagent_start",
+        agentType: safeMetadata(agentType),
       },
     }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  }).catch(() => {});
-
-  sendAgentEvent(REST_URL, headers, {
-    type: "custom",
-    status: "pending",
-    ...fields,
-    functionId: "plugin::subagent_start",
-    fromAgentId: firstString(data.parent_agent_id, data.parentAgentId),
-    toAgentId: lineage.agentId,
-    targetIds: targetIdsFor(lineage.agentId),
-    metadata: {
-      hookType: "subagent_start",
-      agentType: safeMetadata(agentType),
-    },
-  });
-  setTimeout(() => process.exit(0), 500).unref();
+  ]);
 }
 
 main();

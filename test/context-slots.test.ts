@@ -159,7 +159,9 @@ describe("mem::context — pinned slot injection", () => {
 
   describe("when AGENTMEMORY_SLOTS is off", () => {
     it("does not include any slot content", async () => {
-      delete process.env["AGENTMEMORY_SLOTS"];
+      // An explicit process value must override a developer's live
+      // ~/.agentmemory/.env so this test actually exercises the off path.
+      process.env["AGENTMEMORY_SLOTS"] = "false";
       const kv = mockKV();
       const handler = wireContext(kv);
 

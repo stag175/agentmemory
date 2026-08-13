@@ -1,4 +1,4 @@
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -27,20 +27,52 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function acquireProcessLock(key: string): Promise<() => Promise<void>> {
+export interface KeyedLockOptions {
+  timeoutMs?: number;
+  staleMs?: number;
+}
+
+function ownerProcessIsAlive(ownerText: string): boolean | undefined {
+  const rawPid = ownerText.split(/\r?\n/, 1)[0]?.trim();
+  if (!rawPid || !/^\d+$/.test(rawPid)) return undefined;
+  const pid = Number(rawPid);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code: unknown }).code)
+        : undefined;
+    if (code === "ESRCH") return false;
+    // EPERM means the process exists but is owned by another user. Any
+    // unknown probe failure must fail closed rather than stealing its lock.
+    return true;
+  }
+}
+
+async function acquireProcessLock(
+  key: string,
+  options: KeyedLockOptions = {},
+): Promise<() => Promise<void>> {
   if (process.env["AGENTMEMORY_DISABLE_FILE_LOCKS"] === "true") {
     return async () => {};
   }
 
   const target = lockPath(key);
-  const timeoutMs = parsePositiveInt(
-    process.env["AGENTMEMORY_LOCK_TIMEOUT_MS"],
-    DEFAULT_LOCK_TIMEOUT_MS,
-  );
-  const staleMs = parsePositiveInt(
-    process.env["AGENTMEMORY_LOCK_STALE_MS"],
-    DEFAULT_LOCK_STALE_MS,
-  );
+  const timeoutMs =
+    options.timeoutMs ??
+    parsePositiveInt(
+      process.env["AGENTMEMORY_LOCK_TIMEOUT_MS"],
+      DEFAULT_LOCK_TIMEOUT_MS,
+    );
+  const staleMs =
+    options.staleMs ??
+    parsePositiveInt(
+      process.env["AGENTMEMORY_LOCK_STALE_MS"],
+      DEFAULT_LOCK_STALE_MS,
+    );
   const deadline = Date.now() + timeoutMs;
 
   await mkdir(dirname(target), { recursive: true });
@@ -64,8 +96,18 @@ async function acquireProcessLock(key: string): Promise<() => Promise<void>> {
       if (code !== "EEXIST") throw error;
 
       try {
-        const existing = await stat(target);
-        if (Date.now() - existing.mtimeMs > staleMs) {
+        const [existing, ownerText] = await Promise.all([
+          stat(target),
+          readFile(join(target, "owner"), "utf-8").catch(() => ""),
+        ]);
+        const ownerAlive = ownerProcessIsAlive(ownerText);
+        // A crashed process can leave a fresh directory behind. Reclaim it
+        // immediately. Conversely, never age-delete a live owner's lock: LLM
+        // calls may legitimately run longer than the historical 10m stale age.
+        if (
+          ownerAlive === false ||
+          (ownerAlive === undefined && Date.now() - existing.mtimeMs > staleMs)
+        ) {
           await rm(target, { recursive: true, force: true });
           continue;
         }
@@ -84,10 +126,11 @@ async function acquireProcessLock(key: string): Promise<() => Promise<void>> {
 export function withKeyedLock<T>(
   key: string,
   fn: () => Promise<T>,
+  options: KeyedLockOptions = {},
 ): Promise<T> {
   const prev = locks.get(key) ?? Promise.resolve();
   const run = async () => {
-    const release = await acquireProcessLock(key);
+    const release = await acquireProcessLock(key, options);
     try {
       return await fn();
     } finally {

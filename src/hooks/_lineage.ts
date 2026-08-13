@@ -1,4 +1,5 @@
 import { resolveProject } from "./_project.js";
+import { deliverHookRequests, type HookDeliveryReport } from "./_delivery.js";
 
 const SECRET_KEY_RE =
   /(?:^|[_-])(?:authorization|auth|cookie|secret|token|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|refresh[_-]?token|session[_-]?token)(?:$|[_-])/i;
@@ -211,10 +212,9 @@ export function targetIdsFor(...values: unknown[]): string[] {
 
 export function sendAgentEvent(
   restUrl: string,
-  headers: Record<string, string>,
+  _headers: Record<string, string>,
   event: Record<string, unknown>,
-  timeoutMs = 1200,
-): void {
+): Promise<HookDeliveryReport> {
   const safeEventMetadata =
     event.metadata === undefined ? undefined : safeMetadata(event.metadata);
   const metadata =
@@ -225,10 +225,19 @@ export function sendAgentEvent(
     ...event,
     metadata,
   });
-  fetch(`${restUrl}/agentmemory/agent-events`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
-  }).catch(() => {});
+  const authorization = _headers["Authorization"];
+  const secret = authorization?.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length)
+    : "";
+  return deliverHookRequests({
+    restUrl,
+    secret,
+    requests: [
+      {
+        path: "/agentmemory/agent-events",
+        body,
+        kind: "agent_event",
+      },
+    ],
+  });
 }

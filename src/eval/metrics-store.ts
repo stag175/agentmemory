@@ -37,13 +37,17 @@ export class MetricsStore {
     }
 
     const prev = m.totalCalls;
+    const recordedAt = new Date().toISOString();
     m.totalCalls += 1;
     m.avgLatencyMs = (m.avgLatencyMs * prev + latencyMs) / m.totalCalls;
     m.maxLatencyMs = Math.max(m.maxLatencyMs ?? 0, latencyMs);
+    m.lastCallAt = recordedAt;
     if (success) {
       m.successCount += 1;
+      m.lastSuccessAt = recordedAt;
     } else {
       m.failureCount += 1;
+      m.lastFailureAt = recordedAt;
     }
     if (qualityScore !== undefined) {
       const prevQualityCalls = this.qualityCallCounts.get(functionId) || 0;

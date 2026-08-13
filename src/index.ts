@@ -35,6 +35,10 @@ import { registerSlotsFunctions, isSlotsEnabled, isReflectEnabled } from "./func
 import { registerDiskSizeManager } from "./functions/disk-size-manager.js";
 import { registerCompressFunction } from "./functions/compress.js";
 import {
+  rebuildLlmPipelineAggregate,
+  redriveAllRawCompressionOrphans,
+} from "./functions/llm-jobs.js";
+import {
   registerSearchFunction,
   rebuildIndex,
   getSearchIndex,
@@ -271,14 +275,29 @@ async function main() {
   initMetrics(meterAccessor as ((name: string) => import("@opentelemetry/api").Meter) | undefined);
 
   registerPrivacyFunction(sdk);
-  registerObserveFunction(sdk, kv, dedupMap, config.maxObservationsPerSession);
+  registerObserveFunction(
+    sdk,
+    kv,
+    dedupMap,
+    config.maxObservationsPerSession,
+    {
+      provider: config.provider.provider,
+      model: config.provider.model,
+    },
+  );
   registerImageQuotaCleanup(sdk, kv);
   registerVisionSearchFunctions(sdk, kv, imageEmbeddingProvider);
   if (isSlotsEnabled()) {
     registerSlotsFunctions(sdk, kv);
   }
   registerDiskSizeManager(sdk, kv);
-  registerCompressFunction(sdk, kv, provider, metricsStore);
+  registerCompressFunction(
+    sdk,
+    kv,
+    provider,
+    metricsStore,
+    config.provider.model,
+  );
   registerSearchFunction(sdk, kv);
   registerContextFunction(sdk, kv, config.tokenBudget);
   registerSummarizeFunction(sdk, kv, provider, metricsStore);
@@ -466,7 +485,10 @@ async function main() {
   );
   registerRecentSearchesSweepFunction(sdk, kv);
 
-  registerApiTriggers(sdk, kv, secret, metricsStore, provider);
+  registerApiTriggers(sdk, kv, secret, metricsStore, provider, {
+    provider: config.provider.provider,
+    model: config.provider.model,
+  });
   registerEventTriggers(sdk, kv);
   registerMcpEndpoints(sdk, kv, secret);
 
@@ -616,7 +638,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 166 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 167 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,
@@ -630,6 +652,62 @@ async function main() {
     secret,
     config.restPort,
   );
+
+  const initializeLlmAggregate = async (delayMs = 1_000): Promise<void> => {
+    try {
+      await rebuildLlmPipelineAggregate(kv);
+    } catch (err) {
+      console.warn(`[agentmemory] LLM aggregate initialization failed:`, err);
+      const retryTimer = setTimeout(() => {
+        void initializeLlmAggregate(Math.min(delayMs * 2, 60_000));
+      }, delayMs);
+      retryTimer.unref();
+    }
+  };
+  // Queue visibility is available even when automatic enrichment is disabled.
+  // A transient encrypted-state read failure retries instead of leaving the
+  // dashboard permanently unavailable for the life of the daemon.
+  void initializeLlmAggregate();
+
+  if (isAutoCompressEnabled()) {
+    // Do not delay readiness while historical raw observations are recovered.
+    // The redrive is bounded and every duplicate delivery is guarded inside
+    // mem::compress by a per-observation lock + persisted-state recheck.
+    const reconcileMetadata = {
+      provider: config.provider.provider,
+      model: config.provider.model,
+    };
+    const scheduleLlmReconciliation = (delayMs: number): void => {
+      const retryTimer = setTimeout(() => {
+        void runLlmStartupReconciliation().catch((err) => {
+          console.warn(`[agentmemory] Deferred LLM reconciliation failed:`, err);
+          scheduleLlmReconciliation(60_000);
+        });
+      }, delayMs);
+      retryTimer.unref();
+    };
+    const runLlmStartupReconciliation = async (): Promise<void> => {
+      const result = await redriveAllRawCompressionOrphans(
+        sdk,
+        kv,
+        reconcileMetadata,
+        1_000,
+      );
+      if (result.scanned > 0) {
+        bootLog(
+          `LLM startup reconciliation: scanned ${result.scanned}, queued ${result.queued}, skipped ${result.skipped}`,
+        );
+      }
+      if (result.remaining > 0) {
+        scheduleLlmReconciliation(result.retryAfterMs ?? 60_000);
+      }
+    };
+    void runLlmStartupReconciliation()
+      .catch((err) => {
+        console.warn(`[agentmemory] LLM startup reconciliation failed:`, err);
+        scheduleLlmReconciliation(60_000);
+      });
+  }
 
   const autoForgetIntervalMs = positiveIntervalMs(
     process.env.AUTO_FORGET_INTERVAL_MS,

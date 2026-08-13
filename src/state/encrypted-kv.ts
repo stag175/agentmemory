@@ -69,6 +69,9 @@ export const DEFAULT_SENSITIVE_STATE_SCOPE_MATCHERS: StateScopeMatcher[] = [
   KV.imageEmbeddings,
   KV.slots,
   KV.globalSlots,
+  KV.hookDeliveries,
+  KV.llmJobs,
+  KV.llmPipeline,
   // KV.bm25Index ("mem:index:bm25") holds the small manifest, but the bulk
   // BM25/vector payload lives in sharded scopes such as
   // "mem:index:bm25:bm25:<gen>:00000" and "mem:index:bm25:vectors:<gen>:00000".

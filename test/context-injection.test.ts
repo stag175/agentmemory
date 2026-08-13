@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const HOOKS_DIR = join(import.meta.dirname, "..", "plugin", "scripts");
@@ -21,6 +23,7 @@ function runHook(
 }> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
+    const hookOutbox = mkdtempSync(join(tmpdir(), "agentmemory-context-hook-"));
     const child = spawn(
       process.execPath,
       [join(HOOKS_DIR, scriptName)],
@@ -30,6 +33,7 @@ function runHook(
           // the hook. Only pass PATH and anything explicitly set by the
           // test case.
           PATH: process.env["PATH"] ?? "",
+          AGENTMEMORY_HOOK_OUTBOX_DIR: hookOutbox,
           ...env,
         },
         stdio: ["pipe", "pipe", "pipe"],
@@ -44,8 +48,12 @@ function runHook(
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      rmSync(hookOutbox, { recursive: true, force: true });
+      reject(error);
+    });
     child.on("close", (exitCode) => {
+      rmSync(hookOutbox, { recursive: true, force: true });
       resolve({ stdout, stderr, exitCode, tookMs: Date.now() - start });
     });
 
