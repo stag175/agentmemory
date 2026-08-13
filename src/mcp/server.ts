@@ -17,6 +17,7 @@ import {
   normalizeRulesResolveInput,
 } from "../functions/rules-resolver.js";
 import { evaluateEncryptionReadinessFromEnv } from "../security/encryption-policy.js";
+import { isSlotsEnabled } from "../functions/slots.js";
 
 type McpResponse = {
   status_code: number;
@@ -1668,6 +1669,9 @@ export function registerMcpEndpoints(
           }
 
           case "memory_slot_list": {
+            if (!isSlotsEnabled()) {
+              return { status_code: 503, body: { error: "Memory slots not enabled", flag: "AGENTMEMORY_SLOTS" } };
+            }
             const result = await sdk.trigger({ function_id: "mem::slot-list", payload: {} });
             return {
               status_code: 200,
@@ -1676,6 +1680,9 @@ export function registerMcpEndpoints(
           }
 
           case "memory_slot_get": {
+            if (!isSlotsEnabled()) {
+              return { status_code: 503, body: { error: "Memory slots not enabled", flag: "AGENTMEMORY_SLOTS" } };
+            }
             const label = asNonEmptyString(args.label);
             if (!label) return { status_code: 400, body: { error: "label required" } };
             const result = await sdk.trigger({ function_id: "mem::slot-get", payload: { label } });
@@ -1686,6 +1693,9 @@ export function registerMcpEndpoints(
           }
 
           case "memory_slot_create": {
+            if (!isSlotsEnabled()) {
+              return { status_code: 503, body: { error: "Memory slots not enabled", flag: "AGENTMEMORY_SLOTS" } };
+            }
             const label = asNonEmptyString(args.label);
             if (!label) return { status_code: 400, body: { error: "label required" } };
             const payload: Record<string, unknown> = { label };
@@ -1705,6 +1715,9 @@ export function registerMcpEndpoints(
           }
 
           case "memory_slot_append": {
+            if (!isSlotsEnabled()) {
+              return { status_code: 503, body: { error: "Memory slots not enabled", flag: "AGENTMEMORY_SLOTS" } };
+            }
             const label = asNonEmptyString(args.label);
             const text = typeof args.text === "string" ? args.text : null;
             if (!label || !text) return { status_code: 400, body: { error: "label and text required" } };
@@ -1716,6 +1729,9 @@ export function registerMcpEndpoints(
           }
 
           case "memory_slot_replace": {
+            if (!isSlotsEnabled()) {
+              return { status_code: 503, body: { error: "Memory slots not enabled", flag: "AGENTMEMORY_SLOTS" } };
+            }
             const label = asNonEmptyString(args.label);
             if (!label || typeof args.content !== "string") {
               return { status_code: 400, body: { error: "label and content (string) required" } };
@@ -1728,6 +1744,9 @@ export function registerMcpEndpoints(
           }
 
           case "memory_slot_delete": {
+            if (!isSlotsEnabled()) {
+              return { status_code: 503, body: { error: "Memory slots not enabled", flag: "AGENTMEMORY_SLOTS" } };
+            }
             const label = asNonEmptyString(args.label);
             if (!label) return { status_code: 400, body: { error: "label required" } };
             const result = await sdk.trigger({ function_id: "mem::slot-delete", payload: { label } });

@@ -477,17 +477,24 @@ describe("roadmap REST endpoint whitelists", () => {
     })) as { status_code: number };
 
     expect(response.status_code).toBe(200);
-    // Query params arrive as strings; mem::audit-chain coerces them. The REST
-    // layer only forwards whitelisted keys and drops "secret".
+    // Query params arrive as strings; the REST layer parses the documented
+    // boolean while forwarding the remaining whitelisted values.
     expect(payload).toEqual({
       offset: "0",
       limit: "25",
-      includeLinks: "true",
+      includeLinks: true,
       operation: "memory.write",
       functionId: "mem::remember",
       dateFrom: "2026-06-01",
       dateTo: "2026-06-30",
     });
+
+    const invalid = (await sdk.trigger("api::audit-chain", {
+      headers: AUTH_HEADERS,
+      query_params: { includeLinks: "yes" },
+    })) as { status_code: number; body: { error: string } };
+    expect(invalid.status_code).toBe(400);
+    expect(invalid.body.error).toBe("includeLinks must be a boolean");
   });
 
   it("whitelists audit-chain verify anchors and rejects bad field types (item 3)", async () => {
@@ -547,5 +554,31 @@ describe("roadmap REST endpoint whitelists", () => {
     expect(badCount.body.error).toBe("expectedCount must be an integer");
     expect(badChain.status_code).toBe(400);
     expect(badChain.body.error).toBe("chain must be an array");
+  });
+
+  it("rejects diagnostics categories that are not an array of strings", async () => {
+    const sdk = mockSdk();
+    sdk.registerFunction("mem::diagnose", async () => ({ success: true }));
+    registerApiTriggers(sdk as never, mockKV() as never, TEST_SECRET);
+
+    const valid = (await sdk.trigger("api::diagnose", {
+      headers: AUTH_HEADERS,
+      body: { categories: ["actions", "memories"] },
+    })) as { status_code: number };
+    const stringCategory = (await sdk.trigger("api::diagnose", {
+      headers: AUTH_HEADERS,
+      body: { categories: "actions" },
+    })) as { status_code: number; body: { error: string } };
+    const mixed = (await sdk.trigger("api::diagnose", {
+      headers: AUTH_HEADERS,
+      body: { categories: ["actions", 42] },
+    })) as { status_code: number; body: { error: string } };
+
+    expect(valid.status_code).toBe(200);
+    expect(stringCategory).toMatchObject({
+      status_code: 400,
+      body: { error: "categories must be an array of strings" },
+    });
+    expect(mixed.status_code).toBe(400);
   });
 });

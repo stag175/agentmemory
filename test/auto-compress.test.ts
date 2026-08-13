@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { RawObservation } from "../src/types.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const ORIGINAL_ENV = { ...process.env };
+let sandboxHome: string;
 
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -28,7 +34,7 @@ function mockKV() {
 
 function mockSdk() {
   const fns = new Map<string, Function>();
-  const triggered: Array<{ id: string; data: unknown }> = [];
+  const triggered: Array<{ id: string; data: unknown; action?: unknown }> = [];
   return {
     fns,
     triggered,
@@ -50,7 +56,11 @@ function mockSdk() {
         typeof idOrInput === "string" ? idOrInput : idOrInput.function_id;
       const payload =
         typeof idOrInput === "string" ? data : idOrInput.payload;
-      triggered.push({ id, data: payload });
+      triggered.push({
+        id,
+        data: payload,
+        action: typeof idOrInput === "string" ? undefined : idOrInput.action,
+      });
       const fn = fns.get(id);
       if (fn) return fn(payload);
       return null;
@@ -74,6 +84,12 @@ function validPayload(overrides: Partial<Record<string, unknown>> = {}) {
 
 describe("mem::observe auto-compress gate (#138)", () => {
   beforeEach(() => {
+    sandboxHome = mkdtempSync(join(tmpdir(), "am-auto-compress-"));
+    process.env = {
+      ...ORIGINAL_ENV,
+      HOME: sandboxHome,
+      USERPROFILE: sandboxHome,
+    };
     // Reset module cache so observe.js re-imports config.js with the
     // fresh AGENTMEMORY_AUTO_COMPRESS env state. Without this, a later
     // test that sets the env var can be undermined by cached module
@@ -82,7 +98,8 @@ describe("mem::observe auto-compress gate (#138)", () => {
     delete process.env["AGENTMEMORY_AUTO_COMPRESS"];
   });
   afterEach(() => {
-    delete process.env["AGENTMEMORY_AUTO_COMPRESS"];
+    process.env = ORIGINAL_ENV;
+    rmSync(sandboxHome, { recursive: true, force: true });
   });
 
   it("default (AGENTMEMORY_AUTO_COMPRESS unset): does NOT fire mem::compress", async () => {
@@ -144,6 +161,10 @@ describe("mem::observe auto-compress gate (#138)", () => {
 
     const compressCalls = sdk.triggered.filter((t) => t.id === "mem::compress");
     expect(compressCalls).toHaveLength(1);
+    expect(compressCalls[0]?.action).toEqual({
+      type: "enqueue",
+      queue: "agentmemory-compression",
+    });
   });
 
   it("AGENTMEMORY_AUTO_COMPRESS=false explicitly: does NOT fire mem::compress", async () => {

@@ -5,6 +5,7 @@ import {
   buildAuditHashChain,
   computeAuditChainHash,
   computeAuditEntryHash,
+  migrateAuditHashChain,
   registerAuditIntegrityFunctions,
   type AuditHashChainReport,
   type AuditHashChainVerifyResult,
@@ -410,4 +411,75 @@ describe("audit integrity hash chain", () => {
     expect(rejected.success).toBe(false);
     expect(rejected.error).toContain("limit");
   });
+
+  it("explicitly migrates legacy rows and atomically advances the persisted head", async () => {
+    const kv = mockKV();
+    const legacyRows: AuditEntry[] = [
+      {
+        id: "aud_legacy_b",
+        timestamp: "2026-08-13T18:00:01.000Z",
+        operation: "observe",
+        functionId: "mem::observe",
+        targetIds: ["obs_b"],
+        details: {},
+      },
+      {
+        id: "aud_legacy_a",
+        timestamp: "2026-08-13T18:00:00.000Z",
+        operation: "remember",
+        functionId: "mem::remember",
+        targetIds: ["mem_a"],
+        details: {},
+      },
+    ];
+    for (const row of legacyRows) await kv.set(KV.audit, row.id, row);
+    const preflight = (await buildAuditHashChain(kv as never, {})) as AuditHashChainReport;
+
+    const migrated = await migrateAuditHashChain(kv as never, {
+      approved: true,
+      expectedCount: 2,
+      expectedHeadHash: preflight.headHash,
+    });
+
+    expect(migrated).toMatchObject({
+      success: true,
+      migratedRows: 2,
+      entryCount: 3,
+      firstEntryId: "aud_legacy_a",
+    });
+    const verification = (await registerAndVerify(kv)) as AuditHashChainVerifyResult;
+    expect(verification.valid).toBe(true);
+    expect(verification.mismatches).toEqual([]);
+    expect(verification.scope.filteredEntries).toBe(3);
+    const rows = (await rawAuditRows(kv)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    expect(rows.map((row) => row.seq)).toEqual([1, 2, 3]);
+    expect(rows.at(-1)?.functionId).toBe("mem::audit-chain-migrate");
+  });
+
+  it("requires approval and exact preflight anchors before audit migration", async () => {
+    const kv = mockKV();
+    await seedChain(kv);
+    const chain = (await buildAuditHashChain(kv as never, {})) as AuditHashChainReport;
+
+    await expect(migrateAuditHashChain(kv as never, {
+      expectedCount: 3,
+      expectedHeadHash: chain.headHash,
+    })).resolves.toEqual({ success: false, error: "approved true is required" });
+    await expect(migrateAuditHashChain(kv as never, {
+      approved: true,
+      expectedCount: 4,
+      expectedHeadHash: chain.headHash,
+    })).resolves.toMatchObject({ success: false });
+    await expect(migrateAuditHashChain(kv as never, {
+      approved: true,
+      expectedCount: 3,
+      expectedHeadHash: "f".repeat(64),
+    })).resolves.toEqual({ success: false, error: "audit head changed since approval" });
+  });
 });
+
+async function registerAndVerify(kv: Kv): Promise<unknown> {
+  const sdk = mockSdk();
+  registerAuditIntegrityFunctions(sdk as never, kv as never);
+  return sdk.trigger("mem::audit-chain-verify", {});
+}

@@ -410,12 +410,17 @@ describe("Release Gate Eval Helpers", () => {
     ]);
 
     await metrics.record("mem::remember", 15, true, 90);
+    await metrics.record("mem::remember", 45, true, 90);
     await metrics.record("mem::forget", 25, false, 80);
 
     expect(await metrics.getQualityEvidence(["mem::remember", "mem::forget"])).toMatchObject([
       { functionId: "mem::remember", status: "pass" },
       { functionId: "mem::forget", status: "fail" },
     ]);
+    expect(await metrics.get("mem::remember")).toMatchObject({
+      avgLatencyMs: 30,
+      maxLatencyMs: 45,
+    });
   });
 
   it("runs the Retrieval Arena smoke gate with honest pass and fail outcomes", async () => {

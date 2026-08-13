@@ -1,6 +1,7 @@
 import type { MemoryProvider } from "../types.js";
 import { getEnvVar } from "../config.js";
 import { fetchWithTimeout } from "./_fetch.js";
+import { LONG_RUNNING_TIMEOUT_MS } from "../backpressure.js";
 import {
   DEFAULT_AZURE_API_VERSION,
   buildAuthHeaders,
@@ -9,7 +10,7 @@ import {
   normalizeBaseUrl,
 } from "./_openai-shared.js";
 
-const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = LONG_RUNNING_TIMEOUT_MS;
 
 /**
  * OpenAI-compatible LLM provider.
@@ -35,7 +36,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
  *                              for back-compat with the v0.9.17 shipping name).
  *   AGENTMEMORY_LLM_TIMEOUT_MS — outbound fetch timeout in ms shared across all
  *                              raw-fetch LLM + embedding providers. Used when
- *                              OPENAI_TIMEOUT_MS is not set. Default: 60000.
+ *                              OPENAI_TIMEOUT_MS is not set. Default: 1800000.
  *   MAX_TOKENS               — max output tokens (default: from config or 4096)
  *   OPENAI_REASONING_EFFORT  — "low" | "medium" | "high" | "none"
  *                              Passthrough for reasoning models (e.g. Ollama Cloud
@@ -100,7 +101,7 @@ export class OpenAIProvider implements MemoryProvider {
     // provider (minimax, openrouter, gemini, openrouter-embed, etc.).
     // OPENAI_TIMEOUT_MS keeps its v0.9.17 meaning (OpenAI-scoped alias,
     // takes precedence); when unset we fall through to
-    // AGENTMEMORY_LLM_TIMEOUT_MS and finally the 60s default. See #446.
+    // AGENTMEMORY_LLM_TIMEOUT_MS and finally the 30m default. See #446.
     let response: Response;
     try {
       response = await fetchWithTimeout(
@@ -154,7 +155,7 @@ export class OpenAIProvider implements MemoryProvider {
 // Precedence (preserving v0.9.17 behaviour):
 //   1. OPENAI_TIMEOUT_MS       — OpenAI-scoped alias (back-compat)
 //   2. AGENTMEMORY_LLM_TIMEOUT_MS — global LLM/embedding timeout (#446)
-//   3. 60 000 ms default
+//   3. 1 800 000 ms default
 function resolveTimeout(): number {
   const openaiRaw = getEnvVar("OPENAI_TIMEOUT_MS");
   const openai = parsePositiveInt(openaiRaw);
@@ -178,4 +179,3 @@ function parsePositiveInt(raw: string | null | undefined): number | undefined {
   const n = Number(trimmed);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
-

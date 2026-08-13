@@ -3,7 +3,7 @@ workers:
     config:
       port: 3111
       host: 127.0.0.1
-      default_timeout: 180000
+      default_timeout: 1800000
       cors:
         allowed_origins: ["http://localhost:3111", "http://localhost:3113", "http://127.0.0.1:3111", "http://127.0.0.1:3113"]
         allowed_methods: [GET, POST, PUT, DELETE, OPTIONS]
@@ -16,8 +16,36 @@ workers:
           file_path: ./data/state_store.db
   - name: iii-queue
     config:
+      queue_configs:
+        agentmemory-compression:
+          max_retries: 10
+          concurrency: 2
+          type: standard
+          backoff_ms: 1000
+          poll_interval_ms: 100
+        agentmemory-session-lifecycle:
+          max_retries: 10
+          concurrency: 2
+          type: standard
+          backoff_ms: 1000
+          poll_interval_ms: 100
+        agentmemory-graph-extraction:
+          max_retries: 10
+          concurrency: 2
+          type: standard
+          backoff_ms: 1000
+          poll_interval_ms: 100
+        agentmemory-slot-reflection:
+          max_retries: 10
+          concurrency: 1
+          type: standard
+          backoff_ms: 1000
+          poll_interval_ms: 100
       adapter:
         name: builtin
+        config:
+          store_method: file_based
+          file_path: ./data/queue_store
   - name: iii-pubsub
     config:
       adapter:

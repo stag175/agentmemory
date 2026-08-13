@@ -142,7 +142,7 @@ async function main() {
 			...eventFields(lineage),
 			timestamp: (/* @__PURE__ */ new Date()).toISOString(),
 			data: {
-				prompt: data.prompt ?? data.userPrompt,
+				prompt: safeString(data.prompt ?? data.userPrompt, 2e4),
 				lineage
 			}
 		}),

@@ -31,6 +31,7 @@ export class MetricsStore {
         successCount: 0,
         failureCount: 0,
         avgLatencyMs: 0,
+        maxLatencyMs: 0,
         avgQualityScore: 0,
       };
     }
@@ -38,6 +39,7 @@ export class MetricsStore {
     const prev = m.totalCalls;
     m.totalCalls += 1;
     m.avgLatencyMs = (m.avgLatencyMs * prev + latencyMs) / m.totalCalls;
+    m.maxLatencyMs = Math.max(m.maxLatencyMs ?? 0, latencyMs);
     if (success) {
       m.successCount += 1;
     } else {

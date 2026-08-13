@@ -377,6 +377,27 @@ describe("MCP Resources", () => {
     expect(badEnabled.body.error).toBe("enabled must be a boolean");
   });
 
+  it("preserves the slots feature-disabled status through the MCP endpoint", async () => {
+    const previous = process.env["AGENTMEMORY_SLOTS"];
+    process.env["AGENTMEMORY_SLOTS"] = "false";
+    try {
+      const fn = sdk.getFunction("mcp::tools::call")!;
+      const response = (await fn(
+        makeReq({ name: "memory_slot_list", arguments: {} }),
+      )) as { status_code: number; body: { error: string; flag: string } };
+      expect(response).toEqual({
+        status_code: 503,
+        body: {
+          error: "Memory slots not enabled",
+          flag: "AGENTMEMORY_SLOTS",
+        },
+      });
+    } finally {
+      if (previous === undefined) delete process.env["AGENTMEMORY_SLOTS"];
+      else process.env["AGENTMEMORY_SLOTS"] = previous;
+    }
+  });
+
   it("resolves the proposal principal server-side and never trusts body permissions", async () => {
     let seen: Record<string, unknown> | undefined;
     sdk.overrideTrigger("mem::memory-proposal-approve", async (payload: unknown) => {

@@ -106,6 +106,7 @@ import { registerMcpEndpoints } from "./mcp/server.js";
 import { getAllTools } from "./mcp/tools-registry.js";
 import { startViewerServer } from "./viewer/server.js";
 import { MetricsStore } from "./eval/metrics-store.js";
+import { LONG_RUNNING_TIMEOUT_MS, positiveTimeoutMs } from "./backpressure.js";
 import { DedupMap } from "./functions/dedup.js";
 import { isMemorySearchable } from "./state/memory-utils.js";
 import { registerHealthMonitor } from "./health/monitor.js";
@@ -213,7 +214,10 @@ async function main() {
 
   const sdk = registerWorker(config.engineUrl, {
     workerName: "agentmemory",
-    invocationTimeoutMs: 180000,
+    invocationTimeoutMs: positiveTimeoutMs(
+      getEnvVar("AGENTMEMORY_INVOCATION_TIMEOUT_MS"),
+      LONG_RUNNING_TIMEOUT_MS,
+    ),
     otel: {
       serviceName: OTEL_CONFIG.serviceName,
       serviceVersion: OTEL_CONFIG.serviceVersion,

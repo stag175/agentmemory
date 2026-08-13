@@ -129,7 +129,12 @@ export class EncryptedStateKV implements StateKVLike {
 
   async get<T = unknown>(scope: string, key: string): Promise<T | null> {
     const value = await this.base.get<unknown>(scope, key);
-    if (!this.shouldEncrypt(scope) || value === null) return value as T | null;
+    if (!this.shouldEncrypt(scope)) return value as T | null;
+    // iii state::get returns `undefined` for a missing key even though the SDK
+    // type declares `null`. Treat both nullish values as a legitimate miss;
+    // otherwise first-run initialization of an encrypted scope fails closed as
+    // if an actual plaintext value had been found.
+    if (value === null || value === undefined) return null;
     return this.decryptStoredValue<T>(scope, key, value);
   }
 

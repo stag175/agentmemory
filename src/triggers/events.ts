@@ -5,6 +5,7 @@ import { StateKV } from "../state/kv.js";
 import { isReflectEnabled } from "../functions/slots.js";
 import { isGraphExtractionEnabled } from "../config.js";
 import { logger } from "../logger.js";
+import { WORK_QUEUES } from "../backpressure.js";
 
 export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
@@ -51,7 +52,7 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
         sdk.trigger({
           function_id: "mem::slot-reflect",
           payload: { sessionId: data.sessionId },
-          action: TriggerAction.Void(),
+          action: TriggerAction.Enqueue({ queue: WORK_QUEUES.slotReflection }),
         });
       } catch (err) {
         logger.warn("slot-reflect trigger failed", {
@@ -70,7 +71,7 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
           sdk.trigger({
             function_id: "mem::graph-extract",
             payload: { observations: compressed },
-            action: TriggerAction.Void(),
+            action: TriggerAction.Enqueue({ queue: WORK_QUEUES.graphExtraction }),
           });
         }
       } catch (err) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { buildLineage, eventFields } from "./_lineage.js";
+import { buildLineage, eventFields, safeString } from "./_lineage.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -41,7 +41,7 @@ async function main() {
       hookType: "prompt_submit",
       ...eventFields(lineage),
       timestamp: new Date().toISOString(),
-      data: { prompt: data.prompt ?? data.userPrompt, lineage },
+      data: { prompt: safeString(data.prompt ?? data.userPrompt, 20_000), lineage },
     }),
     signal: AbortSignal.timeout(3000),
   }).catch(() => {});

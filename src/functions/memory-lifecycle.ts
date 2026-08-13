@@ -764,14 +764,22 @@ async function scopedObservationRows(
   );
 }
 
+function observationTextValues(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string");
+  }
+  // Legacy/imported observations may predate the array-valued schema.
+  return typeof value === "string" && value.trim() ? [value] : [];
+}
+
 function observationText(observation: CompressedObservation): string {
   return [
     observation.title,
     observation.subtitle,
     observation.narrative,
-    ...observation.facts,
-    ...observation.concepts,
-    ...observation.files,
+    ...observationTextValues(observation.facts),
+    ...observationTextValues(observation.concepts),
+    ...observationTextValues(observation.files),
   ]
     .filter(Boolean)
     .join(" ");

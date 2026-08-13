@@ -296,6 +296,7 @@ export interface FunctionMetrics {
   successCount: number;
   failureCount: number;
   avgLatencyMs: number;
+  maxLatencyMs?: number;
   avgQualityScore: number;
 }
 

@@ -2,13 +2,15 @@ import { createHash } from "node:crypto";
 import type { ISdk } from "iii-sdk";
 import type { AuditChainHead, AuditEntry } from "../types.js";
 import type { StateKV } from "../state/kv.js";
-import { KV } from "../state/schema.js";
+import { KV, generateId } from "../state/schema.js";
+import { withKeyedLock } from "../state/keyed-mutex.js";
 
 export const AUDIT_CHAIN_VERSION = 1;
 export const AUDIT_CHAIN_ALGORITHM = "sha256";
 export const AUDIT_CHAIN_GENESIS_HASH = "0".repeat(64);
 // Fixed single-row key for the audit-chain head pointer (KV.auditChainHead).
 export const AUDIT_CHAIN_HEAD_KEY = "current";
+export const AUDIT_CHAIN_MIGRATION_VERSION = 1;
 
 const DEFAULT_AUDIT_CHAIN_LIMIT = 1000;
 const MAX_AUDIT_CHAIN_LIMIT = 10000;
@@ -929,11 +931,159 @@ export async function verifyAuditHashChain(
   return result;
 }
 
+type AuditChainMigrationInput = {
+  approved?: boolean;
+  expectedCount?: number;
+  expectedHeadHash?: string;
+};
+
+export async function migrateAuditHashChain(
+  kv: StateKV,
+  input: AuditChainMigrationInput = {},
+): Promise<
+  | {
+      success: true;
+      migrationVersion: typeof AUDIT_CHAIN_MIGRATION_VERSION;
+      migratedRows: number;
+      entryCount: number;
+      headHash: string;
+      firstEntryId?: string;
+      lastEntryId?: string;
+    }
+  | { success: false; error: string }
+> {
+  if (input.approved !== true) {
+    return { success: false, error: "approved true is required" };
+  }
+  if (!Number.isInteger(input.expectedCount) || (input.expectedCount ?? -1) < 0) {
+    return { success: false, error: "expectedCount must be a non-negative integer" };
+  }
+  const expectedHeadHash = parseExpectedHash(
+    input.expectedHeadHash,
+    "expectedHeadHash",
+  );
+  if (expectedHeadHash.error || !expectedHeadHash.value) {
+    return {
+      success: false,
+      error: expectedHeadHash.error ?? "expectedHeadHash is required",
+    };
+  }
+
+  return withKeyedLock(KV.auditChainHead, async () => {
+    const rawRows = await kv.list<unknown>(KV.audit);
+    const preflight = buildReportFromRows(rawRows, {
+      offset: 0,
+      limit: MAX_AUDIT_CHAIN_LIMIT,
+      includeLinks: true,
+    });
+    if (rawRows.length !== input.expectedCount) {
+      return {
+        success: false,
+        error: `audit row count changed: expected ${input.expectedCount}, found ${rawRows.length}`,
+      };
+    }
+    if (preflight.headHash !== expectedHeadHash.value) {
+      return {
+        success: false,
+        error: "audit head changed since approval",
+      };
+    }
+
+    const structuralIssues = preflight.rowIssues.filter(
+      (issue) => issue.field !== "seq" && issue.field !== "chainHash",
+    );
+    if (structuralIssues.length > 0) {
+      return {
+        success: false,
+        error: `audit rows contain ${structuralIssues.length} non-migratable structural issue(s)`,
+      };
+    }
+
+    const rows = rawRows
+      .map((raw, sourceIndex) => ({
+        sourceIndex,
+        entry: raw as AuditEntry,
+      }))
+      .sort((a, b) => {
+        const timestamp = a.entry.timestamp.localeCompare(b.entry.timestamp);
+        if (timestamp !== 0) return timestamp;
+        const id = a.entry.id.localeCompare(b.entry.id);
+        if (id !== 0) return id;
+        return a.sourceIndex - b.sourceIndex;
+      });
+
+    let previousHash = AUDIT_CHAIN_GENESIS_HASH;
+    let migratedRows = 0;
+    let seq = 0;
+    for (const row of rows) {
+      seq += 1;
+      const migrated: AuditEntry = { ...row.entry, seq };
+      delete migrated.chainHash;
+      const entryHash = computeAuditEntryHash(migrated);
+      migrated.chainHash = computeAuditChainHash(previousHash, entryHash, seq);
+      previousHash = migrated.chainHash;
+      if (
+        row.entry.seq !== migrated.seq ||
+        row.entry.chainHash !== migrated.chainHash
+      ) {
+        migratedRows += 1;
+        await kv.set(KV.audit, migrated.id, migrated);
+      }
+    }
+
+    const migrationTimestamp = new Date().toISOString();
+    seq += 1;
+    const migrationEntry: AuditEntry = {
+      id: generateId("aud"),
+      timestamp: migrationTimestamp,
+      operation: "heal",
+      functionId: "mem::audit-chain-migrate",
+      targetIds: [],
+      details: {
+        migrationVersion: AUDIT_CHAIN_MIGRATION_VERSION,
+        sourceEntryCount: rows.length,
+        migratedRows,
+        previousComputedHeadHash: preflight.headHash,
+      },
+      seq,
+    };
+    const migrationEntryHash = computeAuditEntryHash(migrationEntry);
+    migrationEntry.chainHash = computeAuditChainHash(
+      previousHash,
+      migrationEntryHash,
+      seq,
+    );
+    await kv.set(KV.audit, migrationEntry.id, migrationEntry);
+
+    const head: AuditChainHead = {
+      seq,
+      chainHash: migrationEntry.chainHash,
+      entryId: migrationEntry.id,
+      entryHash: migrationEntryHash,
+      count: seq,
+      updatedAt: migrationTimestamp,
+    };
+    await kv.set(KV.auditChainHead, AUDIT_CHAIN_HEAD_KEY, head);
+    return {
+      success: true,
+      migrationVersion: AUDIT_CHAIN_MIGRATION_VERSION,
+      migratedRows,
+      entryCount: seq,
+      headHash: head.chainHash,
+      ...(rows[0] ? { firstEntryId: rows[0].entry.id } : {}),
+      lastEntryId: migrationEntry.id,
+    };
+  });
+}
+
 export function registerAuditIntegrityFunctions(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::audit-chain", async (input: unknown = {}) =>
     buildAuditHashChain(kv, input),
   );
   sdk.registerFunction("mem::audit-chain-verify", async (input: unknown = {}) =>
     verifyAuditHashChain(kv, input),
+  );
+  sdk.registerFunction("mem::audit-chain-migrate", async (input: unknown = {}) =>
+    migrateAuditHashChain(kv, isRecord(input) ? input : {}),
   );
 }

@@ -24,9 +24,19 @@ describe("api::session::end → event::session::stopped (#666)", () => {
     );
   });
 
-  it("event::session::stopped uses TriggerAction.Void for fire-and-forget", () => {
+  it("event::session::stopped uses the durable lifecycle queue", () => {
     expect(api).toMatch(
-      /function_id:\s*"event::session::stopped"[\s\S]*?action:\s*TriggerAction\.Void\(\)/,
+      /function_id:\s*"event::session::stopped"[\s\S]*?action:\s*TriggerAction\.Enqueue\(\{\s*queue:\s*WORK_QUEUES\.sessionLifecycle\s*\}\)/,
+    );
+  });
+
+  it("long-running graph and reflection work uses named queues", () => {
+    const events = readFileSync("src/triggers/events.ts", "utf-8");
+    expect(events).toMatch(
+      /function_id:\s*"mem::slot-reflect"[\s\S]*?WORK_QUEUES\.slotReflection/,
+    );
+    expect(events).toMatch(
+      /function_id:\s*"mem::graph-extract"[\s\S]*?WORK_QUEUES\.graphExtraction/,
     );
   });
 });

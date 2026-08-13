@@ -1,14 +1,18 @@
 import { getEnvVar } from "../config.js";
+import { LONG_RUNNING_TIMEOUT_MS, positiveTimeoutMs } from "../backpressure.js";
 
 export function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs?: number,
 ): Promise<Response> {
-  const parsed =
-    timeoutMs ??
-    Number.parseInt(getEnvVar("AGENTMEMORY_LLM_TIMEOUT_MS") ?? "60000", 10);
-  const ms = Number.isFinite(parsed) && parsed > 0 ? parsed : 60000;
+  const ms =
+    timeoutMs !== undefined
+      ? positiveTimeoutMs(String(timeoutMs))
+      : positiveTimeoutMs(
+          getEnvVar("AGENTMEMORY_LLM_TIMEOUT_MS"),
+          LONG_RUNNING_TIMEOUT_MS,
+        );
 
   const ctl = new AbortController();
   const signal = init.signal

@@ -211,7 +211,9 @@ describe("viewer session rendering", () => {
     sandbox.state.dashboard = {
       loaded: true,
       health: { status: "healthy", health: {} },
+      sessionsAvailable: true,
       sessions: [{ status: "active", observationCount: 3, startedAt: "2026-05-13T12:00:00Z" }],
+      memoriesAvailable: true,
       memories: [],
       graphStats: null,
       recentAudit: [],
@@ -221,6 +223,56 @@ describe("viewer session rendering", () => {
 
     expect(() => sandbox.renderDashboard()).not.toThrow();
     expect(getElement("view-dashboard").innerHTML).toContain("Unknown session");
+  });
+
+  it("shows onboarding only when every primary persisted source is successfully empty", () => {
+    const { sandbox, getElement } = loadViewerSandbox();
+    const baseline = {
+      loaded: true,
+      health: { status: "healthy", health: {} },
+      sessionsAvailable: true,
+      sessions: [],
+      memoriesAvailable: true,
+      memories: [],
+      graphStats: { totalNodes: 0, totalEdges: 0 },
+      recentAudit: [],
+      lessons: [],
+      crystals: [],
+    };
+
+    sandbox.state.dashboard = { ...baseline };
+    sandbox.renderDashboard();
+    expect(getElement("view-dashboard").innerHTML).toContain("First run");
+
+    sandbox.state.dashboard = { ...baseline, memories: [{ id: "mem_1" }] };
+    sandbox.renderDashboard();
+    expect(getElement("view-dashboard").innerHTML).not.toContain("First run");
+
+    sandbox.state.dashboard = { ...baseline, recentAudit: [{ id: "audit_1" }] };
+    sandbox.renderDashboard();
+    expect(getElement("view-dashboard").innerHTML).not.toContain("First run");
+  });
+
+  it("preserves the last-known session count when refresh data is unavailable", () => {
+    const { sandbox, getElement } = loadViewerSandbox();
+    sandbox.state.dashboard = {
+      loaded: true,
+      health: { status: "healthy", health: {} },
+      sessionsAvailable: false,
+      sessions: [{ id: "ses_1", project: "billing", status: "completed", observationCount: 2, startedAt: "2026-05-13T12:00:00Z" }],
+      memoriesAvailable: true,
+      memories: [],
+      graphStats: null,
+      recentAudit: [],
+      lessons: [],
+      crystals: [],
+    };
+
+    sandbox.renderDashboard();
+    const html = getElement("view-dashboard").innerHTML;
+    expect(html).toContain("Session data temporarily unavailable");
+    expect(html).toContain("last known · unavailable");
+    expect(html).not.toContain("First run");
   });
 
   it("does not throw when timeline and sessions tabs receive sessions missing ids", () => {

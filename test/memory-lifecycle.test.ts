@@ -817,10 +817,12 @@ describe("memory lifecycle roadmap surface", () => {
       timestamp: "2026-06-29T10:00:00Z",
       type: "decision",
       title: "Billing retry fix verified",
-      facts: ["tests passed"],
+      // Legacy imports may persist these array-valued fields as scalars. The
+      // daily inbox must normalize them instead of failing the entire view.
+      facts: "tests passed",
       narrative: "The billing retry workflow was fixed and verified.",
-      concepts: ["billing", "retry"],
-      files: ["src/billing.ts"],
+      concepts: "billing retry",
+      files: "src/billing.ts",
       importance: 9,
       agentId: "codex",
     });

@@ -13,6 +13,7 @@ import {
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
 import { logger } from "../logger.js";
+import { WORK_QUEUES } from "../backpressure.js";
 import { safeRecordAgentEvent } from "./agent-events.js";
 import { saveImageToDisk } from "../utils/image-store.js";
 
@@ -323,7 +324,7 @@ export function registerObserveFunction(
               sessionId: payload.sessionId,
               raw,
             },
-            action: TriggerAction.Void(),
+            action: TriggerAction.Enqueue({ queue: WORK_QUEUES.compression }),
           });
         } else {
           const synthetic = buildSyntheticCompression(raw);

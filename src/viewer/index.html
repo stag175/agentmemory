@@ -1251,7 +1251,7 @@
 
     var state = {
       activeTab: 'dashboard',
-      dashboard: { loaded: false, health: null, sessions: [], memories: [], graphStats: null, recentAudit: [], lessons: [], crystals: [] },
+      dashboard: { loaded: false, health: null, sessions: [], sessionsAvailable: false, memories: [], memoriesAvailable: false, graphStats: null, recentAudit: [], lessons: [], crystals: [] },
       graph: { loaded: false, nodes: [], edges: [], stats: null, filters: {}, selectedNode: null, queryError: null, truncated: false, totalNodes: 0, totalEdges: 0 },
       memories: { loaded: false, items: [], search: '', typeFilter: '' },
       timeline: { loaded: false, observations: [], sessionId: '', minImportance: 0, page: 0, pageSize: 50 },
@@ -1460,6 +1460,9 @@
         b.classList.toggle('active', isActive);
         if (isActive) {
           b.setAttribute('aria-current', 'page');
+          if (typeof b.scrollIntoView === 'function') {
+            b.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
+          }
         } else {
           b.removeAttribute('aria-current');
         }
@@ -1489,14 +1492,16 @@
       }
     }
 
+    var dashboardLoadGeneration = 0;
     async function loadDashboard() {
+      var generation = ++dashboardLoadGeneration;
       var el = document.getElementById('view-dashboard');
       el.innerHTML = '<div class="loading">Loading dashboard...</div>';
       try {
         var results = await Promise.all([
           apiGet('health'),
-          apiGet('sessions'),
-          apiGet('memories?latest=true&limit=500'),
+          apiGet('sessions?agentId=*'),
+          apiGet('memories?latest=true&limit=500&agentId=*'),
           apiGet('graph/stats'),
           apiGet('audit?limit=5'),
           apiGet('semantic'),
@@ -1505,9 +1510,14 @@
           apiGet('lessons'),
           apiGet('crystals')
         ]);
+        // A websocket event, timer, and manual refresh can overlap. Only the
+        // newest request may update the visible dashboard.
+        if (generation !== dashboardLoadGeneration) return;
         state.dashboard.health = results[0];
-        state.dashboard.sessions = (results[1] && results[1].sessions) || [];
-        state.dashboard.memories = (results[2] && results[2].memories) || [];
+        state.dashboard.sessionsAvailable = !!(results[1] && Array.isArray(results[1].sessions));
+        if (state.dashboard.sessionsAvailable) state.dashboard.sessions = results[1].sessions;
+        state.dashboard.memoriesAvailable = !!(results[2] && Array.isArray(results[2].memories));
+        if (state.dashboard.memoriesAvailable) state.dashboard.memories = results[2].memories;
         state.dashboard.graphStats = results[3];
         state.dashboard.recentAudit = (results[4] && results[4].entries) || [];
         state.dashboard.semantic = (results[5] && results[5].facts) || (results[5] && results[5].semantic) || [];
@@ -1538,6 +1548,34 @@
       }
     }
 
+    function computeContextReductionEstimate(totalObservations, retrievalBudget, sourceAvailable) {
+      if (!sourceAvailable) {
+        return { available: false, reason: 'session metrics unavailable' };
+      }
+      var observations = Number(totalObservations);
+      var budget = Number(retrievalBudget);
+      if (!Number.isFinite(observations) || observations <= 0) {
+        return { available: false, reason: 'needs captured observations' };
+      }
+      if (!Number.isFinite(budget) || budget <= 0) budget = 2000;
+
+      // Directional projection only. Eighty tokens per observation matches the
+      // long-standing CLI baseline; a retrieval can use at most its configured
+      // budget and never more than the estimated full history. Do not multiply
+      // the budget by session count: the comparison is one retrieval versus one
+      // full-history load, not one hypothetical injection per stored session.
+      var fullHistoryTokens = Math.round(observations * 80);
+      var retrievalTokens = Math.min(fullHistoryTokens, Math.round(budget));
+      var avoidedTokens = Math.max(0, fullHistoryTokens - retrievalTokens);
+      return {
+        available: true,
+        fullHistoryTokens: fullHistoryTokens,
+        retrievalTokens: retrievalTokens,
+        avoidedTokens: avoidedTokens,
+        percent: Math.round(avoidedTokens / fullHistoryTokens * 100)
+      };
+    }
+
     function renderDashboard() {
       var el = document.getElementById('view-dashboard');
       var d = state.dashboard;
@@ -1554,8 +1592,12 @@
       var workers = snap.workers || [];
 
       var html = '';
-      // First-run hero: empty dashboard = guided next step
-      if (d.sessions.length === 0) {
+      // First-run guidance is valid only after the sessions source succeeds.
+      // Never turn a 5xx/timeout into a false claim that no sessions exist.
+      var genuineFirstRun = d.sessionsAvailable && d.memoriesAvailable &&
+        d.sessions.length === 0 && d.memories.length === 0 &&
+        nodeCount === 0 && d.recentAudit.length === 0;
+      if (genuineFirstRun) {
         html += '<div class="card" style="margin-bottom:14px;padding:24px 28px;background:var(--bg-subtle);border-left:3px solid var(--accent);">' +
           '<div style="font-family:var(--font-ui);font-size:11px;letter-spacing:0.15em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:8px;">First run &rarr; magical moment in 10 seconds</div>' +
           '<div style="font-family:var(--font-display,Lora,Georgia,serif);font-size:22px;font-weight:700;color:var(--ink);margin-bottom:8px;">Seed sample data + prove semantic recall works</div>' +
@@ -1563,9 +1605,16 @@
           '<pre style="display:inline-block;margin:0;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-family:var(--font-mono);font-size:12px;color:var(--ink);">npx @agentmemory/agentmemory demo</pre>' +
           '<div style="margin-top:10px;"><a class="empty-link" href="https://github.com/rohitg00/agentmemory#quick-start" target="_blank" rel="noopener" style="font-size:12px;">Or: wire up your real agent &rarr;</a></div>' +
           '</div>';
+      } else if (!d.sessionsAvailable) {
+        html += '<div class="card" style="margin-bottom:14px;padding:18px 22px;background:var(--bg-subtle);border-left:3px solid var(--accent);">' +
+          '<div style="font-family:var(--font-ui);font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:6px;">Session data temporarily unavailable</div>' +
+          '<div style="font-size:13px;color:var(--ink-muted);line-height:1.5;">The viewer could not verify session history. Stored memories and other dashboard metrics remain visible; refresh to retry.</div>' +
+          '</div>';
       }
       html += '<div class="stats-grid">';
-      html += '<div class="stat-card"><div class="label">Sessions</div><div class="value">' + d.sessions.length + '</div><div class="sub">' + activeSessions + ' active</div></div>';
+      var sessionValue = d.sessionsAvailable || d.sessions.length > 0 ? String(d.sessions.length) : '&mdash;';
+      var sessionSub = d.sessionsAvailable ? activeSessions + ' active' : (d.sessions.length > 0 ? 'last known · unavailable' : 'unavailable');
+      html += '<div class="stat-card"><div class="label">Sessions</div><div class="value">' + sessionValue + '</div><div class="sub">' + sessionSub + '</div></div>';
       html += '<div class="stat-card"><div class="label">Memories</div><div class="value">' + d.memories.length + '</div><div class="sub">latest versions</div></div>';
       var lessonCount = (d.lessons || []).length;
       var crystalCount = (d.crystals || []).length;
@@ -1581,18 +1630,14 @@
         html += '<div class="stat-card"><div class="label">Circuit Breaker</div><div class="value"><span class="cb-indicator ' + cbClass + '">' + esc(cb.state) + '</span></div>';
         html += '<div class="sub">' + (cb.failures || 0) + ' failures</div></div>';
       }
-      var totalObs = d.sessions.reduce(function(a, s) { return a + (s.observationCount || 0); }, 0);
+      var totalObs = d.sessions.reduce(function(a, s) { return a + (Number(s.observationCount) || 0); }, 0);
       var tokenBudget = parseInt(new URLSearchParams(window.location.search).get('tokenBudget') || '2000', 10) || 2000;
-      var estFull = totalObs * 80;
-      var estInjected = d.sessions.length * tokenBudget;
-      var savings = estFull > 0 ? Math.round((1 - estInjected / Math.max(estFull, 1)) * 100) : 0;
-      if (savings < 0) savings = 0;
-      var tokensSaved = Math.max(0, estFull - estInjected);
-      // Rate: $0.30 per 1K tokens (mid-tier model baseline)
-      var costDollars = tokensSaved / 1000 * 0.3;
-      var costCents = Math.round(costDollars * 100);
-      var costStr = costCents >= 100 ? '$' + (costCents / 100).toFixed(2) : costCents + 'ct';
-      html += '<div class="stat-card"><div class="label">Token Savings</div><div class="value">' + savings + '%</div><div class="sub">~' + tokensSaved.toLocaleString() + ' tokens · ' + costStr + ' saved</div></div>';
+      var contextEstimate = computeContextReductionEstimate(totalObs, tokenBudget, d.sessionsAvailable);
+      var estimateValue = contextEstimate.available ? contextEstimate.percent + '%' : '&mdash;';
+      var estimateSub = contextEstimate.available
+        ? 'projection &middot; ' + contextEstimate.retrievalTokens.toLocaleString() + ' vs ~' + contextEstimate.fullHistoryTokens.toLocaleString() + ' tokens'
+        : contextEstimate.reason;
+      html += '<div class="stat-card" title="Projection for one bounded memory retrieval versus loading the full observed history. This is not measured host-model token usage or a billing estimate."><div class="label">Context Reduction (est.)</div><div class="value">' + estimateValue + '</div><div class="sub">' + estimateSub + '</div></div>';
       html += '</div>';
 
       if (snap.memory || snap.cpu) {
@@ -3289,10 +3334,18 @@
       var search = state.actions.search.toLowerCase();
       var statusFilter = state.actions.statusFilter;
       var frontierIds = new Set((state.actions.frontier || []).map(function(a) { return a.id; }));
+      // Older/imported actions may store tags as a scalar string. Normalize at
+      // the viewer boundary so one legacy row cannot strand the whole tab on
+      // "Loading actions..." while preserving the source-faithful payload.
+      function actionTags(a) {
+        if (a && Array.isArray(a.tags)) return a.tags;
+        if (a && typeof a.tags === 'string' && a.tags.trim()) return [a.tags.trim()];
+        return [];
+      }
 
       if (search) {
         items = items.filter(function(a) {
-          return (a.title + ' ' + (a.description || '') + ' ' + (a.tags || []).join(' ')).toLowerCase().indexOf(search) >= 0;
+          return (a.title + ' ' + (a.description || '') + ' ' + actionTags(a).join(' ')).toLowerCase().indexOf(search) >= 0;
         });
       }
       if (statusFilter) {
@@ -3331,7 +3384,7 @@
           html += '</td>';
           html += '<td><span class="badge ' + statusClass + '">' + esc(a.status) + '</span></td>';
           html += '<td style="text-align:center;font-weight:600;">' + (a.priority || '-') + '</td>';
-          html += '<td style="font-size:11px;color:var(--ink-muted);">' + (a.tags || []).map(esc).join(', ') + '</td>';
+          html += '<td style="font-size:11px;color:var(--ink-muted);">' + actionTags(a).map(esc).join(', ') + '</td>';
           html += '<td style="text-align:center;">' + (isFrontier ? '&#9889;' : '') + '</td>';
           html += '<td style="font-size:12px;color:var(--ink-muted);">' + shortTime(a.updatedAt) + '</td>';
           html += '</tr>';

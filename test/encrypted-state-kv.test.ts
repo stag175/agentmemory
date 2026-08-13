@@ -141,6 +141,20 @@ describe("encrypted StateKV adapter", () => {
     await expect(kv.get("mem:sessions", value.id)).resolves.toEqual(value);
   });
 
+  it("treats iii's undefined missing-key response as an encrypted-scope miss", async () => {
+    const base = memoryKV();
+    const undefinedOnMiss: StateKVLike = {
+      ...base,
+      get: async <T>(scope: string, key: string): Promise<T | null> =>
+        base.raw(scope, key) === undefined
+          ? (undefined as unknown as null)
+          : base.get<T>(scope, key),
+    };
+    const kv = encryptedKV(undefinedOnMiss);
+
+    await expect(kv.get("mem:memories", "missing")).resolves.toBeNull();
+  });
+
   it("encrypts persisted search index shards by default", async () => {
     const base = memoryKV();
     const kv = createEncryptedStateKV(base, "correct horse battery", {

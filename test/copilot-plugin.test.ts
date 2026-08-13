@@ -363,6 +363,25 @@ describe("Copilot hook scripts", () => {
     });
   });
 
+  it("prompt-submit redacts assignment-style secrets before REST dispatch", async () => {
+    const result = await runHook("scripts/prompt-submit.mjs", {
+      sessionId: "copilot-session",
+      cwd: "C:\\repo",
+      userPrompt:
+        "keep this ordinary context, password=hook_canary_value, token=hook_token_value",
+    });
+
+    const request = requestByPath(result, "/agentmemory/observe");
+    expect(request.body).toMatchObject({
+      data: {
+        prompt:
+          "keep this ordinary context, password=[redacted], token=[redacted]",
+      },
+    });
+    expect(JSON.stringify(request.body)).not.toContain("hook_canary_value");
+    expect(JSON.stringify(request.body)).not.toContain("hook_token_value");
+  });
+
   it("prompt-submit resolves lineage project from ancestor .git marker", async () => {
     const repo = mkdtempSync(join(tmpdir(), "amem-copilot-git-"));
     const nested = join(repo, "src", "hooks");

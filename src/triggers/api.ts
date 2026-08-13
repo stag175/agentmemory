@@ -14,6 +14,7 @@ import { renderViewerDocument } from "../viewer/document.js";
 import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
+import { WORK_QUEUES } from "../backpressure.js";
 import { safeRecordAgentEvent } from "../functions/agent-events.js";
 import { registerRulesResolverFunction } from "../functions/rules-resolver.js";
 import {
@@ -153,6 +154,13 @@ function parseOptionalBoolean(value: unknown): boolean | undefined | null {
     if (normalized === "true" || normalized === "1" || normalized === "yes") return true;
     if (normalized === "false" || normalized === "0" || normalized === "no") return false;
   }
+  return null;
+}
+
+function parseQueryBoolean(value: unknown): boolean | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (value === true || value === "true") return true;
+  if (value === false || value === "false") return false;
   return null;
 }
 
@@ -1254,6 +1262,18 @@ export function registerApiTriggers(
         };
       }
       const existingSession = await kv.get<Session>(KV.sessions, sessionId).catch(() => null);
+      if (!existingSession || existingSession.id !== sessionId) {
+        return {
+          status_code: 404,
+          body: { error: "session not found" },
+        };
+      }
+      if (existingSession.status === "completed") {
+        return {
+          status_code: 200,
+          body: { success: true, alreadyEnded: true },
+        };
+      }
       const endedAt = new Date().toISOString();
       await kv.update(KV.sessions, sessionId, [
         { type: "set", path: "endedAt", value: endedAt },
@@ -1276,7 +1296,7 @@ export function registerApiTriggers(
         sdk.trigger({
           function_id: "event::session::stopped",
           payload: { sessionId },
-          action: TriggerAction.Void(),
+          action: TriggerAction.Enqueue({ queue: WORK_QUEUES.sessionLifecycle }),
         });
       } catch (err) {
         logger.warn("event::session::stopped trigger failed", {
@@ -1464,17 +1484,33 @@ export function registerApiTriggers(
         ? undefined
         : explicitAgentId ??
           (isAgentScopeIsolated() ? getAgentId() : undefined);
+      // Legacy or interrupted session-end calls may have left partial rows.
+      // Never let malformed records poison the administrative list surface.
+      const validSessions = sessions.filter(
+        (session) =>
+          session &&
+          typeof session.id === "string" &&
+          session.id.trim().length > 0 &&
+          typeof session.project === "string" &&
+          typeof session.startedAt === "string",
+      );
       const filtered = filterAgentId
-        ? sessions.filter((s) => s.agentId === filterAgentId)
-        : sessions;
-      const summaries = await Promise.all(
-        filtered.map((s) =>
-          kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
-        ),
+        ? validSessions.filter((s) => s.agentId === filterAgentId)
+        : validSessions;
+      // Fetch summaries in one encrypted-scope list rather than one state::get
+      // invocation per session. The N+1 path serially triggered expensive
+      // envelope decryptions/engine calls and could breach the viewer proxy's
+      // 10-second deadline, making a populated store look like a first run.
+      const summaries = await kv.list<SessionSummary>(KV.summaries).catch(() => []);
+      const summaryBySession = new Map(
+        summaries
+          .filter((summary) => summary && summary.sessionId)
+          .map((summary) => [summary.sessionId, summary]),
       );
-      const withSummary = filtered.map((s, i) =>
-        summaries[i] ? { ...s, summary: summaries[i] } : s,
-      );
+      const withSummary = filtered.map((session) => {
+        const summary = summaryBySession.get(session.id);
+        return summary ? { ...session, summary } : session;
+      });
       return { status_code: 200, body: { sessions: withSummary } };
     },
   );
@@ -2274,11 +2310,18 @@ export function registerApiTriggers(
         req.query_params ?? {},
         AUDIT_CHAIN_FIELDS,
       );
+      const includeLinks = parseQueryBoolean(payload.includeLinks);
+      if (includeLinks === null) {
+        return { status_code: 400, body: { error: "includeLinks must be a boolean" } };
+      }
+      if (includeLinks !== undefined) payload.includeLinks = includeLinks;
       const result = await sdk.trigger({
         function_id: "mem::audit-chain",
         payload,
       });
-      return { status_code: 200, body: result };
+      return isRecord(result) && result.success === false
+        ? { status_code: 400, body: result }
+        : { status_code: 200, body: result };
     },
   );
   sdk.registerTrigger({
@@ -4650,7 +4693,20 @@ export function registerApiTriggers(
     const denied = checkAuth(req, effectiveSecret);
     if (denied) return denied;
     const body = req.body as Record<string, unknown>;
-    const result = await sdk.trigger({ function_id: "mem::diagnose", payload: body || {} });
+    if (
+      body?.categories !== undefined &&
+      (!Array.isArray(body.categories) ||
+        body.categories.some((category) => typeof category !== "string"))
+    ) {
+      return {
+        status_code: 400,
+        body: { error: "categories must be an array of strings" },
+      };
+    }
+    const result = await sdk.trigger({
+      function_id: "mem::diagnose",
+      payload: body || {},
+    });
     return { status_code: 200, body: result };
   });
   sdk.registerTrigger({ type: "http", function_id: "api::diagnose", config: { api_path: "/agentmemory/diagnostics", http_method: "POST" } });

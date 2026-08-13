@@ -80,7 +80,7 @@ describe("fetchWithTimeout", () => {
     ).rejects.toThrow();
   });
 
-  it("falls back to 60 000 ms when AGENTMEMORY_LLM_TIMEOUT_MS is not set (type check only)", () => {
+  it("falls back to 1 800 000 ms when AGENTMEMORY_LLM_TIMEOUT_MS is not set (type check only)", () => {
     delete process.env["AGENTMEMORY_LLM_TIMEOUT_MS"];
     vi.restoreAllMocks();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -263,17 +263,17 @@ describe("OpenAIProvider timeout env precedence (#446)", () => {
     );
   });
 
-  it("falls back to the 60 000 ms default when neither is set", () => {
-    // We don't actually wait 60s — the provider stores timeoutMs at
+  it("falls back to the 1 800 000 ms default when neither is set", () => {
+    // We don't actually wait 30m — the provider stores timeoutMs at
     // construction. Construct, then assert the bound via the error
     // message after the hang aborts at a tiny pre-set value.
     const provider = new OpenAIProvider("test-key", "gpt-4o-mini", 1024);
     // Access the resolved timeout via the constructed field name. The
     // class keeps `timeoutMs` private; reaching in via the index
     // access keeps the test on the public observed behaviour: the ms
-    // value reported in the timeout error message must be 60000.
+    // value reported in the timeout error message must be 1800000.
     const ms = (provider as unknown as { timeoutMs: number }).timeoutMs;
-    expect(ms).toBe(60_000);
+    expect(ms).toBe(1_800_000);
   });
 
   it("rejects malformed env values like '30ms' or '1_000' (CodeRabbit catch)", () => {
@@ -288,7 +288,7 @@ describe("OpenAIProvider timeout env precedence (#446)", () => {
       process.env["OPENAI_TIMEOUT_MS"] = bad;
       const provider = new OpenAIProvider("test-key", "gpt-4o-mini", 1024);
       const ms = (provider as unknown as { timeoutMs: number }).timeoutMs;
-      expect(ms).toBe(60_000);
+      expect(ms).toBe(1_800_000);
       delete process.env["OPENAI_TIMEOUT_MS"];
     }
   });
@@ -361,4 +361,3 @@ describe("OpenAIProvider thinking-model fallback (#627)", () => {
     expect(out).toBe("real content");
   });
 });
-
